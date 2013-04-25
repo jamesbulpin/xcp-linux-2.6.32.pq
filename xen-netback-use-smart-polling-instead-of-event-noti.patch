@@ -1,0 +1,126 @@
+From bb96afc3c66ca2df94a7032806059a947dee0a20 Mon Sep 17 00:00:00 2001
+From: Dongxiao Xu <dongxiao.xu@intel.com>
+Date: Wed, 30 Sep 2009 14:37:41 +0800
+Subject: [PATCH] xen/netback: use smart polling instead of event notification
+
+Netback will not notify netfront until it finds that the netfront has
+stopped polling.
+
+Netback will set a flag in xenstore to indicate whether netback
+supports the smart polling feature.  If there is only one side
+supporting it, the communication mechanism will fall back to default,
+and the new feature will not be used. The feature is enabled only
+when both sides have the flag set in xenstore.
+
+Signed-off-by: Dongxiao Xu <dongxiao.xu@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/common.h    |    2 ++
+ drivers/xen/netback/netback.c   |   26 ++++++++++++++++++++++++--
+ drivers/xen/netback/xenbus.c    |   16 ++++++++++++++++
+ include/xen/interface/io/ring.h |    3 ++-
+ 4 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index 9056be0..b15a7e1 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -76,6 +76,8 @@ struct xen_netif {
+ 	/* Set of features that can be turned on in dev->features. */
+ 	int features;
+ 
++	int smart_poll;
++
+ 	/* Internal feature information. */
+ 	u8 can_queue:1;	/* can queue packets for receiver? */
+ 
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index d7d738e..2331f63 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -640,7 +640,8 @@ static void net_rx_action(unsigned long unused)
+ 
+ 		RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&netif->rx, ret);
+ 		irq = netif->irq;
+-		if (ret && !rx_notify[irq]) {
++		if (ret && !rx_notify[irq] &&
++				(netif->smart_poll != 1)) {
+ 			rx_notify[irq] = 1;
+ 			notify_list[notify_nr++] = irq;
+ 		}
+@@ -650,6 +651,17 @@ static void net_rx_action(unsigned long unused)
+ 		    !netbk_queue_full(netif))
+ 			netif_wake_queue(netif->dev);
+ 
++		/*
++		 * netfront_smartpoll_active indicates whether
++		 * netfront timer is active.
++		 */
++		if ((netif->smart_poll == 1)) {
++			if (!(netif->rx.sring->netfront_smartpoll_active)) {
++				notify_remote_via_irq(irq);
++				netif->rx.sring->netfront_smartpoll_active = 1;
++			}
++		}
++
+ 		netif_put(netif);
+ 		dev_kfree_skb(skb);
+ 		npo.meta_cons += nr_frags + 1;
+@@ -1471,7 +1483,17 @@ static void make_tx_response(struct xen_netif *netif,
+ 
+ 	netif->tx.rsp_prod_pvt = ++i;
+ 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&netif->tx, notify);
+-	if (notify)
++
++	/*
++	 * netfront_smartpoll_active indicates whether netfront timer
++	 * is active.
++	 */
++	if ((netif->smart_poll == 1)) {
++		if (!(netif->rx.sring->netfront_smartpoll_active)) {
++			notify_remote_via_irq(netif->irq);
++			netif->rx.sring->netfront_smartpoll_active = 1;
++		}
++	} else if (notify)
+ 		notify_remote_via_irq(netif->irq);
+ }
+ 
+diff --git a/drivers/xen/netback/xenbus.c b/drivers/xen/netback/xenbus.c
+index a492288..3d8ed9a 100644
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -115,6 +115,14 @@ static int netback_probe(struct xenbus_device *dev,
+ 			goto abort_transaction;
+ 		}
+ 
++		/* We support data smart poll mechanism */
++		err = xenbus_printf(xbt, dev->nodename,
++				    "feature-smart-poll", "%d", 1);
++		if (err) {
++			message = "writing feature-smart-poll";
++			goto abort_transaction;
++		}
++
+ 		err = xenbus_transaction_end(xbt, 0);
+ 	} while (err == -EAGAIN);
+ 
+@@ -415,7 +423,15 @@ static int connect_rings(struct backend_info *be)
+ 		be->netif->dev->features &= ~NETIF_F_IP_CSUM;
+ 	}
+ 
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-smart-poll",
++			 "%d", &val) < 0)
++		val = 0;
++	if (val)
++		be->netif->smart_poll = 1;
++	else
++		be->netif->smart_poll = 0;
++
+ 	/* Map the shared frame, irq etc. */
+ 	err = netif_map(be->netif, tx_ring_ref, rx_ring_ref, evtchn);
+ 	if (err) {
+ 									\
+
+-- 
+1.5.6.5
+

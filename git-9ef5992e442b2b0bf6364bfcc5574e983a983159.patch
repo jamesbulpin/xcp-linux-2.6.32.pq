@@ -1,0 +1,236 @@
+--- a/fs/cifs/cifsencrypt.c	Tue Feb 21 19:11:50 2012 +0000
++++ b/fs/cifs/cifsencrypt.c	Thu Feb 23 14:35:07 2012 +0000
+@@ -36,7 +36,6 @@
+ 	sequence number before this function is called */
+ 
+ extern void mdfour(unsigned char *out, unsigned char *in, int n);
+-extern void E_md4hash(const unsigned char *passwd, unsigned char *p16);
+ extern void SMBencrypt(unsigned char *passwd, const unsigned char *c8,
+ 		       unsigned char *p24);
+ 
+@@ -209,13 +208,13 @@ int cifs_verify_signature(struct smb_hdr
+ 
+ /* We fill in key by putting in 40 byte array which was allocated by caller */
+ int cifs_calculate_mac_key(struct mac_key *key, const char *rn,
+-			   const char *password)
++			   const char *password, const struct nls_table *codepage)
+ {
+ 	char temp_key[16];
+ 	if ((key == NULL) || (rn == NULL))
+ 		return -EINVAL;
+ 
+-	E_md4hash(password, temp_key);
++	E_md4hash(password, temp_key, codepage);
+ 	mdfour(key->data.ntlm, temp_key, 16);
+ 	memcpy(key->data.ntlm+16, rn, CIFS_SESS_KEY_SIZE);
+ 	key->len = 40;
+@@ -234,7 +233,7 @@ int CalcNTLMv2_partial_mac_key(struct ci
+ 	if (ses == NULL)
+ 		return -EINVAL;
+ 
+-	E_md4hash(ses->password, temp_hash);
++	E_md4hash(ses->password, temp_hash, nls_info);
+ 
+ 	hmac_md5_init_limK_to_64(temp_hash, 16, &ctx);
+ 	user_name_len = strlen(ses->userName);
+@@ -334,7 +333,7 @@ static int calc_ntlmv2_hash(struct cifsS
+ 		return -ENOMEM;
+ 
+ 	/* calculate md4 hash of password */
+-	E_md4hash(ses->password, nt_hash);
++	E_md4hash(ses->password, nt_hash, nls_cp);
+ 
+ 	/* convert Domainname to unicode and uppercase */
+ 	hmac_md5_init_limK_to_64(nt_hash, 16, pctxt);
+--- b/fs/cifs/cifsproto.h	Thu Feb 23 14:35:07 2012 +0000
++++ b/fs/cifs/cifsproto.h	Thu Feb 23 14:46:23 2012 +0000
+@@ -342,10 +342,13 @@
+ 				 const struct mac_key *mac_key,
+ 				__u32 expected_sequence_number);
+ extern int cifs_calculate_mac_key(struct mac_key *key, const char *rn,
+-				 const char *pass);
++				  const char *pass,
++				  const struct nls_table *codepage);
+ extern int CalcNTLMv2_partial_mac_key(struct cifsSesInfo *,
+ 			const struct nls_table *);
+ extern void CalcNTLMv2_response(const struct cifsSesInfo *, char *);
++extern void SMBNTencrypt(unsigned char *passwd, unsigned char *c8,
++			unsigned char *p24, const struct nls_table *nls_cp);
+ extern void setup_ntlmv2_rsp(struct cifsSesInfo *, char *,
+ 			     const struct nls_table *);
+ #ifdef CONFIG_CIFS_WEAK_PW_HASH
+@@ -392,2 +395,4 @@
+ extern void cifs_autodisable_serverino(struct cifs_sb_info *cifs_sb);
++extern void E_md4hash(const unsigned char *passwd, unsigned char *p16,
++		     const struct nls_table *codepage);
+ #endif			/* _CIFSPROTO_H */
+--- b/fs/cifs/connect.c	Thu Feb 23 14:35:07 2012 +0000
++++ b/fs/cifs/connect.c	Thu Feb 23 14:46:23 2012 +0000
+@@ -52,9 +52,6 @@
+ #define RFC1001_PORT 139
+ #define TCPSESS_NOSHARING 1
+ 
+-extern void SMBNTencrypt(unsigned char *passwd, unsigned char *c8,
+-			 unsigned char *p24);
+-
+ extern mempool_t *cifs_req_poolp;
+ 
+ struct smb_vol {
+@@ -2719,7 +2716,7 @@
+ 		else
+ #endif /* CIFS_WEAK_PW_HASH */
+ 		SMBNTencrypt(tcon->password, ses->server->cryptKey,
+-			     bcc_ptr);
++			     bcc_ptr, nls_codepage);
+ 
+ 		bcc_ptr += CIFS_SESS_KEY_SIZE;
+ 		if (ses->capabilities & CAP_UNICODE) {
+diff -u b/fs/cifs/sess.c b/fs/cifs/sess.c
+--- b/fs/cifs/sess.c	Thu Feb 23 14:35:07 2012 +0000
++++ b/fs/cifs/sess.c	Thu Feb 23 14:48:09 2012 +0000
+@@ -31,9 +31,6 @@
+ #include <linux/utsname.h>
+ #include "cifs_spnego.h"
+ 
+-extern void SMBNTencrypt(unsigned char *passwd, unsigned char *c8,
+-			 unsigned char *p24);
+-
+ /* Checks if this is the first smb session to be reconnected after
+    the socket has been reestablished (so we know whether to use vc 0).
+    Called while holding the cifs_tcp_ses_lock, so do not block */
+@@ -476,10 +473,10 @@
+ 	sec_blob->LmChallengeResponse.MaximumLength = 0;
+ 
+ 	/* calculate session key,  BB what about adding similar ntlmv2 path? */
+-	SMBNTencrypt(ses->password, ses->server->cryptKey, ntlm_session_key);
++	SMBNTencrypt(ses->password, ses->server->cryptKey, ntlm_session_key, nls_cp);
+ 	if (first)
+ 		cifs_calculate_mac_key(&ses->server->mac_signing_key,
+-				       ntlm_session_key, ses->password);
++				       ntlm_session_key, ses->password, nls_cp);
+ 
+ 	memcpy(tmp, ntlm_session_key, CIFS_SESS_KEY_SIZE);
+ 	sec_blob->NtChallengeResponse.BufferOffset = cpu_to_le32(tmp - pbuffer);
+@@ -679,12 +676,12 @@
+ 
+ 		/* calculate session key */
+ 		SMBNTencrypt(ses->password, ses->server->cryptKey,
+-			     ntlm_session_key);
++			     ntlm_session_key, nls_cp);
+ 
+ 		if (first_time) /* should this be moved into common code
+ 				  with similar ntlmv2 path? */
+ 			cifs_calculate_mac_key(&ses->server->mac_signing_key,
+-				ntlm_session_key, ses->password);
++				ntlm_session_key, ses->password, nls_cp);
+ 		/* copy session key */
+ 
+ 		memcpy(bcc_ptr, (char *)ntlm_session_key, CIFS_SESS_KEY_SIZE);
+--- b/fs/cifs/smbencrypt.c	Thu Feb 23 14:35:07 2012 +0000
++++ b/fs/cifs/smbencrypt.c	Thu Feb 23 14:46:23 2012 +0000
+@@ -51,10 +51,8 @@
+ 
+ void SMBencrypt(unsigned char *passwd, const unsigned char *c8,
+ 		unsigned char *p24);
+-void E_md4hash(const unsigned char *passwd, unsigned char *p16);
+ static void SMBOWFencrypt(unsigned char passwd[16], const unsigned char *c8,
+ 		   unsigned char p24[24]);
+-void SMBNTencrypt(unsigned char *passwd, unsigned char *c8, unsigned char *p24);
+ 
+ /*
+    This implements the X/Open SMB password encryption
+@@ -79,67 +77,27 @@
+ 	memset(p21, 0, 21);
+ }
+ 
+-/* Routines for Windows NT MD4 Hash functions. */
+-static int
+-_my_wcslen(__u16 *str)
+-{
+-	int len = 0;
+-	while (*str++ != 0)
+-		len++;
+-	return len;
+-}
+-
+-/*
+- * Convert a string into an NT UNICODE string.
+- * Note that regardless of processor type
+- * this must be in intel (little-endian)
+- * format.
+- */
+-
+-static int
+-_my_mbstowcs(__u16 *dst, const unsigned char *src, int len)
+-{	/* BB not a very good conversion routine - change/fix */
+-	int i;
+-	__u16 val;
+-
+-	for (i = 0; i < len; i++) {
+-		val = *src;
+-		SSVAL(dst, 0, val);
+-		dst++;
+-		src++;
+-		if (val == 0)
+-			break;
+-	}
+-	return i;
+-}
+-
+ /*
+  * Creates the MD4 Hash of the users password in NT UNICODE.
+  */
+ 
+ void
+-E_md4hash(const unsigned char *passwd, unsigned char *p16)
++E_md4hash(const unsigned char *passwd, unsigned char *p16,
++	  const struct nls_table *codepage)
+ {
+ 	int len;
+ 	__u16 wpwd[129];
+ 
+ 	/* Password cannot be longer than 128 characters */
+-	if (passwd) {
+-		len = strlen((char *) passwd);
+-		if (len > 128)
+-			len = 128;
+-
+-		/* Password must be converted to NT unicode */
+-		_my_mbstowcs(wpwd, passwd, len);
+-	} else
+-		len = 0;
+-
+-	wpwd[len] = 0;	/* Ensure string is null terminated */
+-	/* Calculate length in bytes */
+-	len = _my_wcslen(wpwd) * sizeof(__u16);
++	if (passwd) /* Password must be converted to NT unicode */
++		len = cifs_strtoUCS(wpwd, passwd, 128, codepage);
++	else {
++ 		len = 0;
++		*wpwd = 0; /* Ensure string is null terminated */
++	}
+ 
+-	mdfour(p16, (unsigned char *) wpwd, len);
+-	memset(wpwd, 0, 129 * 2);
++	mdfour(p16, (unsigned char *) wpwd, len * sizeof(__u16));
++	memset(wpwd, 0, 129 * sizeof(__u16));
+ }
+ 
+ #if 0 /* currently unused */
+@@ -243,13 +201,14 @@
+ /* Does the NT MD4 hash then des encryption. */
+ 
+ void
+-SMBNTencrypt(unsigned char *passwd, unsigned char *c8, unsigned char *p24)
++SMBNTencrypt(unsigned char *passwd, unsigned char *c8, unsigned char *p24,
++	     const struct nls_table *nls_cp)
+ {
+ 	unsigned char p21[21];
+ 
+ 	memset(p21, '\0', 21);
+ 
+-	E_md4hash(passwd, p21);
++	E_md4hash(passwd, p21, nls_cp);
+ 	SMBOWFencrypt(p21, c8, p24);
+ }
+ 

@@ -1,0 +1,81 @@
+# HG changeset patch
+# Parent 1818dad05730945b174ca66b39797e4b3e7bfff9
+
+diff -r 1818dad05730 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Thu Aug 02 15:03:20 2012 +0100
++++ b/drivers/xen/netback/interface.c	Wed Aug 08 12:10:06 2012 +0100
+@@ -265,7 +265,7 @@ static int netbk_start_xmit(struct sk_bu
+ 
+ drop:
+ 	netif->stats.tx_dropped++;
+-	dev_kfree_skb(skb);
++	dev_kfree_skb_any(skb);
+ 	return NETDEV_TX_OK;
+ }
+ 
+diff -r 1818dad05730 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Thu Aug 02 15:03:20 2012 +0100
++++ b/drivers/xen/netback/tx.c	Wed Aug 08 12:10:06 2012 +0100
+@@ -235,7 +235,7 @@ void netbk_p0_start_xmit(struct xen_neti
+ 		/* Copy only the header fields we use in this driver. */
+ 		nskb->dev = skb->dev;
+ 		nskb->ip_summed = skb->ip_summed;
+-		dev_kfree_skb(skb);
++		dev_kfree_skb_any(skb);
+ 		skb = nskb;
+ 	}
+ 
+@@ -258,7 +258,7 @@ void netbk_p0_start_xmit(struct xen_neti
+ 
+  drop:
+ 	netif->stats.tx_dropped++;
+-	dev_kfree_skb(skb);
++	dev_kfree_skb_any(skb);
+ }
+ 
+ int netbk_p0_setup(struct xen_netif *netif)
+@@ -465,7 +465,7 @@ static void expire_tag(unsigned long dat
+ 	}
+ 
+ 	BUG_ON(tag->skb == NULL);
+-	dev_kfree_skb(tag->skb);
++	dev_kfree_skb_irq(tag->skb);
+ 	tag->skb = NULL;
+ 
+ 	spin_unlock_irq(&tag->lock);
+@@ -502,7 +502,7 @@ static void ungrant_tag(struct xen_netif
+ 	}
+ 
+ 	if (tag->skb != NULL) {
+-		dev_kfree_skb(tag->skb);
++		dev_kfree_skb_irq(tag->skb);
+ 		tag->skb = NULL;
+ 	} else {
+ 		__free_page(tag->page);
+@@ -634,7 +634,7 @@ void netbk_p1_start_xmit(struct xen_neti
+ 		/* Copy only the header fields we use in this driver. */
+ 		nskb->dev = skb->dev;
+ 		nskb->ip_summed = skb->ip_summed;
+-		dev_kfree_skb(skb);
++		dev_kfree_skb_irq(skb);
+ 		skb = nskb;
+ 	}
+ 
+@@ -707,7 +707,7 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+ 	netif->stats.tx_bytes += skb->len;
+ 	netif->stats.tx_packets++;
+-	dev_kfree_skb(skb); /* Drop the implicit reference */
++	dev_kfree_skb_irq(skb); /* Drop the implicit reference */
+ 
+ 	xmit_complete(netif);
+ 	refill_gref(netif);
+@@ -721,7 +721,7 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+  drop:
+ 	netif->stats.tx_dropped++;
+-	dev_kfree_skb(skb);
++	dev_kfree_skb_irq(skb);
+ 
+ 	spin_unlock_irq(&p1->lock);
+ }

@@ -1,0 +1,22 @@
+# HG changeset patch
+# Parent bdf65b7e0507f7bd3cf0e5c62e37a52a4ce3c07d
+
+diff -r bdf65b7e0507 drivers/xen/core/machine_kexec.c
+--- a/drivers/xen/core/machine_kexec.c
++++ b/drivers/xen/core/machine_kexec.c
+@@ -151,6 +151,15 @@ void __init xen_machine_kexec_setup_reso
+ 					 get_order(sizeof(vmcoreinfo_note)),
+ 					 BITS_PER_LONG))
+ 		goto err;
++
++	/* CA-77347 - vmcoreinfo_note lives in dom0's bss.  Xen has just gone
++	 * and remapped the page(s) to guarentee that it lives under 4GiB in
++	 * machine memory.  As a result, the page(s) now contain whatever junk
++	 * was in the frames Xen has given us, which may not be 0s.  Therefore,
++	 * explicitly re-0 them so if Xen crashes, the kdump kernel doesn't try
++	 * to interpret whatever junk was there as a valid crash note.
++	 */
++	memset((char*)&vmcoreinfo_note, 0, sizeof(vmcoreinfo_note));
+ #endif
+ 
+ 	return;

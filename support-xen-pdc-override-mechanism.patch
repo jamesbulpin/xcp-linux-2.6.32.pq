@@ -1,0 +1,57 @@
+# HG changeset patch
+# Parent 446d571d977aee7a1d2be086455c83f7c5e358e7
+
+diff -r 446d571d977a drivers/acpi/processor_core.c
+--- a/drivers/acpi/processor_core.c
++++ b/drivers/acpi/processor_core.c
+@@ -288,18 +288,31 @@ static int acpi_processor_set_pdc(struct
+ 
+ 	if (!pdc_in)
+ 		return status;
++#ifndef CONFIG_XEN
+ 	if (idle_nomwait) {
+ 		/*
+ 		 * If mwait is disabled for CPU C-states, the C2C3_FFH access
+ 		 * mode will be disabled in the parameter of _PDC object.
+ 		 * Of course C1_FFH access mode will also be disabled.
+ 		 */
++#else
++    {
++        struct xen_platform_op op;
++#endif
+ 		union acpi_object *obj;
+ 		u32 *buffer = NULL;
+ 
+ 		obj = pdc_in->pointer;
+ 		buffer = (u32 *)(obj->buffer.pointer);
++#ifndef CONFIG_XEN
+ 		buffer[2] &= ~(ACPI_PDC_C_C2C3_FFH | ACPI_PDC_C_C1_FFH);
++#else
++        op.cmd = XENPF_set_processor_pminfo;
++        op.u.set_pminfo.id = -1;
++        op.u.set_pminfo.type = XEN_PM_PDC;
++        set_xen_guest_handle(op.u.set_pminfo.u.pdc, buffer);
++        VOID(HYPERVISOR_platform_op(&op));
++#endif
+ 
+ 	}
+ 	status = acpi_evaluate_object(pr->handle, "_PDC", pdc_in, NULL);
+diff -r 446d571d977a include/xen/interface/platform.h
+--- a/include/xen/interface/platform.h
++++ b/include/xen/interface/platform.h
+@@ -210,6 +210,7 @@ DEFINE_XEN_GUEST_HANDLE(xenpf_getidletim
+ #define XEN_PM_CX   0
+ #define XEN_PM_PX   1
+ #define XEN_PM_TX   2
++#define XEN_PM_PDC   3
+ 
+ /* Px sub info type */
+ #define XEN_PX_PCT   1
+@@ -307,6 +308,7 @@ struct xenpf_set_processor_pminfo {
+     union {
+         struct xen_processor_power          power;/* Cx: _CST/_CSD */
+         struct xen_processor_performance    perf; /* Px: _PPC/_PCT/_PSS/_PSD */
++        XEN_GUEST_HANDLE(uint32)            pdc; /* _PDC */
+     } u;
+ };
+ typedef struct xenpf_set_processor_pminfo xenpf_set_processor_pminfo_t;

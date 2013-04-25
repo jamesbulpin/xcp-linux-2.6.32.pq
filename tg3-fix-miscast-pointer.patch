@@ -1,0 +1,14 @@
+# HG changeset patch
+# Parent f4bf81a7ff2057532c3aaa76428a6643b9786466
+diff -r f4bf81a7ff20 -r a3224f297069 drivers/net/tg3/tg3_compat2.h
+--- a/drivers/net/tg3/tg3_compat2.h
++++ b/drivers/net/tg3/tg3_compat2.h
+@@ -108,7 +108,7 @@ static inline void tg3_5780_class_intx_w
+ #endif
+ 
+ #ifndef BCM_HAS_VLAN_HWACCEL_PUT_TAG
+-#define TG3_TO_INT(Y)       ((int)((unsigned long long)(Y) & (SMP_CACHE_BYTES - 1)))
++#define TG3_TO_INT(Y)       ((int)((unsigned long)(Y) & (SMP_CACHE_BYTES - 1)))
+ #define TG3_COMPAT_VLAN_ALLOC_LEN		(SMP_CACHE_BYTES + VLAN_HLEN)
+ #define TG3_COMPAT_VLAN_RESERVE(addr)	(SKB_DATA_ALIGN((addr) + VLAN_HLEN) - (addr))
+ #else

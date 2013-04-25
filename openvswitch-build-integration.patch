@@ -1,0 +1,1467 @@
+* * *
+* * *
+* * *
+* * *
+
+<<<<<<< variant A
+* * *
+
+diff -r de8f476761e4 include/linux/flex_array.h
+--- a/include/linux/flex_array.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/flex_array.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -21,6 +21,8 @@ struct flex_array {
+ 		struct {
+ 			int element_size;
+ 			int total_nr_elements;
++			int elems_per_part;
++			u32 reciprocal_elems;
+ 			struct flex_array_part *parts[];
+ 		};
+ 		/*
+@@ -70,4 +72,9 @@ int flex_array_clear(struct flex_array *
+ void *flex_array_get(struct flex_array *fa, unsigned int element_nr);
+ int flex_array_shrink(struct flex_array *fa);
+ 
+-#endif /* _FLEX_ARRAY_H */
++#define flex_array_put_ptr(fa, nr, src, gfp) \
++	flex_array_put(fa, nr, (void *)&(src), gfp)
++
++void *flex_array_get_ptr(struct flex_array *fa, unsigned int element_nr);
++
++#endif
+diff -r de8f476761e4 include/linux/genetlink.h
+--- a/include/linux/genetlink.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/genetlink.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -80,4 +80,13 @@ enum {
+ 
+ #define CTRL_ATTR_MCAST_GRP_MAX (__CTRL_ATTR_MCAST_GRP_MAX - 1)
+ 
++/*#ifdef CONFIG_PROVE_LOCKING*/
++/* No version of the kernel has this function, but our locking scheme depends
++ * on genl_mutex so for clarity we use it where appropriate. */
++static inline int lockdep_genl_is_held(void)
++{
++	return 1;
++}
++/*#endif*/
++
+ #endif	/* __LINUX_GENERIC_NETLINK_H */
+diff -r de8f476761e4 include/linux/if_vlan.h
+--- a/include/linux/if_vlan.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/if_vlan.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -367,4 +367,8 @@ struct vlan_ioctl_args {
+ #define VLAN_TAG_PRESENT        VLAN_CFI_MASK
+ #endif
+ 
++/* This function is not exported from kernel. OVS Upstreaming patch will
++ * fix that. */
++inline void vlan_set_encap_proto(struct sk_buff *skb, struct vlan_hdr *vhdr);
++
+ #endif /* !(_LINUX_IF_VLAN_H_) */
+diff -r de8f476761e4 include/linux/kernel.h
+--- a/include/linux/kernel.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/kernel.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -742,4 +742,10 @@ struct sysinfo {
+ # define REBUILD_DUE_TO_FTRACE_MCOUNT_RECORD
+ #endif
+ 
++#ifndef BUILD_BUG_ON_NOT_POWER_OF_2
++/* Force a compilation error if a constant expression is not a power of 2 */
++#define BUILD_BUG_ON_NOT_POWER_OF_2(n)                  \
++        BUILD_BUG_ON((n) == 0 || (((n) & ((n) - 1)) != 0))
+ #endif
++
++#endif
+diff -r de8f476761e4 include/linux/netdevice.h
+--- a/include/linux/netdevice.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/netdevice.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -2044,6 +2044,19 @@ static inline u32 dev_ethtool_get_flags(
+ 	return dev->ethtool_ops->get_flags(dev);
+ }
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
++static inline struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
++{
++        struct net_device *dev;
++
++	read_lock(&dev_base_lock);
++	dev = __dev_get_by_index(net, ifindex);
++	read_unlock(&dev_base_lock);
++
++	return dev;
++}
++#endif
++
+ #define MODULE_ALIAS_NETDEV(device) \
+ 	MODULE_ALIAS("netdev-" device)
+ 
+diff -r de8f476761e4 include/linux/rcupdate.h
+--- a/include/linux/rcupdate.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/rcupdate.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -305,4 +305,21 @@ extern void call_rcu(struct rcu_head *he
+ extern void call_rcu_bh(struct rcu_head *head,
+ 			void (*func)(struct rcu_head *head));
+ 
++
++#ifndef rcu_dereference_check
++#define rcu_dereference_check(p, c) rcu_dereference(p)
++#endif
++
++#ifndef rcu_dereference_protected
++#define rcu_dereference_protected(p, c) (p)
++#endif
++
++
++//#ifndef HAVE_RCU_READ_LOCK_HELD
++//static inline int rcu_read_lock_held(void)
++//{
++//        return 1;
++//}
++//#endif
++
+ #endif /* __LINUX_RCUPDATE_H */
+diff -r de8f476761e4 include/linux/skbuff.h
+--- a/include/linux/skbuff.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/linux/skbuff.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -15,6 +15,7 @@
+ #define _LINUX_SKBUFF_H
+ 
+ #include <linux/kernel.h>
++#include <linux/version.h>
+ #include <linux/kmemcheck.h>
+ #include <linux/compiler.h>
+ #include <linux/time.h>
+@@ -2127,5 +2128,12 @@ int skb_checksum_setup(struct sk_buff *s
+ static inline int skb_checksum_setup(struct sk_buff *skb) { return 0; }
+ #endif
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
++static inline void skb_reset_mac_len(struct sk_buff *skb)
++{
++	skb->mac_len = skb->network_header - skb->mac_header;
++}
++#endif
++
+ #endif	/* __KERNEL__ */
+ #endif	/* _LINUX_SKBUFF_H */
+diff -r de8f476761e4 include/net/genetlink.h
+--- a/include/net/genetlink.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/net/genetlink.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -302,5 +302,7 @@ static inline struct sk_buff *genlmsg_ne
+ 	return nlmsg_new(genlmsg_total_size(payload), flags);
+ }
+ 
++extern void genl_notify(struct sk_buff *skb, struct net *net, u32 pid,
++			u32 group, struct nlmsghdr *nlh, gfp_t flags);
+ 
+ #endif	/* __NET_GENERIC_NETLINK_H */
+diff -r de8f476761e4 include/net/netlink.h
+--- a/include/net/netlink.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/include/net/netlink.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -1055,4 +1055,29 @@ static inline int nla_validate_nested(st
+ #define nla_for_each_nested(pos, nla, rem) \
+ 	nla_for_each_attr(pos, nla_data(nla), nla_len(nla), rem)
+ 
++#ifndef HAVE_NLA_NUL_STRING
++static inline int VERIFY_NUL_STRING(struct nlattr *attr, int maxlen)
++{
++        char *s;
++	int len;
++	if (!attr)
++		return 0;
++
++	len = nla_len(attr);
++	if (len >= maxlen)
++		return -EINVAL;
++
++	s = nla_data(attr);
++	if (s[len - 1] != '\0')
++		return -EINVAL;
++
++	return 0;
++}
++#else
++static inline int VERIFY_NUL_STRING(struct nlattr *attr, int maxlen)
++{
++        return 0;
++}
++#endif  /* !HAVE_NLA_NUL_STRING */
++
+ #endif
+diff -r de8f476761e4 lib/flex_array.c
+--- a/lib/flex_array.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/lib/flex_array.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -23,6 +23,8 @@
+ #include <linux/flex_array.h>
+ #include <linux/slab.h>
+ #include <linux/stddef.h>
++#include <linux/module.h>
++#include <linux/reciprocal_div.h>
+ 
+ struct flex_array_part {
+ 	char elements[FLEX_ARRAY_PART_SIZE];
+@@ -69,15 +71,15 @@ static inline int elements_fit_in_base(s
+  * Element size | Objects | Objects |
+  * PAGE_SIZE=4k |  32-bit |  64-bit |
+  * ---------------------------------|
+- *      1 bytes | 4186112 | 2093056 |
+- *      2 bytes | 2093056 | 1046528 |
+- *      3 bytes | 1395030 |  697515 |
+- *      4 bytes | 1046528 |  523264 |
+- *     32 bytes |  130816 |   65408 |
+- *     33 bytes |  126728 |   63364 |
+- *   2048 bytes |    2044 |    1022 |
+- *   2049 bytes |    1022 |     511 |
+- *       void * | 1046528 |  261632 |
++ *      1 bytes | 4177920 | 2088960 |
++ *      2 bytes | 2088960 | 1044480 |
++ *      3 bytes | 1392300 |  696150 |
++ *      4 bytes | 1044480 |  522240 |
++ *     32 bytes |  130560 |   65408 |
++ *     33 bytes |  126480 |   63240 |
++ *   2048 bytes |    2040 |    1020 |
++ *   2049 bytes |    1020 |     510 |
++ *       void * | 1044480 |  261120 |
+  *
+  * Since 64-bit pointers are twice the size, we lose half the
+  * capacity in the base structure.  Also note that no effort is made
+@@ -87,8 +89,15 @@ struct flex_array *flex_array_alloc(int 
+ 					gfp_t flags)
+ {
+ 	struct flex_array *ret;
+-	int max_size = FLEX_ARRAY_NR_BASE_PTRS *
+-				FLEX_ARRAY_ELEMENTS_PER_PART(element_size);
++	int elems_per_part = 0;
++	int reciprocal_elems = 0;
++	int max_size = 0;
++
++	if (element_size) {
++		elems_per_part = FLEX_ARRAY_ELEMENTS_PER_PART(element_size);
++		reciprocal_elems = reciprocal_value(elems_per_part);
++		max_size = FLEX_ARRAY_NR_BASE_PTRS * elems_per_part;
++	}
+ 
+ 	/* max_size will end up 0 if element_size > PAGE_SIZE */
+ 	if (total > max_size)
+@@ -98,6 +107,8 @@ struct flex_array *flex_array_alloc(int 
+ 		return NULL;
+ 	ret->element_size = element_size;
+ 	ret->total_nr_elements = total;
++	ret->elems_per_part = elems_per_part;
++	ret->reciprocal_elems = reciprocal_elems;
+ 	if (elements_fit_in_base(ret) && !(flags & __GFP_ZERO))
+ 		memset(&ret->parts[0], FLEX_ARRAY_FREE,
+ 						FLEX_ARRAY_BASE_BYTES_LEFT);
+@@ -107,7 +118,7 @@ struct flex_array *flex_array_alloc(int 
+ static int fa_element_to_part_nr(struct flex_array *fa,
+ 					unsigned int element_nr)
+ {
+-	return element_nr / FLEX_ARRAY_ELEMENTS_PER_PART(fa->element_size);
++	return reciprocal_divide(element_nr, fa->reciprocal_elems);
+ }
+ 
+ /**
+@@ -134,12 +145,12 @@ void flex_array_free(struct flex_array *
+ }
+ 
+ static unsigned int index_inside_part(struct flex_array *fa,
+-					unsigned int element_nr)
++					unsigned int element_nr,
++					unsigned int part_nr)
+ {
+ 	unsigned int part_offset;
+ 
+-	part_offset = element_nr %
+-				FLEX_ARRAY_ELEMENTS_PER_PART(fa->element_size);
++	part_offset = element_nr - part_nr * fa->elems_per_part;
+ 	return part_offset * fa->element_size;
+ }
+ 
+@@ -171,26 +182,31 @@ __fa_get_part(struct flex_array *fa, int
+  * Note that this *copies* the contents of @src into
+  * the array.  If you are trying to store an array of
+  * pointers, make sure to pass in &ptr instead of ptr.
++ * You may instead wish to use the flex_array_put_ptr()
++ * helper function.
+  *
+  * Locking must be provided by the caller.
+  */
+ int flex_array_put(struct flex_array *fa, unsigned int element_nr, void *src,
+ 			gfp_t flags)
+ {
+-	int part_nr = fa_element_to_part_nr(fa, element_nr);
++	int part_nr = 0;
+ 	struct flex_array_part *part;
+ 	void *dst;
+ 
+ 	if (element_nr >= fa->total_nr_elements)
+ 		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
+ 	if (elements_fit_in_base(fa))
+ 		part = (struct flex_array_part *)&fa->parts[0];
+ 	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
+ 		part = __fa_get_part(fa, part_nr, flags);
+ 		if (!part)
+ 			return -ENOMEM;
+ 	}
+-	dst = &part->elements[index_inside_part(fa, element_nr)];
++	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
+ 	memcpy(dst, src, fa->element_size);
+ 	return 0;
+ }
+@@ -204,30 +220,33 @@ int flex_array_put(struct flex_array *fa
+  */
+ int flex_array_clear(struct flex_array *fa, unsigned int element_nr)
+ {
+-	int part_nr = fa_element_to_part_nr(fa, element_nr);
++	int part_nr = 0;
+ 	struct flex_array_part *part;
+ 	void *dst;
+ 
+ 	if (element_nr >= fa->total_nr_elements)
+ 		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
+ 	if (elements_fit_in_base(fa))
+ 		part = (struct flex_array_part *)&fa->parts[0];
+ 	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
+ 		part = fa->parts[part_nr];
+ 		if (!part)
+ 			return -EINVAL;
+ 	}
+-	dst = &part->elements[index_inside_part(fa, element_nr)];
++	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
+ 	memset(dst, FLEX_ARRAY_FREE, fa->element_size);
+ 	return 0;
+ }
+ 
+ /**
+  * flex_array_prealloc - guarantee that array space exists
+- * @fa:		the flex array for which to preallocate parts
+- * @start:	index of first array element for which space is allocated
+- * @end:	index of last (inclusive) element for which space is allocated
+- * @flags:	page allocation flags
++ * @fa:			the flex array for which to preallocate parts
++ * @start:		index of first array element for which space is allocated
++ * @nr_elements:	number of elements for which space is allocated
++ * @flags:		page allocation flags
+  *
+  * This will guarantee that no future calls to flex_array_put()
+  * will allocate memory.  It can be used if you are expecting to
+@@ -237,15 +256,27 @@ int flex_array_clear(struct flex_array *
+  * Locking must be provided by the caller.
+  */
+ int flex_array_prealloc(struct flex_array *fa, unsigned int start,
+-			unsigned int end, gfp_t flags)
++			unsigned int nr_elements, gfp_t flags)
+ {
+ 	int start_part;
+ 	int end_part;
+ 	int part_nr;
++	unsigned int end;
+ 	struct flex_array_part *part;
+ 
+-	if (start >= fa->total_nr_elements || end >= fa->total_nr_elements)
++	if (!start && !nr_elements)
++		return 0;
++	if (start >= fa->total_nr_elements)
+ 		return -ENOSPC;
++	if (!nr_elements)
++		return 0;
++
++	end = start + nr_elements - 1;
++
++	if (end >= fa->total_nr_elements)
++		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
+ 	if (elements_fit_in_base(fa))
+ 		return 0;
+ 	start_part = fa_element_to_part_nr(fa, start);
+@@ -265,25 +296,49 @@ int flex_array_prealloc(struct flex_arra
+  *
+  * Returns a pointer to the data at index @element_nr.  Note
+  * that this is a copy of the data that was passed in.  If you
+- * are using this to store pointers, you'll get back &ptr.
++ * are using this to store pointers, you'll get back &ptr.  You
++ * may instead wish to use the flex_array_get_ptr helper.
+  *
+  * Locking must be provided by the caller.
+  */
+ void *flex_array_get(struct flex_array *fa, unsigned int element_nr)
+ {
+-	int part_nr = fa_element_to_part_nr(fa, element_nr);
++	int part_nr = 0;
+ 	struct flex_array_part *part;
+ 
++	if (!fa->element_size)
++		return NULL;
+ 	if (element_nr >= fa->total_nr_elements)
+ 		return NULL;
+ 	if (elements_fit_in_base(fa))
+ 		part = (struct flex_array_part *)&fa->parts[0];
+ 	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
+ 		part = fa->parts[part_nr];
+ 		if (!part)
+ 			return NULL;
+ 	}
+-	return &part->elements[index_inside_part(fa, element_nr)];
++	return &part->elements[index_inside_part(fa, element_nr, part_nr)];
++}
++
++/**
++ * flex_array_get_ptr - pull a ptr back out of the array
++ * @fa:		the flex array from which to extract data
++ * @element_nr:	index of the element to fetch from the array
++ *
++ * Returns the pointer placed in the flex array at element_nr using
++ * flex_array_put_ptr().  This function should not be called if the
++ * element in question was not set using the _put_ptr() helper.
++ */
++void *flex_array_get_ptr(struct flex_array *fa, unsigned int element_nr)
++{
++	void **tmp;
++
++	tmp = flex_array_get(fa, element_nr);
++	if (!tmp)
++		return NULL;
++
++	return *tmp;
+ }
+ 
+ static int part_is_free(struct flex_array_part *part)
+@@ -311,6 +366,8 @@ int flex_array_shrink(struct flex_array 
+ 	int part_nr;
+ 	int ret = 0;
+ 
++	if (!fa->total_nr_elements || !fa->element_size)
++		return 0;
+ 	if (elements_fit_in_base(fa))
+ 		return ret;
+ 	for (part_nr = 0; part_nr < FLEX_ARRAY_NR_BASE_PTRS; part_nr++) {
+diff -r de8f476761e4 net/8021q/vlan_dev.c
+--- a/net/8021q/vlan_dev.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/8021q/vlan_dev.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -80,7 +80,7 @@ static inline struct sk_buff *vlan_check
+ 	return skb;
+ }
+ 
+-static inline void vlan_set_encap_proto(struct sk_buff *skb,
++inline void vlan_set_encap_proto(struct sk_buff *skb,
+ 		struct vlan_hdr *vhdr)
+ {
+ 	__be16 proto;
+@@ -113,6 +113,7 @@ static inline void vlan_set_encap_proto(
+ 		 */
+ 		skb->protocol = htons(ETH_P_802_2);
+ }
++EXPORT_SYMBOL(vlan_set_encap_proto);
+ 
+ /*
+  *	Determine the packet's protocol ID. The rule here is that we
+diff -r de8f476761e4 net/Kconfig
+--- a/net/Kconfig	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/Kconfig	Fri Mar 30 09:56:34 2012 +0100
+@@ -188,6 +188,7 @@ source "net/tipc/Kconfig"
+ source "net/atm/Kconfig"
+ source "net/802/Kconfig"
+ source "net/bridge/Kconfig"
++source "net/openvswitch/Kconfig"
+ source "net/dsa/Kconfig"
+ source "net/8021q/Kconfig"
+ source "net/decnet/Kconfig"
+diff -r de8f476761e4 net/Makefile
+--- a/net/Makefile	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/Makefile	Fri Mar 30 09:56:34 2012 +0100
+@@ -25,6 +25,7 @@ endif
+ obj-$(CONFIG_PACKET)		+= packet/
+ obj-$(CONFIG_NET_KEY)		+= key/
+ obj-$(CONFIG_BRIDGE)		+= bridge/
++obj-$(CONFIG_OPENVSWITCH)	+= openvswitch/
+ obj-$(CONFIG_NET_DSA)		+= dsa/
+ obj-$(CONFIG_IPX)		+= ipx/
+ obj-$(CONFIG_ATALK)		+= appletalk/
+diff -r de8f476761e4 net/openvswitch/Kconfig
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/Kconfig	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,5 @@
++config OPENVSWITCH
++       tristate "Open vSwitch"
++       depends on LLC
++       ---help---
++         HELP GOES HERE
+diff -r de8f476761e4 net/openvswitch/Makefile
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/Makefile	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,24 @@
++obj-$(CONFIG_OPENVSWITCH) += openvswitch.o
++
++obj-$(CONFIG_OPENVSWITCH) += brcompat.o
++
++openvswitch-objs += \
++	actions.o \
++	datapath.o \
++	dp_notify.o \
++	dp_sysfs_dp.o \
++	dp_sysfs_if.o \
++	flow.o \
++	tunnel.o \
++	vport.o \
++	vport-capwap.o \
++	vport-generic.o \
++	vport-gre.o \
++	vport-internal_dev.o \
++	vport-netdev.o \
++	vport-patch.o \
++	vlan.o \
++	net_compat.o \
++	compat_netdevice.o \
++	flex_array.o \
++	reciprocal_div.o
+diff -r de8f476761e4 net/openvswitch/actions.c
+--- a/net/openvswitch/actions.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/actions.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -35,6 +35,7 @@
+ #include "datapath.h"
+ #include "vlan.h"
+ #include "vport.h"
++#include "compat.h"
+ 
+ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
+ 			const struct nlattr *attr, int len, bool keep_skb);
+diff -r de8f476761e4 net/openvswitch/actions.h
+--- a/net/openvswitch/actions.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/actions.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -9,6 +9,7 @@
+ #ifndef ACTIONS_H
+ #define ACTIONS_H 1
+ 
++#include <linux/version.h>
+ #include <linux/skbuff.h>
+ #include <linux/version.h>
+ 
+diff -r de8f476761e4 net/openvswitch/compat.h
+--- a/net/openvswitch/compat.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/compat.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -19,7 +19,10 @@
+ #ifndef COMPAT_H
+ #define COMPAT_H 1
+ 
+-#include <linux/netlink.h>
++#include <linux/version.h>
++#include <linux/genetlink.h>
++#include <linux/netdevice.h>
++#include <net/netlink.h>
+ 
+ #ifndef HAVE_NLA_NUL_STRING
+ static inline int CHECK_NUL_STRING(struct nlattr *attr, int maxlen)
+@@ -73,4 +76,101 @@ static inline void skb_clear_rxhash(stru
+ 	typeof(br_should_route_hook) br_should_route_hook;	\
+ 	EXPORT_SYMBOL(br_should_route_hook)
+ 
++#ifdef _LINUX_IF_VLAN_H_
++/*
++ * The behavior of __vlan_put_tag() has changed over time:
++ *
++ *      - In 2.6.26 and earlier, it adjusted both MAC and network header
++ *        pointers.  (The latter didn't make any sense.)
++ *
++ *      - In 2.6.27 and 2.6.28, it did not adjust any header pointers at all.
++ *
++ *      - In 2.6.29 and later, it adjusts the MAC header pointer only.
++ *
++ * This is the version from 2.6.33.  We unconditionally substitute this version
++ * to avoid the need to guess whether the version in the kernel tree is
++ * acceptable.
++ */
++#define __vlan_put_tag rpl_vlan_put_tag
++static inline struct sk_buff *__vlan_put_tag(struct sk_buff *skb, u16 vlan_tci)
++{
++       struct vlan_ethhdr *veth;
++
++       if (skb_cow_head(skb, VLAN_HLEN) < 0) {
++               kfree_skb(skb);
++               return NULL;
++       }
++       veth = (struct vlan_ethhdr *)skb_push(skb, VLAN_HLEN);
++
++       /* Move the mac addresses to the beginning of the new header. */
++       memmove(skb->data, skb->data + VLAN_HLEN, 2 * VLAN_ETH_ALEN);
++       skb->mac_header -= VLAN_HLEN;
++       /* first, the ethernet type */
++       veth->h_vlan_proto = htons(ETH_P_8021Q);
++
++       /* now, the TCI */
++       veth->h_vlan_TCI = htons(vlan_tci);
++
++       skb->protocol = htons(ETH_P_8021Q);
++
++       return skb;
++}
++#endif /* _LINUX_IF_VLAN_H_ */
++
++#define IFF_OVS_DATAPATH 0              /* no-op flag */
++
++static inline int netdev_rx_handler_register(struct net_device *dev,
++                                            void *rx_handler,
++                                            void *rx_handler_data)
++{
++       if (dev->br_port)
++               return -EBUSY;
++       rcu_assign_pointer(dev->br_port, rx_handler_data);
++       return 0;
++}
++
++static inline void netdev_rx_handler_unregister(struct net_device *dev)
++{
++       rcu_assign_pointer(dev->br_port, NULL);
++}
++
++/* Linux 2.6.28 introduced dev_get_stats():
++ * const struct net_device_stats *dev_get_stats(struct net_device *dev);
++ *
++ * Linux 2.6.36 changed dev_get_stats() to:
++ * struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
++ *                                         struct rtnl_link_stats64 *storage);
++ */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,36)
++#define dev_get_stats(dev, storage) rpl_dev_get_stats(dev, storage)
++struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
++                                       struct rtnl_link_stats64 *storage);
++#endif
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
++#define INIT_NET_GENL_SOCK init_net.genl_sock
++#else
++#define INIT_NET_GENL_SOCK genl_sock
++#endif
++
++#ifndef IFF_TX_SKB_SHARING
++#define IFF_TX_SKB_SHARING 0
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,38)
++#define skb_gso_segment rpl_skb_gso_segment
++struct sk_buff *rpl_skb_gso_segment(struct sk_buff *skb, u32 features);
++
++#define netif_skb_features rpl_netif_skb_features
++u32 rpl_netif_skb_features(struct sk_buff *skb);
++
++#define netif_needs_gso rpl_netif_needs_gso
++static inline int rpl_netif_needs_gso(struct sk_buff *skb, int features)
++{
++        return skb_is_gso(skb) && (!skb_gso_ok(skb, features) ||
++                unlikely(skb->ip_summed != CHECKSUM_PARTIAL));
++}
++#endif
++
++
+ #endif /* compat.h */
+diff -r de8f476761e4 net/openvswitch/compat_netdevice.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/compat_netdevice.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,100 @@
++#include <linux/netdevice.h>
++#include <linux/if_vlan.h>
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,38)
++static bool can_checksum_protocol(unsigned long features, __be16 protocol)
++{
++	return  ((features & NETIF_F_GEN_CSUM) ||
++		((features & NETIF_F_V4_CSUM) &&
++				protocol == htons(ETH_P_IP)) ||
++		((features & NETIF_F_V6_CSUM) &&
++				protocol == htons(ETH_P_IPV6)) ||
++		((features & NETIF_F_FCOE_CRC) &&
++				protocol == htons(ETH_P_FCOE)));
++}
++
++static inline int illegal_highdma(struct net_device *dev, struct sk_buff *skb)
++{
++#ifdef CONFIG_HIGHMEM
++	int i;
++
++	if (dev->features & NETIF_F_HIGHDMA)
++		return 0;
++
++	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++)
++		if (PageHighMem(skb_shinfo(skb)->frags[i].page))
++			return 1;
++
++#endif
++	return 0;
++}
++
++static u32 harmonize_features(struct sk_buff *skb, __be16 protocol, u32 features)
++{
++	if (!can_checksum_protocol(features, protocol)) {
++		features &= ~NETIF_F_ALL_CSUM;
++		features &= ~NETIF_F_SG;
++	} else if (illegal_highdma(skb->dev, skb)) {
++		features &= ~NETIF_F_SG;
++	}
++
++	return features;
++}
++
++u32 rpl_netif_skb_features(struct sk_buff *skb)
++{
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,26)
++	unsigned long vlan_features = 0;
++#else
++	unsigned long vlan_features = skb->dev->vlan_features;
++#endif /* kernel version < 2.6.26 */
++
++	__be16 protocol = skb->protocol;
++	u32 features = skb->dev->features;
++
++	if (protocol == htons(ETH_P_8021Q)) {
++		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)skb->data;
++		protocol = veh->h_vlan_encapsulated_proto;
++	} else if (!vlan_tx_tag_present(skb)) {
++		return harmonize_features(skb, protocol, features);
++	}
++
++	features &= (vlan_features | NETIF_F_HW_VLAN_TX);
++
++	if (protocol != htons(ETH_P_8021Q)) {
++		return harmonize_features(skb, protocol, features);
++	} else {
++		features &= NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST |
++			NETIF_F_GEN_CSUM | NETIF_F_HW_VLAN_TX;
++		return harmonize_features(skb, protocol, features);
++	}
++}
++
++struct sk_buff *rpl_skb_gso_segment(struct sk_buff *skb, u32 features)
++{
++	int vlan_depth = ETH_HLEN;
++	__be16 type = skb->protocol;
++	__be16 skb_proto;
++	struct sk_buff *skb_gso;
++
++	while (type == htons(ETH_P_8021Q)) {
++		struct vlan_hdr *vh;
++
++		if (unlikely(!pskb_may_pull(skb, vlan_depth + VLAN_HLEN)))
++			return ERR_PTR(-EINVAL);
++
++		vh = (struct vlan_hdr *)(skb->data + vlan_depth);
++		type = vh->h_vlan_encapsulated_proto;
++		vlan_depth += VLAN_HLEN;
++	}
++
++	/* this hack needed to get regular skb_gso_segment() */
++#undef skb_gso_segment
++	skb_proto = skb->protocol;
++	skb->protocol = type;
++
++	skb_gso = skb_gso_segment(skb, features);
++	skb->protocol = skb_proto;
++	return skb_gso;
++}
++#endif	/* kernel version < 2.6.38 */
+diff -r de8f476761e4 net/openvswitch/datapath.c
+--- a/net/openvswitch/datapath.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/datapath.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -57,6 +57,8 @@
+ #include "vlan.h"
+ #include "tunnel.h"
+ #include "vport-internal_dev.h"
++#include "compat.h"
++#include "genetlink.h"
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18) || \
+     LINUX_VERSION_CODE >= KERNEL_VERSION(3,3,0)
+@@ -442,7 +444,7 @@ static int queue_userspace_packet(int dp
+ 		skb = nskb;
+ 	}
+ 
+-	if (nla_attr_size(skb->len) > USHRT_MAX) {
++	if (nla_attr_size(skb->len) > USHORT_MAX) {
+ 		err = -EFBIG;
+ 		goto out;
+ 	}
+@@ -2046,8 +2048,6 @@ static int __init dp_init(void)
+ 
+ 	BUILD_BUG_ON(sizeof(struct ovs_skb_cb) > sizeof(dummy_skb->cb));
+ 
+-	pr_info("Open vSwitch switching datapath %s, built "__DATE__" "__TIME__"\n",
+-		VERSION BUILDNR);
+ 
+ 	err = ovs_tnl_init();
+ 	if (err)
+diff -r de8f476761e4 net/openvswitch/datapath.h
+--- a/net/openvswitch/datapath.h	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/datapath.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -38,6 +38,8 @@ struct vport;
+ #define DP_MAX_PORTS 1024
+ #define SAMPLE_ACTION_DEPTH 3
+ 
++#define HAVE_NLA_NUL_STRING  1
++
+ /**
+  * struct dp_stats_percpu - per-cpu packet processing statistics for a given
+  * datapath.
+diff -r de8f476761e4 net/openvswitch/dp_sysfs_dp.c
+--- a/net/openvswitch/dp_sysfs_dp.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/dp_sysfs_dp.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -38,6 +38,8 @@
+ #include "datapath.h"
+ #include "vport-internal_dev.h"
+ 
++#define NETDEV_DEV_MEMBER dev
++
+ #ifdef CONFIG_SYSFS
+ 
+ /* Hack to attempt to build on more platforms. */
+diff -r de8f476761e4 net/openvswitch/dp_sysfs_if.c
+--- a/net/openvswitch/dp_sysfs_if.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/dp_sysfs_if.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -28,6 +28,8 @@
+ #include "dp_sysfs.h"
+ #include "vport.h"
+ 
++#define NETDEV_DEV_MEMBER dev
++
+ #ifdef CONFIG_SYSFS
+ 
+ struct brport_attribute {
+diff -r de8f476761e4 net/openvswitch/flex_array.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/flex_array.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,384 @@
++/*
++ * Flexible array managed in PAGE_SIZE parts
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ * Copyright IBM Corporation, 2009
++ *
++ * Author: Dave Hansen <dave@linux.vnet.ibm.com>
++ */
++
++#include <linux/flex_array.h>
++#include <linux/slab.h>
++#include <linux/stddef.h>
++#include <linux/module.h>
++#include <linux/reciprocal_div.h>
++
++struct flex_array_part {
++	char elements[FLEX_ARRAY_PART_SIZE];
++};
++
++/*
++ * If a user requests an allocation which is small
++ * enough, we may simply use the space in the
++ * flex_array->parts[] array to store the user
++ * data.
++ */
++static inline int elements_fit_in_base(struct flex_array *fa)
++{
++	int data_size = fa->element_size * fa->total_nr_elements;
++	if (data_size <= FLEX_ARRAY_BASE_BYTES_LEFT)
++		return 1;
++	return 0;
++}
++
++/**
++ * flex_array_alloc - allocate a new flexible array
++ * @element_size:	the size of individual elements in the array
++ * @total:		total number of elements that this should hold
++ * @flags:		page allocation flags to use for base array
++ *
++ * Note: all locking must be provided by the caller.
++ *
++ * @total is used to size internal structures.  If the user ever
++ * accesses any array indexes >=@total, it will produce errors.
++ *
++ * The maximum number of elements is defined as: the number of
++ * elements that can be stored in a page times the number of
++ * page pointers that we can fit in the base structure or (using
++ * integer math):
++ *
++ * 	(PAGE_SIZE/element_size) * (PAGE_SIZE-8)/sizeof(void *)
++ *
++ * Here's a table showing example capacities.  Note that the maximum
++ * index that the get/put() functions is just nr_objects-1.   This
++ * basically means that you get 4MB of storage on 32-bit and 2MB on
++ * 64-bit.
++ *
++ *
++ * Element size | Objects | Objects |
++ * PAGE_SIZE=4k |  32-bit |  64-bit |
++ * ---------------------------------|
++ *      1 bytes | 4177920 | 2088960 |
++ *      2 bytes | 2088960 | 1044480 |
++ *      3 bytes | 1392300 |  696150 |
++ *      4 bytes | 1044480 |  522240 |
++ *     32 bytes |  130560 |   65408 |
++ *     33 bytes |  126480 |   63240 |
++ *   2048 bytes |    2040 |    1020 |
++ *   2049 bytes |    1020 |     510 |
++ *       void * | 1044480 |  261120 |
++ *
++ * Since 64-bit pointers are twice the size, we lose half the
++ * capacity in the base structure.  Also note that no effort is made
++ * to efficiently pack objects across page boundaries.
++ */
++struct flex_array *flex_array_alloc(int element_size, unsigned int total,
++					gfp_t flags)
++{
++	struct flex_array *ret;
++	int elems_per_part = 0;
++	int reciprocal_elems = 0;
++	int max_size = 0;
++
++	if (element_size) {
++		elems_per_part = FLEX_ARRAY_ELEMENTS_PER_PART(element_size);
++		reciprocal_elems = reciprocal_value(elems_per_part);
++		max_size = FLEX_ARRAY_NR_BASE_PTRS * elems_per_part;
++	}
++
++	/* max_size will end up 0 if element_size > PAGE_SIZE */
++	if (total > max_size)
++		return NULL;
++	ret = kzalloc(sizeof(struct flex_array), flags);
++	if (!ret)
++		return NULL;
++	ret->element_size = element_size;
++	ret->total_nr_elements = total;
++	ret->elems_per_part = elems_per_part;
++	ret->reciprocal_elems = reciprocal_elems;
++	if (elements_fit_in_base(ret) && !(flags & __GFP_ZERO))
++		memset(&ret->parts[0], FLEX_ARRAY_FREE,
++						FLEX_ARRAY_BASE_BYTES_LEFT);
++	return ret;
++}
++
++static int fa_element_to_part_nr(struct flex_array *fa,
++					unsigned int element_nr)
++{
++	return reciprocal_divide(element_nr, fa->reciprocal_elems);
++}
++
++/**
++ * flex_array_free_parts - just free the second-level pages
++ * @fa:		the flex array from which to free parts
++ *
++ * This is to be used in cases where the base 'struct flex_array'
++ * has been statically allocated and should not be free.
++ */
++void flex_array_free_parts(struct flex_array *fa)
++{
++	int part_nr;
++
++	if (elements_fit_in_base(fa))
++		return;
++	for (part_nr = 0; part_nr < FLEX_ARRAY_NR_BASE_PTRS; part_nr++)
++		kfree(fa->parts[part_nr]);
++}
++
++void flex_array_free(struct flex_array *fa)
++{
++	flex_array_free_parts(fa);
++	kfree(fa);
++}
++
++static unsigned int index_inside_part(struct flex_array *fa,
++					unsigned int element_nr,
++					unsigned int part_nr)
++{
++	unsigned int part_offset;
++
++	part_offset = element_nr - part_nr * fa->elems_per_part;
++	return part_offset * fa->element_size;
++}
++
++static struct flex_array_part *
++__fa_get_part(struct flex_array *fa, int part_nr, gfp_t flags)
++{
++	struct flex_array_part *part = fa->parts[part_nr];
++	if (!part) {
++		part = kmalloc(sizeof(struct flex_array_part), flags);
++		if (!part)
++			return NULL;
++		if (!(flags & __GFP_ZERO))
++			memset(part, FLEX_ARRAY_FREE,
++				sizeof(struct flex_array_part));
++		fa->parts[part_nr] = part;
++	}
++	return part;
++}
++
++/**
++ * flex_array_put - copy data into the array at @element_nr
++ * @fa:		the flex array to copy data into
++ * @element_nr:	index of the position in which to insert
++ * 		the new element.
++ * @src:	address of data to copy into the array
++ * @flags:	page allocation flags to use for array expansion
++ *
++ *
++ * Note that this *copies* the contents of @src into
++ * the array.  If you are trying to store an array of
++ * pointers, make sure to pass in &ptr instead of ptr.
++ * You may instead wish to use the flex_array_put_ptr()
++ * helper function.
++ *
++ * Locking must be provided by the caller.
++ */
++int flex_array_put(struct flex_array *fa, unsigned int element_nr, void *src,
++			gfp_t flags)
++{
++	int part_nr = 0;
++	struct flex_array_part *part;
++	void *dst;
++
++	if (element_nr >= fa->total_nr_elements)
++		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
++	if (elements_fit_in_base(fa))
++		part = (struct flex_array_part *)&fa->parts[0];
++	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
++		part = __fa_get_part(fa, part_nr, flags);
++		if (!part)
++			return -ENOMEM;
++	}
++	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
++	memcpy(dst, src, fa->element_size);
++	return 0;
++}
++
++/**
++ * flex_array_clear - clear element in array at @element_nr
++ * @fa:		the flex array of the element.
++ * @element_nr:	index of the position to clear.
++ *
++ * Locking must be provided by the caller.
++ */
++int flex_array_clear(struct flex_array *fa, unsigned int element_nr)
++{
++	int part_nr = 0;
++	struct flex_array_part *part;
++	void *dst;
++
++	if (element_nr >= fa->total_nr_elements)
++		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
++	if (elements_fit_in_base(fa))
++		part = (struct flex_array_part *)&fa->parts[0];
++	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
++		part = fa->parts[part_nr];
++		if (!part)
++			return -EINVAL;
++	}
++	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
++	memset(dst, FLEX_ARRAY_FREE, fa->element_size);
++	return 0;
++}
++
++/**
++ * flex_array_prealloc - guarantee that array space exists
++ * @fa:			the flex array for which to preallocate parts
++ * @start:		index of first array element for which space is allocated
++ * @nr_elements:	number of elements for which space is allocated
++ * @flags:		page allocation flags
++ *
++ * This will guarantee that no future calls to flex_array_put()
++ * will allocate memory.  It can be used if you are expecting to
++ * be holding a lock or in some atomic context while writing
++ * data into the array.
++ *
++ * Locking must be provided by the caller.
++ */
++int flex_array_prealloc(struct flex_array *fa, unsigned int start,
++			unsigned int nr_elements, gfp_t flags)
++{
++	int start_part;
++	int end_part;
++	int part_nr;
++	unsigned int end;
++	struct flex_array_part *part;
++
++	if (!start && !nr_elements)
++		return 0;
++	if (start >= fa->total_nr_elements)
++		return -ENOSPC;
++	if (!nr_elements)
++		return 0;
++
++	end = start + nr_elements - 1;
++
++	if (end >= fa->total_nr_elements)
++		return -ENOSPC;
++	if (!fa->element_size)
++		return 0;
++	if (elements_fit_in_base(fa))
++		return 0;
++	start_part = fa_element_to_part_nr(fa, start);
++	end_part = fa_element_to_part_nr(fa, end);
++	for (part_nr = start_part; part_nr <= end_part; part_nr++) {
++		part = __fa_get_part(fa, part_nr, flags);
++		if (!part)
++			return -ENOMEM;
++	}
++	return 0;
++}
++
++/**
++ * flex_array_get - pull data back out of the array
++ * @fa:		the flex array from which to extract data
++ * @element_nr:	index of the element to fetch from the array
++ *
++ * Returns a pointer to the data at index @element_nr.  Note
++ * that this is a copy of the data that was passed in.  If you
++ * are using this to store pointers, you'll get back &ptr.  You
++ * may instead wish to use the flex_array_get_ptr helper.
++ *
++ * Locking must be provided by the caller.
++ */
++void *flex_array_get(struct flex_array *fa, unsigned int element_nr)
++{
++	int part_nr = 0;
++	struct flex_array_part *part;
++
++	if (!fa->element_size)
++		return NULL;
++	if (element_nr >= fa->total_nr_elements)
++		return NULL;
++	if (elements_fit_in_base(fa))
++		part = (struct flex_array_part *)&fa->parts[0];
++	else {
++		part_nr = fa_element_to_part_nr(fa, element_nr);
++		part = fa->parts[part_nr];
++		if (!part)
++			return NULL;
++	}
++	return &part->elements[index_inside_part(fa, element_nr, part_nr)];
++}
++
++/**
++ * flex_array_get_ptr - pull a ptr back out of the array
++ * @fa:		the flex array from which to extract data
++ * @element_nr:	index of the element to fetch from the array
++ *
++ * Returns the pointer placed in the flex array at element_nr using
++ * flex_array_put_ptr().  This function should not be called if the
++ * element in question was not set using the _put_ptr() helper.
++ */
++void *flex_array_get_ptr(struct flex_array *fa, unsigned int element_nr)
++{
++	void **tmp;
++
++	tmp = flex_array_get(fa, element_nr);
++	if (!tmp)
++		return NULL;
++
++	return *tmp;
++}
++
++static int part_is_free(struct flex_array_part *part)
++{
++	int i;
++
++	for (i = 0; i < sizeof(struct flex_array_part); i++)
++		if (part->elements[i] != FLEX_ARRAY_FREE)
++			return 0;
++	return 1;
++}
++
++/**
++ * flex_array_shrink - free unused second-level pages
++ * @fa:		the flex array to shrink
++ *
++ * Frees all second-level pages that consist solely of unused
++ * elements.  Returns the number of pages freed.
++ *
++ * Locking must be provided by the caller.
++ */
++int flex_array_shrink(struct flex_array *fa)
++{
++	struct flex_array_part *part;
++	int part_nr;
++	int ret = 0;
++
++	if (!fa->total_nr_elements || !fa->element_size)
++		return 0;
++	if (elements_fit_in_base(fa))
++		return ret;
++	for (part_nr = 0; part_nr < FLEX_ARRAY_NR_BASE_PTRS; part_nr++) {
++		part = fa->parts[part_nr];
++		if (!part)
++			continue;
++		if (part_is_free(part)) {
++			fa->parts[part_nr] = NULL;
++			kfree(part);
++			ret++;
++		}
++	}
++	return ret;
++}
+diff -r de8f476761e4 net/openvswitch/flow.c
+--- a/net/openvswitch/flow.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/flow.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -43,6 +43,7 @@
+ #include <net/ip.h>
+ #include <net/ipv6.h>
+ #include <net/ndisc.h>
++#include <linux/flex_array.h>
+ 
+ #include "vlan.h"
+ 
+@@ -1046,7 +1047,7 @@ int ovs_flow_from_nlattrs(struct sw_flow
+ 		swkey->phy.in_port = in_port;
+ 		attrs &= ~(1 << OVS_KEY_ATTR_IN_PORT);
+ 	} else {
+-		swkey->phy.in_port = USHRT_MAX;
++		swkey->phy.in_port = USHORT_MAX;
+ 	}
+ 
+ 	if (attrs & (1ULL << OVS_KEY_ATTR_TUN_ID)) {
+@@ -1195,7 +1196,7 @@ int ovs_flow_metadata_from_nlattrs(u32 *
+ 	const struct nlattr *nla;
+ 	int rem;
+ 
+-	*in_port = USHRT_MAX;
++	*in_port = USHORT_MAX;
+ 	*tun_id = 0;
+ 	*priority = 0;
+ 
+@@ -1239,7 +1240,7 @@ int ovs_flow_to_nlattrs(const struct sw_
+ 	if (swkey->phy.tun_id != cpu_to_be64(0))
+ 		NLA_PUT_BE64(skb, OVS_KEY_ATTR_TUN_ID, swkey->phy.tun_id);
+ 
+-	if (swkey->phy.in_port != USHRT_MAX)
++	if (swkey->phy.in_port != USHORT_MAX)
+ 		NLA_PUT_U32(skb, OVS_KEY_ATTR_IN_PORT, swkey->phy.in_port);
+ 
+ 	nla = nla_reserve(skb, OVS_KEY_ATTR_ETHERNET, sizeof(*eth_key));
+diff -r de8f476761e4 net/openvswitch/genetlink.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/genetlink.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,23 @@
++#ifndef __GENETLINK_WRAPPER_H
++#define __GENETLINK_WRAPPER_H 1
++
++#include_next <linux/genetlink.h>
++
++#ifdef CONFIG_PROVE_LOCKING
++/* No version of the kernel has this function, but our locking scheme depends
++ * on genl_mutex so for clarity we use it where appropriate. */
++static inline int lockdep_genl_is_held(void)
++{
++	return 1;
++}
++#endif
++
++/* This is also not upstream yet. */
++#ifndef genl_dereference
++#include <linux/rcupdate.h>
++
++#define genl_dereference(p)					\
++	rcu_dereference_protected(p, lockdep_genl_is_held())
++#endif
++
++#endif /* linux/genetlink.h wrapper */
+diff -r de8f476761e4 net/openvswitch/net_compat.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/net_compat.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,70 @@
++#include <linux/if_link.h>
++#include <linux/netdevice.h>
++#include "compat.h"
++
++/* Linux 2.6.28 introduced dev_get_stats():
++ * const struct net_device_stats *dev_get_stats(struct net_device *dev);
++ *
++ * Linux 2.6.36 changed dev_get_stats() to:
++ * struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
++ *                                         struct rtnl_link_stats64 *storage);
++ */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,36)
++struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
++					struct rtnl_link_stats64 *storage)
++{
++	const struct net_device_stats *stats;
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
++	stats = dev->get_stats(dev);
++#else  /* 2.6.28 < kernel version < 2.6.36 */
++	stats = (dev_get_stats)(dev);
++#endif /* 2.6.28 < kernel version < 2.6.36 */
++
++	storage->rx_packets = stats->rx_packets;
++	storage->tx_packets = stats->tx_packets;
++	storage->rx_bytes = stats->rx_bytes;
++	storage->tx_bytes = stats->tx_bytes;
++	storage->rx_errors = stats->rx_errors;
++	storage->tx_errors = stats->tx_errors;
++	storage->rx_dropped = stats->rx_dropped;
++	storage->tx_dropped = stats->tx_dropped;
++	storage->multicast = stats->multicast;
++	storage->collisions = stats->collisions;
++	storage->rx_length_errors = stats->rx_length_errors;
++	storage->rx_over_errors = stats->rx_over_errors;
++	storage->rx_crc_errors = stats->rx_crc_errors;
++	storage->rx_frame_errors = stats->rx_frame_errors;
++	storage->rx_fifo_errors = stats->rx_fifo_errors;
++	storage->rx_missed_errors = stats->rx_missed_errors;
++	storage->tx_aborted_errors = stats->tx_aborted_errors;
++	storage->tx_carrier_errors = stats->tx_carrier_errors;
++	storage->tx_fifo_errors = stats->tx_fifo_errors;
++	storage->tx_heartbeat_errors = stats->tx_heartbeat_errors;
++	storage->tx_window_errors = stats->tx_window_errors;
++	storage->rx_compressed = stats->rx_compressed;
++	storage->tx_compressed = stats->tx_compressed;
++
++	return storage;
++}
++#endif	/* kernel version < 2.6.36 */
++
++/* This is analogous to rtnl_notify() but uses genl_sock instead of rtnl.
++ *
++ * This is not (yet) in any upstream kernel. */
++void genl_notify(struct sk_buff *skb, struct net *net, u32 pid, u32 group,
++                 struct nlmsghdr *nlh, gfp_t flags)
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
++	struct sock *sk = net->genl_sock;
++#else
++	struct sock *sk = genl_sock;
++#endif
++	int report = 0;
++
++	if (nlh)
++		report = nlmsg_report(nlh);
++
++	nlmsg_notify(sk, skb, pid, group, report, flags);
++}
++
+diff -r de8f476761e4 net/openvswitch/reciprocal_div.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/reciprocal_div.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,9 @@
++#include <asm/div64.h>
++#include <linux/reciprocal_div.h>
++
++u32 reciprocal_value(u32 k)
++{
++	u64 val = (1LL << 32) + (k - 1);
++	do_div(val, k);
++	return (u32)val;
++}
+diff -r de8f476761e4 net/openvswitch/route.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/net/openvswitch/route.h	Fri Mar 30 09:56:34 2012 +0100
+@@ -0,0 +1,21 @@
++#ifndef __NET_ROUTE_WRAPPER_H
++#define __NET_ROUTE_WRAPPER_H 1
++
++#include_next <net/route.h>
++
++#include <linux/version.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
++
++#define ip_route_output_key(net, rp, flp) \
++		ip_route_output_key((rp), (flp))
++
++#endif /* linux kernel < 2.6.25 */
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,38)
++static inline int ip4_dst_hoplimit(const struct dst_entry *dst)
++{
++	return dst_metric(dst, RTAX_HOPLIMIT);
++}
++#endif
++
++#endif
+diff -r de8f476761e4 net/openvswitch/tunnel.c
+--- a/net/openvswitch/tunnel.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/tunnel.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -49,6 +49,7 @@
+ #include "vport.h"
+ #include "vport-generic.h"
+ #include "vport-internal_dev.h"
++#include "route.h"
+ 
+ #ifdef NEED_CACHE_TIMEOUT
+ /*
+@@ -119,6 +120,13 @@ static struct hh_cache *rt_hh(struct rta
+ #define rt_hh(rt) (rt_dst(rt).hh)
+ #endif
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3,2,0)
++static inline struct page *skb_frag_page(const skb_frag_t *frag)
++{
++	return frag->page;
++}
++#endif
++
+ static struct vport *tnl_vport_to_vport(const struct tnl_vport *tnl_vport)
+ {
+ 	return vport_from_priv(tnl_vport);
+diff -r de8f476761e4 net/openvswitch/vport-netdev.c
+--- a/net/openvswitch/vport-netdev.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/vport-netdev.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -33,6 +33,9 @@
+ #include "vlan.h"
+ #include "vport-internal_dev.h"
+ #include "vport-netdev.h"
++#include "compat.h"
++
++#define NETDEV_DEV_MEMBER dev
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37) && \
+ 	!defined(HAVE_VLAN_BUG_WORKAROUND)
+@@ -318,7 +321,7 @@ static int netdev_send(struct vport *vpo
+ 	if (vlan_tx_tag_present(skb) && !dev_supports_vlan_tx(skb->dev)) {
+ 		int features;
+ 
+-		features = netif_skb_features(skb);
++		features = rpl_netif_skb_features(skb);
+ 
+ 		if (!vlan_tso)
+ 			features &= ~(NETIF_F_TSO | NETIF_F_TSO6 |
+diff -r de8f476761e4 net/openvswitch/vport-patch.c
+--- a/net/openvswitch/vport-patch.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/vport-patch.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -20,6 +20,7 @@
+ #include <linux/kernel.h>
+ #include <linux/list.h>
+ #include <linux/rtnetlink.h>
++#include <net/netlink.h>
+ 
+ #include "compat.h"
+ #include "datapath.h"
+diff -r de8f476761e4 net/openvswitch/vport.c
+--- a/net/openvswitch/vport.c	Fri Mar 30 09:44:20 2012 +0100
++++ b/net/openvswitch/vport.c	Fri Mar 30 09:56:34 2012 +0100
+@@ -28,6 +28,7 @@
+ #include <linux/rtnetlink.h>
+ #include <linux/compat.h>
+ #include <linux/version.h>
++#include <net/netlink.h>
+ 
+ #include "vport.h"
+ #include "vport-internal_dev.h"

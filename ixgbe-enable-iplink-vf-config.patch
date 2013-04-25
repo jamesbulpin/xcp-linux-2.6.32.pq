@@ -1,0 +1,11 @@
+diff -r 72af3d1d074f drivers/net/ixgbe/kcompat.h
+--- a/drivers/net/ixgbe/kcompat.h	Thu Jul 29 12:40:10 2010 +0100
++++ b/drivers/net/ixgbe/kcompat.h	Thu Jul 29 12:42:14 2010 +0100
+@@ -2055,6 +2055,7 @@ extern u16 _kc_skb_tx_hash(struct net_de
+ #ifndef HAVE_TRANS_START_IN_QUEUE
+ #define HAVE_TRANS_START_IN_QUEUE
+ #endif
++#define HAVE_IPLINK_VF_CONFIG
+ #endif /* < 2.6.31 */
+ 
+ /*****************************************************************************/

@@ -1,0 +1,38 @@
+Subject: Disable smart poll by default
+
+To enable it, add the following to the kernel command line:
+  xen-netback.use_smartpoll=1
+
+parm:  use_smartpoll:Use smartpoll mechanism if available (int)
+
+Associated ticket & details: CA-45320
+
+Netfront upstream also has a simular patch
+ Git: d2312863e180f8058533776c0b78da6fed0c2346
+
+---
+ drivers/xen/netback/xenbus.c |   20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff -r 77674c2f3470 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Thu Dec 16 16:07:50 2010 +0000
++++ b/drivers/xen/netback/xenbus.c	Thu Dec 16 16:14:35 2010 +0000
+@@ -28,6 +28,9 @@
+     printk("netback/xenbus (%s:%d) " fmt ".\n", __FUNCTION__, __LINE__, ##args)
+ #endif
+ 
++static int use_smartpoll = 0;
++module_param(use_smartpoll, int, 0600);
++MODULE_PARM_DESC (use_smartpoll, "Use smartpoll mechanism if available");
+ 
+ static int connect_rings(struct backend_info *);
+ static void connect(struct backend_info *);
+@@ -131,7 +134,7 @@ static int netback_probe(struct xenbus_d
+ 
+ 		/* We support data smart poll mechanism */
+ 		err = xenbus_printf(xbt, dev->nodename,
+-				    "feature-smart-poll", "%d", 1);
++				    "feature-smart-poll", "%d", use_smartpoll);
+ 		if (err) {
+ 			message = "writing feature-smart-poll";
+ 			goto abort_transaction;

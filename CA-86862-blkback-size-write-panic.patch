@@ -1,0 +1,25 @@
+# HG changeset patch
+# Parent ad0e3837a89655092989bb0393386e6db1968902
+CA-86862: Fix panic when writing to /sys/kernel/blkback-pools/<pool_id>/size and turn off write permissions for that file.
+
+diff -r ad0e3837a896 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c
++++ b/drivers/xen/blkback/blkback.c
+@@ -945,7 +945,7 @@ blkback_page_pool_show_size(struct blkba
+ }
+ 
+ static struct pool_attribute blkback_page_pool_attr_size =
+-	__ATTR(size, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH,
++	__ATTR(size, S_IRUSR|S_IRGRP|S_IROTH,
+ 	       blkback_page_pool_show_size, NULL);
+ 
+ static ssize_t
+@@ -1002,7 +1002,7 @@ blkback_page_pool_store_attr(struct kobj
+ 	struct blkback_page_pool *pool = kobj_to_pool(kobj);
+ 	struct pool_attribute *attr = kattr_to_pool_attr(kattr);
+ 
+-	if (attr->show)
++	if (attr->store)
+ 		return attr->store(pool, buf, size);
+ 
+ 	return -EIO;

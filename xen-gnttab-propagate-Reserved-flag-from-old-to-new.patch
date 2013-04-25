@@ -1,0 +1,69 @@
+commit fd733075ffd0eed36bc4f0b8ce47f944fdb1869d
+Author: Ian Campbell <ian.campbell@citrix.com>
+Date:   Tue Feb 23 12:14:57 2010 +0000
+
+    gnttab: propagate Reserved flag from old to new page in gnttab_copy_grant_page.
+    
+    Otherwise we trip over the check for PAGE_FLAGS_CHECK_AT_FREE in
+    free_pages_check() when finally freeing the page, leading to
+    backtraces such as:
+        Bad page state in process 'tcpdump'
+        page:c15b8ae0 flags:0x40000800 mapping:00000000 mapcount:0 count:0
+        Trying to fix it up, but a reboot is needed
+        Backtrace:
+        Pid: 5731, comm: tcpdump Tainted: G          2.6.27.42-0.1.1.xs5.5.900.751.1073xen #1
+         [<c015daeb>] bad_page+0x6b/0xa0
+         [<c015e389>] free_hot_cold_page+0x239/0x250
+         [<c015e3ea>] free_hot_page+0xa/0x10
+         [<c0162255>] put_page+0x35/0xc0
+         [<c026e002>] gnttab_page_free+0x22/0x30
+         [<c015e325>] free_hot_cold_page+0x1d5/0x250
+         [<c015e3ea>] free_hot_page+0xa/0x10
+         [<c0162255>] put_page+0x35/0xc0
+         [<c02cbe4a>] skb_put_page+0xa/0x10
+         [<c02cc0b7>] skb_release_data+0x77/0x90
+         [<c02cc78b>] skb_release_all+0x6b/0xa0
+         [<c02cbf3b>] __kfree_skb+0xb/0x80
+         [<c02cbfce>] kfree_skb+0x1e/0x40
+         [<c02ce9bd>] skb_free_datagram+0xd/0x40
+         [<c03360a6>] packet_recvmsg+0x186/0x1c0
+         [<c015d8fb>] ? __rmqueue+0x1b/0x1a0
+         [<c02c6222>] sock_recvmsg+0x102/0x130
+         [<c013de50>] ? autoremove_wake_function+0x0/0x50
+         [<c01691e7>] ? __do_fault+0x2e7/0x5f0
+         [<c02c5af0>] ? sockfd_lookup_light+0x30/0x60
+         [<c02c707d>] sys_recvfrom+0x7d/0xe0
+         [<c0180dc9>] ? __kmalloc+0x139/0x190
+         [<c02074bc>] ? copy_from_user+0x3c/0x70
+         [<c03489d4>] ? _spin_lock_bh+0x14/0x70
+         [<c03484c3>] ? _spin_unlock_bh+0x23/0x30
+         [<c02c83df>] ? release_sock+0x9f/0xc0
+         [<c02c7116>] sys_recv+0x36/0x40
+         [<c02c759f>] sys_socketcall+0x15f/0x290
+         [<c01053ce>] syscall_call+0x7/0xb
+         [<c0340000>] ? pci_scan_bus_on_node+0x10/0x80
+         =======================
+    
+    gnttab_copy_grant_page is (currently) only ever used on pages which
+    were allocated by alloc_empty_pages_and_pagevec() and hence have the
+    PG_reserved set. Also free_empty_pages_and_pagevec() can
+    BUG_ON(!PageReserved(page)).
+    
+    Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+
+---
+ drivers/xen/core/gnttab.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+Index: linux-2.6.32.hg/drivers/xen/core/gnttab.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/xen/core/gnttab.c	2010-10-07 18:25:57.655131675 +0100
++++ linux-2.6.32.hg/drivers/xen/core/gnttab.c	2010-10-07 18:29:41.299380740 +0100
+@@ -598,6 +598,7 @@ int gnttab_copy_grant_page(grant_ref_t r
+ 	*pagep = new_page;
+ 
+ 	SetPageForeign(page, gnttab_page_free);
++	ClearPageReserved(page);
+ 	page->mapping = NULL;
+ 
+ out:

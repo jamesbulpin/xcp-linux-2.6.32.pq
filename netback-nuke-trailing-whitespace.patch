@@ -1,0 +1,418 @@
+The pvops kernel has removed trailing whitespace from these files so do the same.
+
+diff -r 028f790ac074 drivers/xen/netback/accel.c
+--- a/drivers/xen/netback/accel.c	Wed May 26 16:26:08 2010 +0100
++++ b/drivers/xen/netback/accel.c	Wed May 26 16:28:05 2010 +0100
+@@ -1,26 +1,26 @@
+ /******************************************************************************
+  * drivers/xen/netback/accel.c
+  *
+- * Interface between backend virtual network device and accelerated plugin. 
+- * 
++ * Interface between backend virtual network device and accelerated plugin.
++ *
+  * Copyright (C) 2007 Solarflare Communications, Inc
+- * 
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License version 2
+  * as published by the Free Software Foundation; or, when distributed
+  * separately from the Linux kernel or incorporated into other
+  * software packages, subject to the following license:
+- * 
++ *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this source file (the "Software"), to deal in the Software without
+  * restriction, including without limitation the rights to use, copy, modify,
+  * merge, publish, distribute, sublicense, and/or sell copies of the Software,
+  * and to permit persons to whom the Software is furnished to do so, subject to
+  * the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -43,26 +43,26 @@
+ 	printk("netback/accel (%s:%d) " fmt ".\n", __FUNCTION__, __LINE__, ##args)
+ #endif
+ 
+-/* 
++/*
+  * A list of available netback accelerator plugin modules (each list
+- * entry is of type struct netback_accelerator) 
+- */ 
++ * entry is of type struct netback_accelerator)
++ */
+ static struct list_head accelerators_list;
+ /* Lock used to protect access to accelerators_list */
+ DEFINE_MUTEX(accelerators_mutex);
+ 
+-/* 
++/*
+  * Compare a backend to an accelerator, and decide if they are
+  * compatible (i.e. if the accelerator should be used by the
+- * backend) 
++ * backend)
+  */
+ static int match_accelerator(struct xenbus_device *xendev,
+-			     struct backend_info *be, 
++			     struct backend_info *be,
+ 			     struct netback_accelerator *accelerator)
+ {
+ 	int rc = 0;
+ 	char *eth_name = xenbus_read(XBT_NIL, xendev->nodename, "accel", NULL);
+-	
++
+ 	if (IS_ERR(eth_name)) {
+ 		/* Probably means not present */
+ 		DPRINTK("%s: no match due to xenbus_read accel error %ld\n",
+@@ -77,9 +77,9 @@
+ }
+ 
+ 
+-static void do_probe(struct backend_info *be, 
++static void do_probe(struct backend_info *be,
+ 		     struct netback_accelerator *accelerator,
+-		     struct xenbus_device *xendev) 
++		     struct xenbus_device *xendev)
+ {
+ 	be->accelerator = accelerator;
+ 	atomic_inc(&be->accelerator->use_count);
+@@ -98,7 +98,7 @@
+  */
+ static int netback_accelerator_probe_backend(struct device *dev, void *arg)
+ {
+-	struct netback_accelerator *accelerator = 
++	struct netback_accelerator *accelerator =
+ 		(struct netback_accelerator *)arg;
+ 	struct xenbus_device *xendev = to_xenbus_device(dev);
+ 
+@@ -120,9 +120,9 @@
+ static int netback_accelerator_remove_backend(struct device *dev, void *arg)
+ {
+ 	struct xenbus_device *xendev = to_xenbus_device(dev);
+-	struct netback_accelerator *accelerator = 
++	struct netback_accelerator *accelerator =
+ 		(struct netback_accelerator *)arg;
+-	
++
+ 	if (!strcmp("vif", xendev->devicetype)) {
+ 		struct backend_info *be = dev_get_drvdata(&xendev->dev);
+ 
+@@ -142,7 +142,7 @@
+  * Entry point for an netback accelerator plugin module.  Called to
+  * advertise its presence, and connect to any suitable backends.
+  */
+-int netback_connect_accelerator(unsigned version, int id, const char *eth_name, 
++int netback_connect_accelerator(unsigned version, int id, const char *eth_name,
+ 				struct netback_accel_hooks *hooks)
+ {
+ 	struct netback_accelerator *new_accelerator;
+@@ -163,7 +163,7 @@
+ 		}
+ 	}
+ 
+-	new_accelerator = 
++	new_accelerator =
+ 		kmalloc(sizeof(struct netback_accelerator), GFP_KERNEL);
+ 	if (!new_accelerator) {
+ 		DPRINTK("%s: failed to allocate memory for accelerator\n",
+@@ -172,7 +172,7 @@
+ 	}
+ 
+ 	new_accelerator->id = id;
+-	
++
+ 	eth_name_len = strlen(eth_name)+1;
+ 	new_accelerator->eth_name = kmalloc(eth_name_len, GFP_KERNEL);
+ 	if (!new_accelerator->eth_name) {
+@@ -182,16 +182,16 @@
+ 		return -ENOMEM;
+ 	}
+ 	strlcpy(new_accelerator->eth_name, eth_name, eth_name_len);
+-	
++
+ 	new_accelerator->hooks = hooks;
+ 
+ 	atomic_set(&new_accelerator->use_count, 0);
+-	
++
+ 	mutex_lock(&accelerators_mutex);
+ 	list_add(&new_accelerator->link, &accelerators_list);
+-	
++
+ 	/* tell existing backends about new plugin */
+-	xenbus_for_each_backend(new_accelerator, 
++	xenbus_for_each_backend(new_accelerator,
+ 				netback_accelerator_probe_backend);
+ 
+ 	mutex_unlock(&accelerators_mutex);
+@@ -202,7 +202,7 @@
+ EXPORT_SYMBOL_GPL(netback_connect_accelerator);
+ 
+ 
+-/* 
++/*
+  * Disconnect an accelerator plugin module that has previously been
+  * connected.
+  */
+@@ -216,7 +216,7 @@
+ 			xenbus_for_each_backend
+ 				(accelerator, netback_accelerator_remove_backend);
+ 			BUG_ON(atomic_read(&accelerator->use_count) != 0);
+-			list_del(&accelerator->link);				
++			list_del(&accelerator->link);
+ 			kfree(accelerator->eth_name);
+ 			kfree(accelerator);
+ 			break;
+@@ -232,12 +232,12 @@
+ {
+ 	struct netback_accelerator *accelerator;
+ 
+-	/* 
++	/*
+ 	 * Check list of accelerators to see if any is suitable, and
+ 	 * use it if it is.
+ 	 */
+ 	mutex_lock(&accelerators_mutex);
+-	list_for_each_entry(accelerator, &accelerators_list, link) { 
++	list_for_each_entry(accelerator, &accelerators_list, link) {
+ 		if (match_accelerator(dev, be, accelerator) &&
+ 		    try_module_get(accelerator->hooks->owner)) {
+ 			do_probe(be, accelerator, dev);
+diff -r 028f790ac074 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Wed May 26 16:26:08 2010 +0100
++++ b/drivers/xen/netback/common.h	Wed May 26 16:28:05 2010 +0100
+@@ -1,22 +1,22 @@
+ /******************************************************************************
+  * arch/xen/drivers/netif/backend/common.h
+- * 
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License version 2
+  * as published by the Free Software Foundation; or, when distributed
+  * separately from the Linux kernel or incorporated into other
+  * software packages, subject to the following license:
+- * 
++ *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this source file (the "Software"), to deal in the Software without
+  * restriction, including without limitation the rights to use, copy, modify,
+  * merge, publish, distribute, sublicense, and/or sell copies of the Software,
+  * and to permit persons to whom the Software is furnished to do so, subject to
+  * the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -155,13 +155,13 @@
+ 
+ #define NETBACK_ACCEL_VERSION 0x00010001
+ 
+-/* 
++/*
+  * Connect an accelerator plugin module to netback.  Returns zero on
+  * success, < 0 on error, > 0 (with highest version number supported)
+  * if version mismatch.
+  */
+ extern int netback_connect_accelerator(unsigned version,
+-				       int id, const char *eth_name, 
++				       int id, const char *eth_name,
+ 				       struct netback_accel_hooks *hooks);
+ /* Disconnect a previously connected accelerator plugin module */
+ extern void netback_disconnect_accelerator(int id, const char *eth_name);
+diff -r 028f790ac074 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Wed May 26 16:26:08 2010 +0100
++++ b/drivers/xen/netback/interface.c	Wed May 26 16:28:05 2010 +0100
+@@ -1,26 +1,26 @@
+ /******************************************************************************
+  * arch/xen/drivers/netif/backend/interface.c
+- * 
++ *
+  * Network-device interface management.
+- * 
++ *
+  * Copyright (c) 2004-2005, Keir Fraser
+- * 
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License version 2
+  * as published by the Free Software Foundation; or, when distributed
+  * separately from the Linux kernel or incorporated into other
+  * software packages, subject to the following license:
+- * 
++ *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this source file (the "Software"), to deal in the Software without
+  * restriction, including without limitation the rights to use, copy, modify,
+  * merge, publish, distribute, sublicense, and/or sell copies of the Software,
+  * and to permit persons to whom the Software is furnished to do so, subject to
+  * the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -37,7 +37,7 @@
+ 
+ /*
+  * Module parameter 'queue_length':
+- * 
++ *
+  * Enables queuing in the network stack when a client has run out of receive
+  * descriptors. Although this feature can improve receive bandwidth by avoiding
+  * packet loss, it can also result in packets sitting in the 'tx_queue' for
+@@ -230,7 +230,7 @@
+ 	 * largest non-broadcast address to prevent the address getting
+ 	 * stolen by an Ethernet bridge for STP purposes.
+ 	 * (FE:FF:FF:FF:FF:FF)
+-	 */ 
++	 */
+ 	memset(dev->dev_addr, 0xFF, ETH_ALEN);
+ 	dev->dev_addr[0] &= ~0x01;
+ 
+@@ -261,7 +261,7 @@
+         msleep(10);
+     } while(op.status == GNTST_eagain);
+ 
+-	if (op.status) { 
++	if (op.status) {
+ 		DPRINTK(" Gnttab failure mapping tx_ring_ref!\n");
+ 		return op.status;
+ 	}
+@@ -389,7 +389,7 @@
+ 
+ 	if (netif->irq)
+ 		unbind_from_irqhandler(netif->irq, netif);
+-	
++
+ 	unregister_netdev(netif->dev);
+ 
+ 	if (netif->tx.sring) {
+diff -r 028f790ac074 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed May 26 16:26:08 2010 +0100
++++ b/drivers/xen/netback/netback.c	Wed May 26 16:28:05 2010 +0100
+@@ -1,30 +1,30 @@
+ /******************************************************************************
+  * drivers/xen/netback/netback.c
+- * 
++ *
+  * Back-end of the driver for virtual network devices. This portion of the
+  * driver exports a 'unified' network-device interface that can be accessed
+- * by any operating system that implements a compatible front end. A 
++ * by any operating system that implements a compatible front end. A
+  * reference front-end implementation can be found in:
+  *  drivers/xen/netfront/netfront.c
+- * 
++ *
+  * Copyright (c) 2002-2005, K A Fraser
+- * 
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License version 2
+  * as published by the Free Software Foundation; or, when distributed
+  * separately from the Linux kernel or incorporated into other
+  * software packages, subject to the following license:
+- * 
++ *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this source file (the "Software"), to deal in the Software without
+  * restriction, including without limitation the rights to use, copy, modify,
+  * merge, publish, distribute, sublicense, and/or sell copies of the Software,
+  * and to permit persons to whom the Software is furnished to do so, subject to
+  * the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -52,11 +52,11 @@
+ };
+ 
+ static void netif_idx_release(u16 pending_idx);
+-static void make_tx_response(struct xen_netif *netif, 
++static void make_tx_response(struct xen_netif *netif,
+ 			     struct xen_netif_tx_request *txp,
+ 			     s8       st);
+-static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif, 
+-					     u16      id, 
++static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif,
++					     u16      id,
+ 					     s8       st,
+ 					     u16      offset,
+ 					     u16      size,
+@@ -355,7 +355,7 @@
+ 		eth0_dev = __dev_get_by_name(&init_net, "eth0");
+ 	napi_schedule(???);
+ }
+-/* 
++/*
+  * Add following to poll() function in NAPI driver (Tigon3 is example):
+  *  if ( xen_network_done() )
+  *      tg3_enable_ints(tp);
+@@ -999,7 +999,7 @@
+ 
+ 		netif = pending_tx_info[pending_idx].netif;
+ 
+-		make_tx_response(netif, &pending_tx_info[pending_idx].req, 
++		make_tx_response(netif, &pending_tx_info[pending_idx].req,
+ 				 NETIF_RSP_OKAY);
+ 
+ 		/* Ready for next use. */
+@@ -1285,7 +1285,7 @@
+ 		/* Credit-based scheduling. */
+ 		if (txreq.size > netif->remaining_credit) {
+ 			unsigned long now = jiffies;
+-			unsigned long next_credit = 
++			unsigned long next_credit =
+ 				netif->credit_timeout.expires +
+ 				msecs_to_jiffies(netif->credit_usec / 1000);
+ 
+@@ -1343,8 +1343,8 @@
+ 
+ 		/* No crossing a page as the payload mustn't fragment. */
+ 		if (unlikely((txreq.offset + txreq.size) > PAGE_SIZE)) {
+-			DPRINTK("txreq.offset: %x, size: %u, end: %lu\n", 
+-				txreq.offset, txreq.size, 
++			DPRINTK("txreq.offset: %x, size: %u, end: %lu\n",
++				txreq.offset, txreq.size,
+ 				(txreq.offset &~PAGE_MASK) + txreq.size);
+ 			netbk_tx_err(netif, &txreq, i);
+ 			continue;
+@@ -1541,7 +1541,7 @@
+ 	return IRQ_HANDLED;
+ }
+ 
+-static void make_tx_response(struct xen_netif *netif, 
++static void make_tx_response(struct xen_netif *netif,
+ 			     struct xen_netif_tx_request *txp,
+ 			     s8       st)
+ {
+@@ -1571,8 +1571,8 @@
+ #endif
+ }
+ 
+-static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif, 
+-					     u16      id, 
++static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif,
++					     u16      id,
+ 					     s8       st,
+ 					     u16      offset,
+ 					     u16      size,

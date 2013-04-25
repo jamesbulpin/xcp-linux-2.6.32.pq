@@ -1,0 +1,27 @@
+diff -r 59f4f76c5aae drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jun 13 19:22:22 2007 +0100
++++ b/drivers/xen/blkback/xenbus.c	Wed Jun 13 22:30:06 2007 +0100
+@@ -56,7 +56,7 @@ static int blkback_name(blkif_t *blkif, 
+ 	else
+ 		devname  = devpath;
+ 
+-	snprintf(buf, TASK_COMM_LEN, "blkback.%d.%s", blkif->domid, devname);
++	snprintf(buf, TASK_COMM_LEN, "xb.%05d.%s", blkif->domid, devname);
+ 	kfree(devpath);
+ 	
+ 	return 0;
+@@ -91,6 +91,14 @@ static void update_blkif_status(blkif_t 
+ 		err = PTR_ERR(blkif->xenblkd);
+ 		blkif->xenblkd = NULL;
+ 		xenbus_dev_error(blkif->be->dev, err, "start xenblkd");
++		return;
++	}
++
++	err = xenbus_printf(XBT_NIL, blkif->be->dev->nodename, "kthread-pid",
++			    "%d", blkif->xenblkd->pid);
++	if (err) {
++		xenbus_dev_error(blkif->be->dev, err, "write kthread-pid");
++		return;
+ 	}
+ }
+ 

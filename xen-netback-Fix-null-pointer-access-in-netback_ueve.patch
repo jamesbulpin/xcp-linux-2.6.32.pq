@@ -1,0 +1,48 @@
+commit 37089b13602b0ccf44616324fa3a8abd77b610b4
+Author: Bastian Blank <waldi@debian.org>
+Date:   Thu Jul 29 17:30:18 2010 +0200
+
+    xen/netback: Fix null-pointer access in netback_uevent
+    
+    The uevent method of Xen netback does not check if the the network
+    device is already setup and tries to dereference a null-pointer if not.
+    
+    Signed-off-by: Bastian Blank <waldi@debian.org>
+    Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+---
+ drivers/xen/netback/xenbus.c |   10 ++--------
+ 1 file changed, 2 insertions(+), 8 deletions(-)
+
+Index: linux-2.6.32.hg/drivers/xen/netback/xenbus.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/xen/netback/xenbus.c	2010-10-07 17:11:04.358881800 +0100
++++ linux-2.6.32.hg/drivers/xen/netback/xenbus.c	2010-10-07 18:29:56.503394001 +0100
+@@ -181,17 +181,11 @@ fail:
+  */
+ static int netback_uevent(struct xenbus_device *xdev, struct kobj_uevent_env *env)
+ {
+-	struct backend_info *be;
+-	struct xen_netif *netif;
++	struct backend_info *be = dev_get_drvdata(&xdev->dev);
+ 	char *val;
+ 
+ 	DPRINTK("netback_uevent");
+ 
+-	be = dev_get_drvdata(&xdev->dev);
+-	if (!be)
+-		return 0;
+-	netif = be->netif;
+-
+ 	val = xenbus_read(XBT_NIL, xdev->nodename, "script", NULL);
+ 	if (IS_ERR(val)) {
+ 		int err = PTR_ERR(val);
+@@ -206,7 +200,7 @@ static int netback_uevent(struct xenbus_
+ 		kfree(val);
+ 	}
+ 
+-	if (add_uevent_var(env, "vif=%s", netif->dev->name))
++	if (be && be->netif && add_uevent_var(env, "vif=%s", be->netif->dev->name))
+ 		return -ENOMEM;
+ 
+ 	return 0;

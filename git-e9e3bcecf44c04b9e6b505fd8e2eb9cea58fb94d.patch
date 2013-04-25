@@ -1,0 +1,250 @@
+commit e9e3bcecf44c04b9e6b505fd8e2eb9cea58fb94d
+Author: Eric Sandeen <sandeen@redhat.com>
+Date:   Sat Feb 12 08:17:34 2011 -0500
+
+    ext4: serialize unaligned asynchronous DIO
+
+    ext4 has a data corruption case when doing non-block-aligned
+    asynchronous direct IO into a sparse file, as demonstrated
+    by xfstest 240.
+
+    The root cause is that while ext4 preallocates space in the
+    hole, mappings of that space still look "new" and
+    dio_zero_block() will zero out the unwritten portions.  When
+    more than one AIO thread is going, they both find this "new"
+    block and race to zero out their portion; this is uncoordinated
+    and causes data corruption.
+
+    Dave Chinner fixed this for xfs by simply serializing all
+    unaligned asynchronous direct IO.  I've done the same here.
+    The difference is that we only wait on conversions, not all IO.
+    This is a very big hammer, and I'm not very pleased with
+    stuffing this into ext4_file_write().  But since ext4 is
+    DIO_LOCKING, we need to serialize it at this high level.
+
+    I tried to move this into ext4_ext_direct_IO, but by then
+    we have the i_mutex already, and we will wait on the
+    work queue to do conversions - which must also take the
+    i_mutex.  So that won't work.
+
+    This was originally exposed by qemu-kvm installing to
+    a raw disk image with a normal sector-63 alignment.  I've
+    tested a backport of this patch with qemu, and it does
+    avoid the corruption.  It is also quite a lot slower
+    (14 min for package installs, vs. 8 min for well-aligned)
+    but I'll take slow correctness over fast corruption any day.
+
+    Mingming suggested that we can track outstanding
+    conversions, and wait on those so that non-sparse
+    files won't be affected, and I've implemented that here;
+    unaligned AIO to nonsparse files won't take a perf hit.
+
+    [tytso@mit.edu: Keep the mutex as a hashed array instead
+     of bloating the ext4 inode]
+
+    [tytso@mit.edu: Fix up namespace issues so that global
+     variables are protected with an "ext4_" prefix.]
+
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+diff -r 27e625585d85 fs/ext4/ext4.h
+--- a/fs/ext4/ext4.h	Wed Sep 28 11:48:38 2011 +0100
++++ b/fs/ext4/ext4.h	Wed Sep 28 11:57:15 2011 +0100
+@@ -796,6 +796,7 @@ struct ext4_inode_info {
+ 
+ 	/* current io_end structure for async DIO write*/
+ 	ext4_io_end_t *cur_aio_dio;
++	atomic_t i_aiodio_unwritten; /* Nr. of inflight conversions pending */
+ 
+ 	/*
+ 	 * Transactions that contain inode's metadata needed to complete
+@@ -1894,6 +1895,15 @@ static inline void set_bitmap_uptodate(s
+ 
+ #define in_range(b, first, len)	((b) >= (first) && (b) <= (first) + (len) - 1)
+ 
++/* For ioend & aio unwritten conversion wait queues */
++#define EXT4_WQ_HASH_SZ		37
++#define ext4_ioend_wq(v)   (&ext4__ioend_wq[((unsigned long)(v)) %\
++					    EXT4_WQ_HASH_SZ])
++#define ext4_aio_mutex(v)  (&ext4__aio_mutex[((unsigned long)(v)) %\
++					     EXT4_WQ_HASH_SZ])
++extern wait_queue_head_t ext4__ioend_wq[EXT4_WQ_HASH_SZ];
++extern struct mutex ext4__aio_mutex[EXT4_WQ_HASH_SZ];
++
+ #endif	/* __KERNEL__ */
+ 
+ #endif	/* _EXT4_H */
+diff -r 27e625585d85 fs/ext4/extents.c
+--- a/fs/ext4/extents.c	Wed Sep 28 11:48:38 2011 +0100
++++ b/fs/ext4/extents.c	Wed Sep 28 11:57:15 2011 +0100
+@@ -3117,9 +3117,10 @@ ext4_ext_handle_uninitialized_extents(ha
+ 		 * that this IO needs to convertion to written when IO is
+ 		 * completed
+ 		 */
+-		if (io)
++		if (io && io->flag != DIO_AIO_UNWRITTEN) {
+ 			io->flag = DIO_AIO_UNWRITTEN;
+-		else
++			atomic_inc(&EXT4_I(inode)->i_aiodio_unwritten);
++		} else
+ 			ext4_set_inode_state(inode, EXT4_STATE_DIO_UNWRITTEN);
+ 		goto out;
+ 	}
+@@ -3403,9 +3404,10 @@ int ext4_ext_get_blocks(handle_t *handle
+ 		 * that we need to perform convertion when IO is done.
+ 		 */
+ 		if (flags == EXT4_GET_BLOCKS_DIO_CREATE_EXT) {
+-			if (io)
++			if (io && io->flag != DIO_AIO_UNWRITTEN) {
+ 				io->flag = DIO_AIO_UNWRITTEN;
+-			else
++				atomic_inc(&EXT4_I(inode)->i_aiodio_unwritten);
++			} else
+ 				ext4_set_inode_state(inode,
+ 						     EXT4_STATE_DIO_UNWRITTEN);
+ 		}
+diff -r 27e625585d85 fs/ext4/file.c
+--- a/fs/ext4/file.c	Wed Sep 28 11:48:38 2011 +0100
++++ b/fs/ext4/file.c	Wed Sep 28 11:57:15 2011 +0100
+@@ -54,11 +54,47 @@ static int ext4_release_file(struct inod
+ 	return 0;
+ }
+ 
++static void ext4_aiodio_wait(struct inode *inode)
++{
++	wait_queue_head_t *wq = ext4_ioend_wq(inode);
++
++	wait_event(*wq, (atomic_read(&EXT4_I(inode)->i_aiodio_unwritten) == 0));
++}
++
++/*
++ * This tests whether the IO in question is block-aligned or not.
++ * Ext4 utilizes unwritten extents when hole-filling during direct IO, and they
++ * are converted to written only after the IO is complete.  Until they are
++ * mapped, these blocks appear as holes, so dio_zero_block() will assume that
++ * it needs to zero out portions of the start and/or end block.  If 2 AIO
++ * threads are at work on the same unwritten block, they must be synchronized
++ * or one thread will zero the other's data, causing corruption.
++ */
++static int
++ext4_unaligned_aio(struct inode *inode, const struct iovec *iov,
++		   unsigned long nr_segs, loff_t pos)
++{
++	struct super_block *sb = inode->i_sb;
++	int blockmask = sb->s_blocksize - 1;
++	size_t count = iov_length(iov, nr_segs);
++	loff_t final_size = pos + count;
++
++	if (pos >= inode->i_size)
++		return 0;
++
++	if ((pos & blockmask) || (final_size & blockmask))
++		return 1;
++
++	return 0;
++}
++
+ static ssize_t
+ ext4_file_write(struct kiocb *iocb, const struct iovec *iov,
+ 		unsigned long nr_segs, loff_t pos)
+ {
+ 	struct inode *inode = iocb->ki_filp->f_path.dentry->d_inode;
++	int unaligned_aio = 0;
++	int ret;
+ 
+ 	/*
+ 	 * If we have encountered a bitmap-format file, the size limit
+@@ -76,9 +112,31 @@ ext4_file_write(struct kiocb *iocb, cons
+ 			nr_segs = iov_shorten((struct iovec *)iov, nr_segs,
+ 					      sbi->s_bitmap_maxbytes - pos);
+ 		}
++	} else if (unlikely((iocb->ki_filp->f_flags & O_DIRECT) &&
++		   !is_sync_kiocb(iocb))) {
++		unaligned_aio = ext4_unaligned_aio(inode, iov, nr_segs, pos);
+ 	}
+ 
+-	return generic_file_aio_write(iocb, iov, nr_segs, pos);
++	/* Unaligned direct AIO must be serialized; see comment above */
++	if (unaligned_aio) {
++		static unsigned long unaligned_warn_time;
++
++		/* Warn about this once per day */
++		if (printk_timed_ratelimit(&unaligned_warn_time, 60*60*24*HZ))
++			ext4_msg(inode->i_sb, KERN_WARNING,
++				 "Unaligned AIO/DIO on inode %ld by %s; "
++				 "performance will be poor.",
++				 inode->i_ino, current->comm);
++		mutex_lock(ext4_aio_mutex(inode));
++		ext4_aiodio_wait(inode);
++	}
++
++	ret = generic_file_aio_write(iocb, iov, nr_segs, pos);
++
++	if (unaligned_aio)
++		mutex_unlock(ext4_aio_mutex(inode));
++
++	return ret;
+ }
+ 
+ static const struct vm_operations_struct ext4_file_vm_ops = {
+diff -r 27e625585d85 fs/ext4/inode.c
+--- a/fs/ext4/inode.c	Wed Sep 28 11:48:38 2011 +0100
++++ b/fs/ext4/inode.c	Wed Sep 28 11:57:15 2011 +0100
+@@ -3609,6 +3609,7 @@ static int ext4_end_aio_dio_nolock(ext4_
+ 	struct inode *inode = io->inode;
+ 	loff_t offset = io->offset;
+ 	ssize_t size = io->size;
++	wait_queue_head_t *wq;
+ 	int ret = 0;
+ 
+ 	ext4_debug("end_aio_dio_onlock: io 0x%p from inode %lu,list->next 0x%p,"
+@@ -3635,7 +3636,16 @@ static int ext4_end_aio_dio_nolock(ext4_
+ 	if (io->iocb)
+ 		aio_complete(io->iocb, io->result, 0);
+ 	/* clear the DIO AIO unwritten flag */
+-	io->flag = 0;
++	if (io->flag == DIO_AIO_UNWRITTEN) {
++		io->flag = 0;
++		/* Wake up anyone waiting on unwritten extent conversion */
++		wq = ext4_ioend_wq(io->inode);
++		if (atomic_dec_and_test(&EXT4_I(inode)->i_aiodio_unwritten) &&
++		    waitqueue_active(wq)) {
++			wake_up_all(wq);
++		}
++	}
++
+ 	return ret;
+ }
+ /*
+diff -r 27e625585d85 fs/ext4/super.c
+--- a/fs/ext4/super.c	Wed Sep 28 11:48:38 2011 +0100
++++ b/fs/ext4/super.c	Wed Sep 28 11:57:15 2011 +0100
+@@ -715,6 +715,7 @@ static struct inode *ext4_alloc_inode(st
+ 	ei->cur_aio_dio = NULL;
+ 	ei->i_sync_tid = 0;
+ 	ei->i_datasync_tid = 0;
++	atomic_set(&ei->i_aiodio_unwritten, 0);
+ 
+ 	return &ei->vfs_inode;
+ }
+@@ -4006,9 +4007,18 @@ static struct file_system_type ext4_fs_t
+ 	.fs_flags	= FS_REQUIRES_DEV,
+ };
+ 
++/* Shared across all ext4 file systems */
++wait_queue_head_t ext4__ioend_wq[EXT4_WQ_HASH_SZ];
++struct mutex ext4__aio_mutex[EXT4_WQ_HASH_SZ];
++
+ static int __init init_ext4_fs(void)
+ {
+-	int err;
++	int i, err;
++
++	for (i = 0; i < EXT4_WQ_HASH_SZ; i++) {
++		mutex_init(&ext4__aio_mutex[i]);
++		init_waitqueue_head(&ext4__ioend_wq[i]);
++	}
+ 
+ 	ext4_check_flag_values();
+ 	err = init_ext4_system_zone();

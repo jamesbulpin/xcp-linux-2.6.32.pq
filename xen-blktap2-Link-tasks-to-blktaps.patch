@@ -1,0 +1,201 @@
+From 23186378f90df3cbe6770f9f38eda8f811bf2900 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:33 -0700
+Subject: [PATCH 08/18] xen/blktap: Link tasks to blktaps.
+
+Replaces the mmap pid and BLKTAP_RING_FD.
+Adds a 'task' node in sysfs.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h |    4 +-
+ drivers/xen/blktap2/ring.c   |   20 ++++++---------
+ drivers/xen/blktap2/sysfs.c  |   57 +++++++++++++++++++++++++-----------------
+ 3 files changed, 44 insertions(+), 37 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 7ff4415..8a724fa 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -28,7 +28,6 @@ extern int blktap_device_major;
+ #define MAX_BLKTAP_DEVICE            1024
+ 
+ #define BLKTAP_CONTROL               1
+-#define BLKTAP_RING_FD               2
+ #define BLKTAP_RING_VMA              3
+ #define BLKTAP_DEVICE                4
+ #define BLKTAP_SHUTDOWN_REQUESTED    8
+@@ -106,6 +105,8 @@ struct blktap_device {
+ };
+ 
+ struct blktap_ring {
++	struct task_struct            *task;
++
+ 	struct vm_area_struct         *vma;
+ 	struct blkif_front_ring             ring;
+ 	struct vm_foreign_map          foreign_map;
+@@ -151,7 +152,6 @@ struct blktap_request {
+ 
+ struct blktap {
+ 	int                            minor;
+-	pid_t                          pid;
+ 	atomic_t                       refcnt;
+ 	unsigned long                  dev_inuse;
+ 
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 4f51087..4e1e64c 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -57,7 +57,7 @@ blktap_read_ring(struct blktap *tap)
+ 		if (usr_idx >= MAX_PENDING_REQS ||
+ 		    !tap->pending_requests[usr_idx]) {
+ 			BTWARN("Request %d/%d invalid [%x], tapdisk %d%p\n",
+-			       rc, rp, usr_idx, tap->pid, ring->vma);
++			       rc, rp, usr_idx, ring->task->pid, ring->vma);
+ 			continue;
+ 		}
+ 
+@@ -196,12 +196,11 @@ blktap_ring_open(struct inode *inode, struct file *filp)
+ 	if (test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse))
+ 		return -ENXIO;
+ 
+-	/* Only one process can access ring at a time */
+-	if (test_and_set_bit(BLKTAP_RING_FD, &tap->dev_inuse))
++	if (tap->ring.task)
+ 		return -EBUSY;
+ 
+ 	filp->private_data = tap;
+-	BTINFO("opened device %d\n", tap->minor);
++	tap->ring.task = current;
+ 
+ 	return 0;
+ }
+@@ -211,12 +210,10 @@ blktap_ring_release(struct inode *inode, struct file *filp)
+ {
+ 	struct blktap *tap = filp->private_data;
+ 
+-	BTINFO("freeing device %d\n", tap->minor);
+-	clear_bit(BLKTAP_RING_FD, &tap->dev_inuse);
+-	filp->private_data = NULL;
+-
+ 	blktap_control_destroy_device(tap);
+ 
++	tap->ring.task = NULL;
++
+ 	return 0;
+ }
+ 
+@@ -308,9 +305,6 @@ blktap_ring_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	vma->vm_mm->context.has_foreign_mappings = 1;
+ #endif
+ 
+-	tap->pid = current->pid;
+-	BTINFO("blktap: mapping pid is %d\n", tap->pid);
+-
+ 	ring->vma = vma;
+ 	return 0;
+ 
+@@ -419,7 +413,9 @@ blktap_ring_kick_user(struct blktap *tap)
+ int
+ blktap_ring_destroy(struct blktap *tap)
+ {
+-	if (!test_bit(BLKTAP_RING_FD, &tap->dev_inuse) &&
++	struct blktap_ring *ring = &tap->ring;
++
++	if (!ring->task &&
+ 	    !test_bit(BLKTAP_RING_VMA, &tap->dev_inuse))
+ 		return 0;
+ 
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 9a4ea97..11647c3 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -147,6 +147,7 @@ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, cha
+ 	}
+ 
+ 	tmp += sprintf(tmp, "pending requests: %d\n", tap->pending_cnt);
++
+ 	for (i = 0; i < MAX_PENDING_REQS; i++) {
+ 		struct blktap_request *req = tap->pending_requests[i];
+ 		if (!req)
+@@ -171,44 +172,54 @@ out:
+ }
+ CLASS_DEVICE_ATTR(debug, S_IRUSR, blktap_sysfs_debug_device, NULL);
+ 
++static ssize_t
++blktap_sysfs_show_task(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct blktap *tap;
++	ssize_t rv = 0;
++
++	tap = dev_get_drvdata(dev);
++	if (!tap)
++		return 0;
++
++	if (tap->ring.task)
++		rv = sprintf(buf, "%d\n", tap->ring.task->pid);
++
++	return rv;
++}
++DEVICE_ATTR(task, S_IRUSR, blktap_sysfs_show_task, NULL);
++
+ int
+ blktap_sysfs_create(struct blktap *tap)
+ {
+ 	struct blktap_ring *ring;
+ 	struct device *dev;
+-	int err;
++	int err = 0;
+ 
+ 	if (!class)
+ 		return -ENODEV;
+ 
+ 	ring = &tap->ring;
++	mutex_init(&ring->sysfs_mutex);
++	atomic_set(&ring->sysfs_refcnt, 0);
+ 
+ 	dev = device_create(class, NULL, ring->devno,
+ 			    tap, "blktap%d", tap->minor);
+ 	if (IS_ERR(dev))
+-		return PTR_ERR(dev);
+-
+-	ring->dev = dev;
+-
+-	mutex_init(&ring->sysfs_mutex);
+-	atomic_set(&ring->sysfs_refcnt, 0);
+-
+-
+-	printk(KERN_CRIT "%s: adding attributes for dev %p\n", __func__, dev);
+-	err = device_create_file(dev, &dev_attr_name);
+-	if (err)
+-		goto fail;
+-	err = device_create_file(dev, &dev_attr_remove);
+-	if (err)
+-		goto fail;
+-	err = device_create_file(dev, &dev_attr_debug);
+-	if (err)
+-		goto fail;
+-
+-	return 0;
++		err = PTR_ERR(dev);
++	if (!err)
++		err = device_create_file(dev, &dev_attr_name);
++	if (!err)
++		err = device_create_file(dev, &dev_attr_remove);
++	if (!err)
++		err = device_create_file(dev, &dev_attr_debug);
++	if (!err)
++		err = device_create_file(dev, &dev_attr_task);
++	if (!err)
++		ring->dev = dev;
++	else
++		device_unregister(dev);
+ 
+-fail:
+-	device_unregister(dev);
+ 	return err;
+ }
+ 
+-- 
+1.7.0.4
+

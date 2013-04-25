@@ -1,0 +1,17 @@
+# HG changeset patch
+# Parent 780b1cb096249bdb2c8acd81fc78f1bfff62f601
+
+diff -r 780b1cb09624 drivers/net/qla3xxx.c
+--- a/drivers/net/qla3xxx.c
++++ b/drivers/net/qla3xxx.c
+@@ -4059,8 +4059,8 @@ static int __devinit ql3xxx_probe(struct
+ 	qdev->adapter_timer.data = (unsigned long)qdev;
+ 
+ 	if(!cards_found) {
+-		printk(KERN_ALERT PFX "%s\n", DRV_STRING);
+-		printk(KERN_ALERT PFX "Driver name: %s, Version: %s.\n",
++		printk(KERN_INFO PFX "%s\n", DRV_STRING);
++		printk(KERN_INFO PFX "Driver name: %s, Version: %s.\n",
+ 	    	   DRV_NAME, DRV_VERSION);
+ 	}
+ 	ql_display_dev_info(ndev);

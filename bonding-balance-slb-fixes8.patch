@@ -1,0 +1,36 @@
+Fix for SCTX-245
+
+diff -r da36a8515fa5 drivers/net/bonding/bond_main.c
+--- a/drivers/net/bonding/bond_main.c	Thu Jun 10 12:35:36 2010 +0100
++++ b/drivers/net/bonding/bond_main.c	Thu Jun 10 12:40:58 2010 +0100
+@@ -965,6 +965,8 @@
+ 		return;
+ 
+ 	if (old_active) {
+-		if (bond->dev->flags & IFF_PROMISC)
++		if (bond->dev->flags & IFF_PROMISC &&
++		    bond->params.mode != BOND_MODE_SLB) {
+ 			dev_set_promiscuity(old_active->dev, -1);
++		}
+ 
+@@ -980,6 +981,8 @@
+ 
+ 	if (new_active) {
+ 		/* FIXME: Signal errors upstream. */
+-		if (bond->dev->flags & IFF_PROMISC)
++		if (bond->dev->flags & IFF_PROMISC &&
++		    bond->params.mode != BOND_MODE_SLB) {
+ 			dev_set_promiscuity(new_active->dev, 1);
++		}
+ 
+@@ -3346,6 +3348,10 @@
+ 		   "Permanent HW addr: %s\n",
+ 		   print_mac(mac, slave->perm_hwaddr));
+ 
++	seq_printf(seq, "Promiscuity ref count: %i\n",
++		slave->dev->promiscuity);
++	seq_printf(seq, "Flags: 0x%04X\n", slave->dev->flags);
++
+ 	if (bond->params.mode == BOND_MODE_8023AD) {
+ 		const struct aggregator *agg
+ 			= SLAVE_AD_INFO(slave).port.aggregator;

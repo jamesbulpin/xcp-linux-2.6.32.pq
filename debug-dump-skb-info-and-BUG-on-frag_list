@@ -1,0 +1,152 @@
+Add a check to make sure we never call a driver's start_xmit entry with
+a frag_list if it can't handle them. In the case where we do encounter
+such a mismatch then dump the skb and BUG().
+
+diff -r 5cc2fa237990 net/core/dev.c
+--- a/net/core/dev.c	Wed Aug 03 15:26:54 2011 +0100
++++ b/net/core/dev.c	Wed Aug 03 15:29:05 2011 +0100
+@@ -1735,6 +1735,18 @@ static int dev_gso_segment(struct sk_buf
+ 	return 0;
+ }
+ 
++static inline int __start_xmit(const struct net_device_ops *ops,
++			       struct sk_buff *skb,
++			       struct net_device *dev)
++{
++	if (skb_has_frags(skb) && !(dev->features & NETIF_F_FRAGLIST)) {
++		skb_dump_info(skb);
++		BUG();
++	}
++
++	return ops->ndo_start_xmit(skb, dev);
++}
++
+ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
+ 			struct netdev_queue *txq)
+ {
+@@ -1759,7 +1771,7 @@ int dev_hard_start_xmit(struct sk_buff *
+ 		if (dev->priv_flags & IFF_XMIT_DST_RELEASE)
+ 			skb_dst_drop(skb);
+ 
+-		rc = ops->ndo_start_xmit(skb, dev);
++		rc = __start_xmit(ops, skb, dev);
+ 		if (rc == NETDEV_TX_OK)
+ 			txq_trans_update(txq);
+ 		/*
+@@ -1793,7 +1805,7 @@ gso:
+ 		if (dev->priv_flags & IFF_XMIT_DST_RELEASE)
+ 			skb_dst_drop(nskb);
+ 
+-		rc = ops->ndo_start_xmit(nskb, dev);
++		rc = __start_xmit(ops, nskb, dev);
+ 		if (unlikely(rc != NETDEV_TX_OK)) {
+ 			nskb->next = skb->next;
+ 			skb->next = nskb;
+diff -r 5cc2fa237990 net/core/skbuff.c
+--- a/net/core/skbuff.c	Wed Aug 03 15:26:54 2011 +0100
++++ b/net/core/skbuff.c	Wed Aug 03 15:29:05 2011 +0100
+@@ -74,7 +74,7 @@
+ static struct kmem_cache *skbuff_head_cache __read_mostly;
+ static struct kmem_cache *skbuff_fclone_cache __read_mostly;
+ 
+-void skb_dump_info(const struct sk_buff *skb)
++static void __skb_dump_info(const char *prefix, const struct sk_buff *skb)
+ {
+ #ifdef CONFIG_XEN
+ 	int i, nr = skb_shinfo(skb)->nr_frags;
+@@ -83,26 +83,30 @@ void skb_dump_info(const struct sk_buff 
+ 	struct iphdr *iph = NULL;
+ 	struct tcphdr *tcph = NULL;
+ 
+-	printk(KERN_ERR "skb: skb at %p with %d users\n", skb, atomic_read(&skb->users));
+-	printk(KERN_ERR "skb: prev %p next %p prev->next %p next->prev %p\n",
++	printk(KERN_CRIT "%s: skb at %p with %d users\n", prefix,
++	       skb, atomic_read(&skb->users));
++	printk(KERN_CRIT "%s: prev %p next %p prev->next %p next->prev %p\n", prefix,
+ 	       skb->prev, skb->next,
+ 	       skb->prev ? skb->prev->next : NULL,
+ 	       skb->next ? skb->next->prev : NULL);
+-	printk(KERN_ERR "skb: len is %#x (data:%#x mac:%#x) truesize %#x\n",
++	printk(KERN_CRIT "%s: len is %#x (data:%#x mac:%#x) truesize %#x\n", prefix,
+ 	       skb->len, skb->data_len, skb->mac_len, skb->truesize);
+ 
+-	printk(KERN_ERR "skb: linear:%s\n", skb_is_nonlinear(skb) ? "No" : "Yes");
+-	printk(KERN_ERR "skb: data %p head %p tail %p end %p\n",
++	printk(KERN_CRIT "%s: linear:%s\n", prefix,
++	       skb_is_nonlinear(skb) ? "No" : "Yes");
++	printk(KERN_CRIT "%s: data %p head %p tail %p end %p\n", prefix,
+ 	       skb->data, skb->head, skb->tail, skb->end);
+-	printk(KERN_ERR "skb: flags are local_df:%d cloned:%d ip_summed:%d nohdr:%d\n",
++	printk(KERN_CRIT "%s: flags are local_df:%d cloned:%d ip_summed:%d nohdr:%d\n", prefix,
+ 	       skb->local_df, skb->cloned, skb->ip_summed, skb->nohdr);
+-	printk(KERN_ERR "skb:	        nfctinfo:%d pkt_type:%d fclone:%d ipvs_property:%d\n",
++	printk(KERN_CRIT "%s:	        nfctinfo:%d pkt_type:%d fclone:%d ipvs_property:%d\n", prefix,
+ 	       skb->nfctinfo, skb->pkt_type, skb->nohdr, skb->ipvs_property);
+-	printk(KERN_ERR "skb: shared info %p ref %#x\n", skb_shinfo(skb), atomic_read(&skb_shinfo(skb)->dataref));
+-	printk(KERN_ERR "skb: frag_list %p\n", skb_shinfo(skb)->frag_list);
++	printk(KERN_CRIT "%s: shared info %p ref %#x\n", prefix,
++	       skb_shinfo(skb), atomic_read(&skb_shinfo(skb)->dataref));
++	printk(KERN_CRIT "%s: frag_list %p\n", prefix,
++	       skb_shinfo(skb)->frag_list);
+ 
+ 	if (ethh) {
+-		printk(KERN_ERR "skb: eth: (%p) src:%02x:%02x:%02x:%02x:%02x:%02x dest:%02x:%02x:%02x:%02x:%02x:%02x proto %u\n",
++		printk(KERN_CRIT "%s: eth: (%p) src:%02x:%02x:%02x:%02x:%02x:%02x dest:%02x:%02x:%02x:%02x:%02x:%02x proto %u\n", prefix,
+ 		       ethh,
+ 		       ethh->h_source[0], ethh->h_source[1], ethh->h_source[2], ethh->h_source[3], ethh->h_source[4], ethh->h_source[5],
+ 		       ethh->h_dest[0], ethh->h_dest[1], ethh->h_dest[2], ethh->h_dest[3], ethh->h_dest[4], ethh->h_dest[5],
+@@ -110,29 +114,30 @@ void skb_dump_info(const struct sk_buff 
+ 		if (ethh->h_proto == __constant_htons(ETH_P_IP))
+ 			iph = ip_hdr(skb);
+ 	} else
+-		printk(KERN_ERR "skb: eth: header not present\n");
++		printk(KERN_CRIT "%s: eth: header not present\n", prefix);
+ 
+ 	if (iph) {
+-		printk(KERN_ERR "skb: ip: (%p) saddr "NIPQUAD_FMT" daddr "NIPQUAD_FMT" protocol %d frag_off %d\n",
++		printk(KERN_CRIT "%s: ip: (%p) saddr "NIPQUAD_FMT" daddr "NIPQUAD_FMT" protocol %d frag_off %d\n", prefix,
+ 		       iph, NIPQUAD(iph->saddr), NIPQUAD(iph->daddr), iph->protocol, iph->frag_off);
+ 
+ 		if (iph->protocol == IPPROTO_TCP)
+ 			tcph = tcp_hdr(skb);
+ 	} else
+-		printk(KERN_ERR "skb: ip: header not present\n");
++		printk(KERN_CRIT "%s: ip: header not present\n", prefix);
+ 
+ 	if (tcph) {
+-		printk(KERN_ERR "skb: tcp: (%p) source %d dest %d seq %u ack %u\n",
++		printk(KERN_CRIT "%s: tcp: (%p) source %d dest %d seq %u ack %u\n", prefix,
+ 		       tcph, ntohs(tcph->source), ntohs(tcph->dest), ntohl(tcph->seq), ntohl(tcph->ack_seq));
+ 	} else
+-		printk(KERN_ERR "skb: tcp: header not present\n");
++		printk(KERN_CRIT "%s: tcp: header not present\n", prefix);
+ 
+ #ifdef CONFIG_XEN
++	printk(KERN_CRIT "%s: nr_frags %d\n", prefix, nr);
+ 	for(i=0; i<nr; i++) {
+ 		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+ 		unsigned long pfn = page_to_pfn(frag->page);
+ 		unsigned long mfn = pfn_to_mfn(pfn);
+-		printk(KERN_ERR "skb: %d/%d page:%p count:%d offset:%#x size:%#x virt:%p pfn:%#lx mfn:%#lx%s flags:%lx%s%s)\n",
++		printk(KERN_CRIT "%s: %d/%d page:%p count:%d offset:%#x size:%#x virt:%p pfn:%#lx mfn:%#lx%s flags:%lx%s%s)\n", prefix,
+ 		       i + 1, nr, frag->page,
+ 		       atomic_read(&frag->page->_count),
+ 		       frag->page_offset, frag->size,
+@@ -144,6 +149,17 @@ void skb_dump_info(const struct sk_buff 
+ 	}
+ #endif
+ }
++
++void skb_dump_info(const struct sk_buff *skb)
++{
++	__skb_dump_info("skb", skb);
++	skb = skb_shinfo(skb)->frag_list;
++
++	while (skb != NULL) {
++		__skb_dump_info("frag", skb);
++		skb = skb->next;
++	}
++}
+ EXPORT_SYMBOL(skb_dump_info);
+ 
+ #ifdef CONFIG_XEN

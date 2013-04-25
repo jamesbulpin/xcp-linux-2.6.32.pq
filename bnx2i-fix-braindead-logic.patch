@@ -1,0 +1,15 @@
+# HG changeset patch
+# Parent 74429fee1079e9fa407d29edeb6d493dbf9248d4
+
+diff -r 74429fee1079 drivers/scsi/bnx2i/bnx2i.h
+--- a/drivers/scsi/bnx2i/bnx2i.h
++++ b/drivers/scsi/bnx2i/bnx2i.h
+@@ -39,7 +39,7 @@
+ 
+ #include "bnx2i_compat.h"
+ 
+-#include "../../bnx2/src/cnic_if.h"
++#include "../../net/bnx2/cnic_if.h"
+ 
+ #include "57xx_iscsi_hsi.h"
+ #include "57xx_iscsi_constants.h"

@@ -1,0 +1,91 @@
+diff -r ef38bea97f71 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 22:40:32 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 22:46:10 2010 -0700
+@@ -140,6 +140,7 @@
+ 	if (IS_ERR(bdev))
+ 		return PTR_ERR(bdev);
+ 
++	blkif->dev   = dev;
+ 	blkif->mode  = mode;
+ 	blkif->cdrom = cdrom;
+ 	blkif->bdev  = bdev;
+@@ -149,6 +150,18 @@
+ 	return 0;
+ }
+ 
++int
++blkif_bdev_reopen(blkif_t *blkif)
++{
++	if (!blkif->dev)
++		return -ENODEV;
++
++	return blkif_bdev_open(blkif,
++			       blkif->dev,
++			       blkif->mode,
++			       blkif->cdrom);
++}
++
+ void
+ blkif_bdev_close(blkif_t *blkif)
+ {
+diff -r ef38bea97f71 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 22:40:32 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 22:46:10 2010 -0700
+@@ -78,6 +78,7 @@
+ 
+ 	/* The block device attached to this interface. */
+ 	struct block_device *bdev;
++	dev_t                dev;
+ 	int                  mode;
+ 	int                  cdrom;
+ 
+@@ -123,6 +124,7 @@
+ 
+ int blkif_bdev_open(blkif_t *blkif, dev_t dev, int mode, int cdrom);
+ void blkif_bdev_close(blkif_t *blkif);
++int blkif_bdev_reopen(blkif_t *blkif);
+ sector_t blkif_size(blkif_t *blkif);
+ int blkif_sector_size(blkif_t *blkif);
+ unsigned int blkif_info(blkif_t *blkif);
+diff -r ef38bea97f71 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 22:40:32 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 22:46:10 2010 -0700
+@@ -601,6 +601,24 @@
+ 	return 0;
+ }
+ 
++static void
++blkback_reopen_bdev(struct backend_info *be)
++{
++	struct xenbus_device *xbdev = be->dev;
++	blkif_t *blkif = be->blkif;
++	int err;
++
++	if (blkif->bdev)
++		return;
++
++	if (xenbus_exists(XBT_NIL, xbdev->nodename, "pause"))
++		return;
++
++	err = blkif_bdev_reopen(be->blkif);
++	if (err)
++		xenbus_dev_fatal(xbdev, err, "reopening device");
++}
++
+ /**
+  * Callback received when the hotplug scripts have placed the physical-device
+  * node.  Read it and the mode node, and create a vbd.  If the frontend is
+@@ -685,12 +703,7 @@
+ 			if (err)
+ 				break;
+ 
+-			if (!be->blkif->bdev) {
+-				err = blkback_open_bdev(be);
+-				if (err)
+-					break;
+-			}
+-
++			blkback_reopen_bdev(be);
+ 			update_blkif_status(be->blkif);
+ 		}
+ 

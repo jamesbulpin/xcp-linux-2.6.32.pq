@@ -1,0 +1,179 @@
+From a798a341021d42b3f62db8dd4dd4d44e3cccc1c7 Mon Sep 17 00:00:00 2001
+From: Paul Durrant <paul.durrant@citrix.com>
+Date: Mon, 5 Jul 2010 11:45:29 +0100
+Subject: [PATCH] xen/netback: Add a new style of passing GSO packets to frontends.
+
+feature-gso-tcpv4-prefix uses precedes the packet data passed to
+the frontend with a ring entry that contains the necessary
+metadata. This style of GSO passing is required for Citrix
+Windows PV Drivers.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+Cc: Ian Campbell <ian.campbell@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/common.h     |    3 ++-
+ drivers/xen/netback/netback.c    |   37 ++++++++++++++++++++++++++++++++++---
+ drivers/xen/netback/xenbus.c     |   17 +++++++++++++----
+ include/xen/interface/io/netif.h |    4 ++++
+ 4 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index 857778c..1cbc4ff 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -82,7 +82,8 @@ struct xen_netif {
+ 	int smart_poll;
+ 
+ 	/* Internal feature information. */
+-	u8 can_queue:1;	/* can queue packets for receiver? */
++	u8 can_queue:1;	    /* can queue packets for receiver? */
++	u8 gso_prefix:1;    /* use a prefix segment for GSO information */
+ 
+ 	/* Allow netif_be_start_xmit() to peek ahead in the rx request
+ 	 * ring.  This is a prediction of what rx_req_cons will be once
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index c8f5c1b..c7ca2e7 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -432,6 +432,7 @@ static void netbk_gop_frag_copy(struct xen_netif *netif,
+ 			/* Overflowed this request, go to the next one */
+ 			req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
+ 			meta = npo->meta + npo->meta_prod++;
++			meta->gso_size = 0;
+ 			meta->size = 0;
+ 			meta->id = req->id;
+ 			npo->copy_off = 0;
+@@ -492,9 +493,23 @@ static int netbk_gop_skb(struct sk_buff *skb,
+ 
+ 	old_meta_prod = npo->meta_prod;
+ 
++	/* Set up a GSO prefix descriptor, if necessary */
++	if (skb_shinfo(skb)->gso_size && netif->gso_prefix) {
++		req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
++		meta = npo->meta + npo->meta_prod++;
++		meta->gso_size = skb_shinfo(skb)->gso_size;
++		meta->size = 0;
++		meta->id = req->id;
++	}
++
+ 	req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
+ 	meta = npo->meta + npo->meta_prod++;
+-	meta->gso_size = skb_shinfo(skb)->gso_size;
++
++	if (!netif->gso_prefix)
++		meta->gso_size = skb_shinfo(skb)->gso_size;
++	else
++		meta->gso_size = 0;
++
+ 	meta->size = 0;
+ 	meta->id = req->id;
+ 	npo->copy_off = 0;
+@@ -506,7 +521,7 @@ static int netbk_gop_skb(struct sk_buff *skb,
+ 			    offset_in_page(skb->data), 1);
+ 
+ 	/* Leave a gap for the GSO descriptor. */
+-	if (skb_shinfo(skb)->gso_size)
++	if (skb_shinfo(skb)->gso_size && !netif->gso_prefix)
+ 		netif->rx.req_cons++;
+ 
+ 	for (i = 0; i < nr_frags; i++) {
+@@ -623,6 +638,21 @@ static void net_rx_action(unsigned long data)
+ 
+ 		netif = netdev_priv(skb->dev);
+ 
++		if (netbk->meta[npo.meta_cons].gso_size && netif->gso_prefix) {
++			resp = RING_GET_RESPONSE(&netif->rx,
++						netif->rx.rsp_prod_pvt++);
++
++			resp->flags = NETRXF_gso_prefix | NETRXF_more_data;
++
++			resp->offset = netbk->meta[npo.meta_cons].gso_size;
++			resp->id = netbk->meta[npo.meta_cons].id;
++			resp->status = sco->meta_slots_used;
++
++			npo.meta_cons++;
++			sco->meta_slots_used--;
++		}
++
++
+ 		netif->stats.tx_bytes += skb->len;
+ 		netif->stats.tx_packets++;
+ 
+@@ -633,6 +663,7 @@ static void net_rx_action(unsigned long data)
+ 			flags = 0;
+ 		else
+ 			flags = NETRXF_more_data;
++
+ 		if (skb->ip_summed == CHECKSUM_PARTIAL) /* local packet? */
+ 			flags |= NETRXF_csum_blank | NETRXF_data_validated;
+ 		else if (skb->ip_summed == CHECKSUM_UNNECESSARY)
+@@ -645,7 +676,7 @@ static void net_rx_action(unsigned long data)
+ 					netbk->meta[npo.meta_cons].size,
+ 					flags);
+ 
+-		if (netbk->meta[npo.meta_cons].gso_size) {
++		if (netbk->meta[npo.meta_cons].gso_size && !netif->gso_prefix) {
+ 			struct xen_netif_extra_info *gso =
+ 				(struct xen_netif_extra_info *)
+ 				RING_GET_RESPONSE(&netif->rx,
+diff --git a/drivers/xen/netback/xenbus.c b/drivers/xen/netback/xenbus.c
+index ba7b1de..74c035b 100644
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -465,16 +465,25 @@ static int connect_rings(struct backend_info *be)
+ 			be->netif->dev->mtu = ETH_DATA_LEN;
+ 	}
+ 
+-	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4", "%d",
+-			 &val) < 0)
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4",
++			"%d", &val) < 0)
+ 		val = 0;
+ 	if (val) {
+ 		be->netif->features |= NETIF_F_TSO;
+ 		be->netif->dev->features |= NETIF_F_TSO;
+ 	}
+ 
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4-prefix",
++			"%d", &val) < 0)
++		val = 0;
++	if (val) {
++		be->netif->features |= NETIF_F_TSO;
++		be->netif->dev->features |= NETIF_F_TSO;
++		be->netif->gso_prefix = 1;
++	}
++
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-no-csum-offload",
+-			 "%d", &val) < 0)
++			"%d", &val) < 0)
+ 		val = 0;
+ 	if (val) {
+ 		be->netif->features &= ~NETIF_F_IP_CSUM;
+@@ -482,7 +491,7 @@ static int connect_rings(struct backend_info *be)
+ 	}
+ 
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-smart-poll",
+-			 "%d", &val) < 0)
++			"%d", &val) < 0)
+ 		val = 0;
+ 	if (val)
+ 		be->netif->smart_poll = 1;
+diff --git a/include/xen/interface/io/netif.h b/include/xen/interface/io/netif.h
+index 518481c..8309344 100644
+--- a/include/xen/interface/io/netif.h
++++ b/include/xen/interface/io/netif.h
+@@ -131,6 +131,10 @@ struct xen_netif_rx_request {
+ #define _NETRXF_extra_info     (3)
+ #define  NETRXF_extra_info     (1U<<_NETRXF_extra_info)
+ 
++/* GSO Prefix descriptor. */
++#define _NETRXF_gso_prefix     (4)
++#define  NETRXF_gso_prefix     (1U<<_NETRXF_gso_prefix)
++
+ struct xen_netif_rx_response {
+     uint16_t id;
+     uint16_t offset;       /* Offset in page of start of received packet  */
+-- 
+1.5.6.5
+

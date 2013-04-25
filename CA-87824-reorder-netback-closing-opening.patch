@@ -1,0 +1,52 @@
+# HG changeset patch
+# Parent 41f82ccc206109d3c9bed0c6468873b1646b009c
+CA-87824: Reorder the opening and closing for the netback sysfs interfaces in order to minimise the chances of being able to access a NULL sysfs entry.
+
+diff -r 41f82ccc2061 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -48,11 +48,10 @@ static int netback_remove(struct xenbus_
+ 
+ 	netback_remove_accelerators(be, dev);
+ 
+-	netif_sysfs_delif(dev);
+ 	unregister_hotplug_status_watch(be);
+ 	disconnect_backend(be);
++	dev_set_drvdata(&dev->dev, NULL);
+ 	kfree(be);
+-	dev_set_drvdata(&dev->dev, NULL);
+ 	return 0;
+ }
+ 
+@@ -78,12 +77,6 @@ static int netback_probe(struct xenbus_d
+ 	be->dev = dev;
+ 	dev_set_drvdata(&dev->dev, be);
+ 
+-	err = netif_sysfs_addif(dev);
+-	if (err) {
+-		xenbus_dev_fatal(dev, err, "creating sysfs entries");
+-		goto fail;
+-	}
+-
+ 	sg = 1;
+ 	if (netbk_copy_skb_mode == NETBK_ALWAYS_COPY_SKB)
+ 		sg = 0;
+@@ -261,6 +254,10 @@ static void backend_create_netif(struct 
+ 		return;
+ 	}
+ 
++	err = netif_sysfs_addif(dev);
++	if (err) {
++		dev_warn(dev, "failed to create sysfs entries");
++	}
+ 	kobject_uevent(&dev->dev.kobj, KOBJ_ONLINE);
+ }
+ 
+@@ -271,6 +268,7 @@ static void disconnect_backend(struct ba
+ 
+ 	if (be->netif) {
+ 		kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
++		netif_sysfs_delif(dev);
+ 		unregister_gso_watch(be);
+ 		unregister_gso_prefix_watch(be);
+ 		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");

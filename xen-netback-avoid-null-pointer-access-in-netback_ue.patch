@@ -1,0 +1,40 @@
+From 224c3a282f9b0916eb2fc1f0278e6638cffada2c Mon Sep 17 00:00:00 2001
+From: James Harper <james.harper@bendigoit.com.au>
+Date: Fri, 28 May 2010 23:12:56 -0700
+Subject: [PATCH] xen/netback: avoid null-pointer access in netback_uevent
+
+Check if drvdata has been set up yet and return if it hasn't.
+
+Signed-off-by: James Harper <james.harper@bendigoit.com.au>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/xenbus.c |    9 +++++++--
+ 1 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/xen/netback/xenbus.c b/drivers/xen/netback/xenbus.c
+index 70636d0..ba7b1de 100644
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -162,12 +162,17 @@ fail:
+  */
+ static int netback_uevent(struct xenbus_device *xdev, struct kobj_uevent_env *env)
+ {
+-	struct backend_info *be = dev_get_drvdata(&xdev->dev);
+-	struct xen_netif *netif = be->netif;
++	struct backend_info *be;
++	struct xen_netif *netif;
+ 	char *val;
+ 
+ 	DPRINTK("netback_uevent");
+ 
++	be = dev_get_drvdata(&xdev->dev);
++	if (!be)
++		return 0;
++	netif = be->netif;
++
+ 	val = xenbus_read(XBT_NIL, xdev->nodename, "script", NULL);
+ 	if (IS_ERR(val)) {
+ 		int err = PTR_ERR(val);
+-- 
+1.5.6.5
+

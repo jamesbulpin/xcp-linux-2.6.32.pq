@@ -1,0 +1,30 @@
+From f3b428f941a2c58b213349a0381ed6f9a9a9fb27 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Thu, 3 Jun 2010 03:12:38 +0000
+Subject: [PATCH 6/7] blktap: Update tap state when failing ring mmap
+
+blktap: Update tap state when failing ring mmap.
+
+Signed-off-by: Jake Wires <jake.wires@citrix.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/ring.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 1a4e937..b49c478 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -324,6 +324,8 @@ blktap_ring_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	free_page((unsigned long)sring);
+ 	kfree(map);
+ 
++	clear_bit(BLKTAP_RING_VMA, &tap->dev_inuse);
++
+ 	return -ENOMEM;
+ }
+ 
+-- 
+1.7.0.4
+

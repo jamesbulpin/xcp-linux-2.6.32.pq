@@ -1,0 +1,52 @@
+CXD-99: grantmap entries save grep/handle pairs, not bus/device ids.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 38f7c09307b1 drivers/xen/blkback/blkback-pagemap.c
+--- a/drivers/xen/blkback/blkback-pagemap.c	Fri May 28 02:41:14 2010 -0700
++++ b/drivers/xen/blkback/blkback-pagemap.c	Fri May 28 03:56:22 2010 -0700
+@@ -26,7 +26,7 @@
+ 
+ void
+ blkback_pagemap_set(int idx, struct page *page,
+-		    domid_t domid, busid_t busid, grant_ref_t gref)
++		    domid_t domid, grant_handle_t handle, grant_ref_t gref)
+ {
+ 	struct blkback_pagemap *entry;
+ 
+@@ -36,16 +36,14 @@
+ 	set_page_private(page, idx);
+ 
+ 	entry = blkback_pagemap + idx;
+-	if (!blkback_pagemap_entry_clear(entry)) {
+-		printk("overwriting pagemap %d: d %u b %u g %u\n",
+-		       idx, entry->domid, entry->busid, entry->gref);
+-		BUG();
+-	}
++	if (!blkback_pagemap_entry_clear(entry))
++		panic("overwriting pagemap %d: d %u h %u g %u\n",
++		      idx, entry->domid, entry->handle, entry->gref);
+ 
+-	entry->page  = page;
+-	entry->domid = domid;
+-	entry->busid = busid;
+-	entry->gref  = gref;
++	entry->page   = page;
++	entry->domid  = domid;
++	entry->handle = handle;
++	entry->gref   = gref;
+ }
+ EXPORT_SYMBOL_GPL(blkback_pagemap_set);
+ 
+diff -r 38f7c09307b1 drivers/xen/blkback/blkback-pagemap.h
+--- a/drivers/xen/blkback/blkback-pagemap.h	Fri May 28 02:41:14 2010 -0700
++++ b/drivers/xen/blkback/blkback-pagemap.h	Fri May 28 03:56:22 2010 -0700
+@@ -10,7 +10,7 @@
+ struct blkback_pagemap {
+ 	struct page     *page;
+ 	domid_t          domid;
+-	busid_t          busid;
++	grant_handle_t   handle;
+ 	grant_ref_t      gref;
+ };
+ 

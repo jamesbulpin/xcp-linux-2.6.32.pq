@@ -1,0 +1,73 @@
+diff -r 9433b01e23bb net/bridge/br_if.c
+--- a/net/bridge/br_if.c	Tue Mar 30 11:28:12 2010 +0100
++++ b/net/bridge/br_if.c	Thu Apr 01 15:44:19 2010 +0100
+@@ -299,12 +299,25 @@
+ 
+ static struct sk_buff *create_switch_learning_packet(struct net_device *dev, unsigned char *src_hw)
+ {
++	const char *signature = "Citrix XenServer Failover";
+ #pragma pack(1)
+ 	struct learning_pkt {
++		/* 802.2 header */
+ 		u8 mac_dst[ETH_ALEN];
+ 		u8 mac_src[ETH_ALEN];
+-		u16 type;
+-		u8 padding[ETH_ZLEN - ETH_HLEN];
++		u16 mac_len;
++
++		/* LLC header */
++		u8 llc_dsap;
++		u8 llc_ssap;
++		u8 llc_cntl;
++
++		/* SNAP header */
++		u8 snap_org[3];
++		u16 snap_type;
++
++		/* Payload */
++		u8 payload[strlen(signature) + 1 + 2*ETH_ALEN]; /* Sig + NULL + VIF MAC + Host MAC */
+ 	};
+ #pragma pack()
+ 	struct sk_buff *skb;
+@@ -315,13 +328,28 @@
+ 	const unsigned char dest_hw[ETH_ALEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+ 
+ 	memset(&pkt, 0, size);
++
++	/* 802.2 header */
+ 	memcpy(pkt.mac_dst, dest_hw, ETH_ALEN);
+ 	memcpy(pkt.mac_src, src_hw, ETH_ALEN);
+-	pkt.type = __constant_htons(ETH_P_LOOP);
+-	len = sprintf(&pkt.padding[0], "Citrix XenServer Failover");
++	pkt.mac_len = __constant_htons(size);
++
++	/*  LLC header */
++	pkt.llc_dsap = 0xaa;
++	pkt.llc_ssap = 0xaa;
++	pkt.llc_cntl = 0x3;
++
++	/* SNAP header */
++	pkt.snap_org[0] = 0x00;
++	pkt.snap_org[1] = 0x16;
++	pkt.snap_org[2] = 0x3e;
++	pkt.snap_type = __constant_htons(0x2134);
++
++	/* Payload */
++	len = sprintf(&pkt.payload[0], signature);
+ 	len++; /* NULL */
+-	memcpy(&pkt.padding[len], src_hw, ETH_ALEN); len += ETH_ALEN;
+-	memcpy(&pkt.padding[len], dev->dev_addr, ETH_ALEN); len += ETH_ALEN;
++	memcpy(&pkt.payload[len], src_hw, ETH_ALEN); len += ETH_ALEN;
++	memcpy(&pkt.payload[len], dev->dev_addr, ETH_ALEN); len += ETH_ALEN;
+ 
+ 	skb = dev_alloc_skb(size);
+ 	if (!skb)
+@@ -330,7 +358,7 @@
+ 	data = skb_put(skb, size);
+ 	memcpy(data, &pkt, size);
+ 
+-	skb->protocol = pkt.type;
++	skb->protocol = pkt.mac_len;
+ 	skb->priority = TC_PRIO_CONTROL;
+ 	skb->dev = dev;
+ 

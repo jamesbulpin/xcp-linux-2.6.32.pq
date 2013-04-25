@@ -1,0 +1,151 @@
+blkback: Add blkif_bdev_sync.
+
+Used to sleep on a dedicated refcount sneaked into the guest ring
+disconnect. Instead, make the kthread wait on blkif->requests_pending,
+which was already there.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r df92ecba41ad drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 18:56:22 2010 -0700
+@@ -154,6 +154,8 @@
+ {
+ 	struct block_device *bdev = blkif->bdev;
+ 
++	BUG_ON(atomic_read(&blkif->requests_pending));
++
+ 	if (bdev) {
+ 		blkif_bdev_flush(blkif);
+ 
+@@ -162,6 +164,21 @@
+ 	}
+ }
+ 
++static void
++blkif_bdev_sync(blkif_t *blkif)
++{
++	do {
++		set_current_state(TASK_UNINTERRUPTIBLE);
++
++		if (!atomic_read(&blkif->requests_pending))
++			break;
++
++		schedule();
++	} while (1);
++
++	__set_current_state(TASK_RUNNING);
++}
++
+ unsigned int
+ blkif_info(blkif_t *blkif)
+ {
+@@ -402,8 +419,6 @@
+ {
+ 	blkif_t *blkif = arg;
+ 
+-	blkif_get(blkif);
+-
+ 	if (debug_lvl)
+ 		printk(KERN_DEBUG "%s: started\n", current->comm);
+ 
+@@ -434,12 +449,13 @@
+ 			print_stats(blkif);
+ 	}
+ 
++	blkif_bdev_sync(blkif);
++
+ 	if (log_stats)
+ 		print_stats(blkif);
+ 	if (debug_lvl)
+ 		printk(KERN_DEBUG "%s: exiting\n", current->comm);
+ 
+-	blkif_put(blkif);
+ 	blkback_close(blkif);
+ 
+ 	return 0;
+@@ -470,7 +486,7 @@
+ 		collect_statistics(pending_req);
+ 		make_response(pending_req->blkif, pending_req->id,
+ 			      pending_req->operation, pending_req->status);
+-		blkif_put(pending_req->blkif);
++
+ 		free_req(pending_req);
+ 
+ 		if (atomic_dec_and_test(&blkif->requests_pending))
+@@ -691,7 +707,6 @@
+ 
+ 	plug_queue(blkif, preq.bdev);
+ 	atomic_set(&pending_req->pendcnt, 1);
+-	blkif_get(blkif);
+ 	atomic_inc(&blkif->requests_pending);
+ 
+ 	for (i = 0; i < nseg; i++) {
+diff -r df92ecba41ad drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 18:56:22 2010 -0700
+@@ -86,7 +86,6 @@
+ 	/* Private fields. */
+ 	int remove_requested;
+ 	spinlock_t       blk_ring_lock;
+-	atomic_t         refcnt;
+ 
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+@@ -112,8 +111,6 @@
+ 	s64                 st_wr_sum_usecs;
+ 	s64                 st_wr_max_usecs;
+ 
+-	wait_queue_head_t waiting_to_free;
+-
+ 	unsigned int   nr_shared_pages;
+ 	grant_handle_t shmem_handle[BLKIF_MAX_RING_PAGES];
+ } blkif_t;
+@@ -124,13 +121,6 @@
+ int blkif_map(blkif_t *blkif, unsigned long *shared_pages,
+ 	      unsigned int nr_shared_pages, unsigned int evtchn);
+ 
+-#define blkif_get(_b) (atomic_inc(&(_b)->refcnt))
+-#define blkif_put(_b)					\
+-	do {						\
+-		if (atomic_dec_and_test(&(_b)->refcnt))	\
+-			wake_up(&(_b)->waiting_to_free);\
+-	} while (0)
+-
+ int blkif_bdev_open(blkif_t *blkif, dev_t dev, int mode, int cdrom);
+ void blkif_bdev_close(blkif_t *blkif);
+ sector_t blkif_size(blkif_t *blkif);
+diff -r df92ecba41ad drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/interface.c	Thu Jun 24 18:56:22 2010 -0700
+@@ -47,9 +47,7 @@
+ 	memset(blkif, 0, sizeof(*blkif));
+ 	blkif->domid = domid;
+ 	spin_lock_init(&blkif->blk_ring_lock);
+-	atomic_set(&blkif->refcnt, 1);
+ 	blkif->st_print = jiffies;
+-	init_waitqueue_head(&blkif->waiting_to_free);
+ 	blkif->queue_state = QUEUE_RUNNING;
+ 	mutex_init(&blkif->queue_mutex);
+ 	atomic_set(&blkif->requests_pending, 0);
+@@ -194,10 +192,6 @@
+ 
+ void blkif_disconnect(blkif_t *blkif)
+ {
+-	atomic_dec(&blkif->refcnt);
+-	wait_event(blkif->waiting_to_free, atomic_read(&blkif->refcnt) == 0);
+-	atomic_inc(&blkif->refcnt);
+-
+ 	if (blkif->irq) {
+ 		unbind_from_irqhandler(blkif->irq, blkif);
+ 		blkif->irq = 0;
+@@ -214,8 +208,7 @@
+ void blkif_free(blkif_t *blkif)
+ {
+ 	BUG_ON(blkif->bdev);
+-	if (!atomic_dec_and_test(&blkif->refcnt))
+-		BUG();
++	BUG_ON(atomic_read(&blkif->requests_pending));
+ 	kmem_cache_free(blkif_cachep, blkif);
+ }
+ 

@@ -1,0 +1,16 @@
+netback: default to using kthreads not tasklets
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+
+diff -r 90b0acb067a1 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu Jun 10 16:32:55 2010 +0100
++++ b/drivers/xen/netback/netback.c	Fri Jun 11 08:42:02 2010 +0100
+@@ -121,7 +121,7 @@
+ 
+ int netbk_copy_skb_mode;
+ 
+-static int MODPARM_netback_kthread;
++static int MODPARM_netback_kthread = 1;
+ module_param_named(netback_kthread, MODPARM_netback_kthread, bool, 0);
+ MODULE_PARM_DESC(netback_kthread, "Use kernel thread to replace tasklet");
+ 

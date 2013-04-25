@@ -1,0 +1,49 @@
+No need to process pending_inuse list within the dealloc_prod/cons
+loop.
+
+signed-off-by: Paul Durrant <paul.durranty@citrix.com>
+
+diff -r 85eb34c367cf drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu Dec 09 11:59:17 2010 +0000
++++ b/drivers/xen/netback/netback.c	Thu Dec 09 12:02:20 2010 +0000
+@@ -992,11 +992,20 @@ static inline void net_tx_action_dealloc
+ 			gop++;
+ 		}
+ 
+-		if (netbk_copy_skb_mode != NETBK_DELAYED_COPY_SKB ||
+-		    list_empty(&netbk->pending_inuse_head))
+-			break;
++	} while (dp != netbk->dealloc_prod);
+ 
+-		/* Copy any entries that have been pending for too long. */
++	netbk->dealloc_cons = dc;
++
++	ret = HYPERVISOR_grant_table_op(
++		GNTTABOP_unmap_grant_ref, netbk->tx_unmap_ops,
++		gop - netbk->tx_unmap_ops);
++	BUG_ON(ret);
++
++	/*
++	 * Copy any entries that have been pending for too long
++	 */
++	if (netbk_copy_skb_mode == NETBK_DELAYED_COPY_SKB &&
++	    !list_empty(&netbk->pending_inuse_head)) {
+ 		list_for_each_entry_safe(inuse, n,
+ 				&netbk->pending_inuse_head, list) {
+ 			struct pending_tx_info *pending_tx_info;
+@@ -1022,14 +1031,7 @@ static inline void net_tx_action_dealloc
+ 
+ 			break;
+ 		}
+-	} while (dp != netbk->dealloc_prod);
+-
+-	netbk->dealloc_cons = dc;
+-
+-	ret = HYPERVISOR_grant_table_op(
+-		GNTTABOP_unmap_grant_ref, netbk->tx_unmap_ops,
+-		gop - netbk->tx_unmap_ops);
+-	BUG_ON(ret);
++	}
+ 
+ 	list_for_each_entry_safe(inuse, n, &list, list) {
+ 		struct pending_tx_info *pending_tx_info;

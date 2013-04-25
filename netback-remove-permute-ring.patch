@@ -1,0 +1,55 @@
+* * *
+Remove MODPARM_permute_returns parameters and associated code. It's not locked
+against other accesses to the dealloc_ring and so could cause all kinds of weirdness.
+Since the parameter defaults to off, let's just ditch the code so no-one accidentally
+turns it on.
+
+diff -r 13c955a212c8 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Apr 08 12:48:34 2011 +0100
++++ b/drivers/xen/netback/netback.c	Fri Apr 08 17:14:19 2011 +0100
+@@ -171,9 +171,6 @@ static inline pending_ring_idx_t nr_pend
+ static int MODPARM_copy_skb = 1;
+ module_param_named(copy_skb, MODPARM_copy_skb, bool, 0);
+ MODULE_PARM_DESC(copy_skb, "Copy data received from netfront without netloop");
+-static int MODPARM_permute_returns = 0;
+-module_param_named(permute_returns, MODPARM_permute_returns, bool, S_IRUSR|S_IWUSR);
+-MODULE_PARM_DESC(permute_returns, "Randomly permute the order in which TX responses are sent to the frontend");
+ 
+ int netbk_copy_skb_mode;
+ 
+@@ -776,25 +773,6 @@ out:
+ 	return rc;
+ }
+ 
+-static void permute_dealloc_ring(PEND_RING_IDX dc, PEND_RING_IDX dp)
+-{
+-	static unsigned random_src = 0x12345678;
+-	unsigned dst_offset;
+-	PEND_RING_IDX dest;
+-	u16 tmp;
+-
+-	while (dc != dp) {
+-		dst_offset = (random_src / 256) % (dp - dc);
+-		dest = dc + dst_offset;
+-		tmp = dealloc_ring[MASK_PEND_IDX(dest)];
+-		dealloc_ring[MASK_PEND_IDX(dest)] =
+-			dealloc_ring[MASK_PEND_IDX(dc)];
+-		dealloc_ring[MASK_PEND_IDX(dc)] = tmp;
+-		dc++;
+-		random_src *= 68389;
+-	}
+-}
+-
+ static inline void net_tx_action_dealloc(struct xen_netbk *netbk)
+ {
+ 	struct netbk_tx_pending_inuse *inuse, *n;
+@@ -817,9 +795,6 @@ static inline void net_tx_action_dealloc
+ 		/* Ensure we see all indices enqueued by netif_idx_release(). */
+ 		smp_rmb();
+ 
+-		if (MODPARM_permute_returns)
+-			permute_dealloc_ring(dc, dp);
+-
+ 		while (dc != dp) {
+ 			unsigned long pfn;
+ 			struct netbk_tx_pending_inuse *pending_inuse =

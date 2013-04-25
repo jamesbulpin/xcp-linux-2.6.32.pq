@@ -1,0 +1,65 @@
+diff -r 73ace0f3ccef arch/x86/kernel/machine_kexec_32.c
+--- a/arch/x86/kernel/machine_kexec_32.c	Tue Sep 07 15:36:45 2010 +0100
++++ b/arch/x86/kernel/machine_kexec_32.c	Thu Sep 09 09:10:44 2010 +0100
+@@ -41,15 +41,29 @@ static void machine_kexec_free_page_tabl
+ 	free_page((unsigned long)image->arch.pte1);
+ }
+ 
++static unsigned long get_kexec_pt_page(gfp_t gfp)
++{
++	unsigned long page = get_zeroed_page(gfp);
++#ifdef CONFIG_XEN
++	if (xen_limit_pages_to_max_mfn(virt_to_page(page), 0, 32) < 0)
++		return 0UL;
++#endif
++	return page;
++}
+ static int machine_kexec_alloc_page_tables(struct kimage *image)
+ {
+-	image->arch.pgd = (pgd_t *)get_zeroed_page(GFP_KERNEL);
++#ifdef CONFIG_XEN
++	if (xen_limit_pages_to_max_mfn(image->control_code_page, 0, 32) < 0)
++		return -ENOMEM;
++#endif
++
++	image->arch.pgd = (pgd_t *)get_kexec_pt_page(GFP_KERNEL);
+ #ifdef CONFIG_X86_PAE
+-	image->arch.pmd0 = (pmd_t *)get_zeroed_page(GFP_KERNEL);
+-	image->arch.pmd1 = (pmd_t *)get_zeroed_page(GFP_KERNEL);
++	image->arch.pmd0 = (pmd_t *)get_kexec_pt_page(GFP_KERNEL);
++	image->arch.pmd1 = (pmd_t *)get_kexec_pt_page(GFP_KERNEL);
+ #endif
+-	image->arch.pte0 = (pte_t *)get_zeroed_page(GFP_KERNEL);
+-	image->arch.pte1 = (pte_t *)get_zeroed_page(GFP_KERNEL);
++	image->arch.pte0 = (pte_t *)get_kexec_pt_page(GFP_KERNEL);
++	image->arch.pte1 = (pte_t *)get_kexec_pt_page(GFP_KERNEL);
+ 	if (!image->arch.pgd ||
+ #ifdef CONFIG_X86_PAE
+ 	    !image->arch.pmd0 || !image->arch.pmd1 ||
+@@ -80,6 +94,12 @@ static void machine_kexec_page_table_set
+ 	set_pte(pte, pfn_pte(paddr >> PAGE_SHIFT, PAGE_KERNEL_EXEC));
+ }
+ 
++#ifdef CONFIG_XEN
++#define __ma(x) (pfn_to_mfn(__pa((x)) >> PAGE_SHIFT) << PAGE_SHIFT)
++#else
++#define __ma(x) __pa(x)
++#endif
++
+ static void machine_kexec_prepare_page_tables(struct kimage *image)
+ {
+ 	void *control_page;
+@@ -97,12 +117,10 @@ static void machine_kexec_prepare_page_t
+ #endif
+ 	machine_kexec_page_table_set_one(
+ 		image->arch.pgd, pmd, image->arch.pte1,
+-		__pa(control_page), __pa(control_page));
++		__ma(control_page), __pa(control_page));
+ }
+ 
+ #ifdef CONFIG_XEN
+-
+-#define __ma(x) (pfn_to_mfn(__pa((x)) >> PAGE_SHIFT) << PAGE_SHIFT)
+ 
+ #if PAGES_NR > KEXEC_XEN_NO_PAGES
+ #error PAGES_NR is greater than KEXEC_XEN_NO_PAGES - Xen support will break

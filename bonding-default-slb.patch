@@ -1,0 +1,12 @@
+diff -r 69dbb2f4dfa5 -r 93e6fd43876c drivers/net/bonding/bond_main.c
+--- a/drivers/net/bonding/bond_main.c	Mon Sep 22 11:45:23 2008 +0100
++++ b/drivers/net/bonding/bond_main.c	Mon Sep 22 11:45:27 2008 +0100
+@@ -150,7 +150,7 @@ extern struct rw_semaphore bonding_rwsem
+ extern struct rw_semaphore bonding_rwsem;
+ static __be32 arp_target[BOND_MAX_ARP_TARGETS];
+ static int arp_ip_count;
+-static int bond_mode	= BOND_MODE_ROUNDROBIN;
++static int bond_mode	= BOND_MODE_SLB;
+ static int xmit_hashtype = BOND_XMIT_POLICY_LAYER2;
+ static int lacp_fast;
+ 

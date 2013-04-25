@@ -1,0 +1,53 @@
+From adb236eb839264255954076dbc4fc40f5738f08e Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 8 Oct 2010 17:11:51 +0100
+Subject: [PATCH] xen: netback: increase size of rx_meta array.
+
+We can end up needing as many of these as we need grant copy operations so
+increase the array size for the same reason.
+
+Crash observed on XenServer:
+kernel: ------------[ cut here ]------------
+kernel: kernel BUG at drivers/xen/netback/netback.c:834!
+kernel: invalid opcode: 0000 [#1] SMP
+kernel: last sysfs file: /sys/devices/xen-backend/vbd-10-768/statistics/rd_usecs
+kernel: Process netback (pid: 1413, ti=ec8a4000 task=ed0a6b70 task.ti=ec8a4000)
+kernel: Stack: 00000000 00000612 00000001 00000000 00020000 00000000 ecfbe000 00000000
+kernel:        ec8a5f80 ec8a5f98 ec8a5fac 00000000 c0537220 c0539220 00000000 c0534220
+kernel:        cd7afaa0 cd7afaa0 0000000c 00000014 062de396 00000001 00000001 00000014
+kernel: Call Trace:
+kernel:  [<c0285f10>] ? netbk_action_thread+0x0/0x1fe0
+kernel:  [<c013daf2>] ? kthread+0x42/0x70
+kernel:  [<c013dab0>] ? kthread+0x0/0x70
+kernel:  [<c010569b>] ? kernel_thread_helper+0x7/0x10
+kernel:  =======================
+kernel: Code: 00 00 c7 42 08 20 82 53 c0 8b 85 e4 fe ff ff c7 42 10 00 00 00 00 \
+              c7 42 14 f0 7f 00 00 89 42 0c 8b 8d ec fe ff ff e9 3e e9 ff ff <0f> \
+              0b eb fe 0f 0b eb fe 0f 0b eb fe 0f 0b eb fe 31 c0 e8 bf 31
+kernel: EIP: [<c028790a>] netbk_action_thread+0x19fa/0x1fe0 SS:ESP 0069:ec8a5d98
+
+Corresponding to
+	BUG_ON(npo.meta_prod > ARRAY_SIZE(netbk->meta));
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/common.h |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index b40ad72..feacf5f 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -320,7 +320,7 @@ struct xen_netbk {
+ 	struct gnttab_copy grant_copy_op[2*NET_RX_RING_SIZE];
+ 	unsigned char rx_notify[NR_IRQS];
+ 	u16 notify_list[NET_RX_RING_SIZE];
+-	struct netbk_rx_meta meta[NET_RX_RING_SIZE];
++	struct netbk_rx_meta meta[2*NET_RX_RING_SIZE];
+ };
+ 
+ extern struct xen_netbk *xen_netbk;
+-- 
+1.5.6.5
+

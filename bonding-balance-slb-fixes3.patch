@@ -1,0 +1,12 @@
+diff -r a55f2abb96e8 net/bridge/br_fdb.c
+--- a/net/bridge/br_fdb.c	Tue Sep 30 14:43:43 2008 +0100
++++ b/net/bridge/br_fdb.c	Wed Oct 01 14:12:16 2008 +0100
+@@ -372,7 +372,7 @@ int br_fdb_update(struct net_bridge *br,
+ #pragma pack()
+ 			struct arp_pkt *arp = (struct arp_pkt *)skb->data;
+ 
+-			if (compare_ether_addr(bcast, addr) != 0)
++			if (compare_ether_addr(bcast, eth_hdr(skb)->h_dest) != 0)
+ 				return 0;
+ 
+ 			if (!arp)

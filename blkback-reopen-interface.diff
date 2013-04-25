@@ -1,0 +1,36 @@
+Make blkback support the same tools interface as upstream.
+
+The official interface is:
+  1. tools write backend with "params"
+  2. blkback initialises the device
+Internally in Linux:
+  1. blkback emits UEVENT
+  2. udev script writes "physical-device" key
+  5. blkback opens the device
+
+Our blkback became specialised to the behaviour of xapi which wrote
+both the "params" key and the "physical-device" key in the same transaction.
+
+With this change a lot of workaround code can be removed from xapi
+and the same protocol used uniformly for both dom0 and FreeBSD/Linux
+driver domains.
+
+Signed-off-by: David Scott <dave.scott@eu.citrix.com>
+
+diff -r a66e9b13d8e9 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Sat Dec 03 20:44:55 2011 +0000
++++ b/drivers/xen/blkback/xenbus.c	Sun Dec 04 08:31:33 2011 +0000
+@@ -818,6 +818,14 @@
+ 	if (blkback_close_requested(be))
+ 		return;
+ 
++	/* It's only possible to re-open a device if it has
++	   been opened before. If the backend 'params' key is
++	   written before the 'physical-device' key then the
++	   backend state watch will call this function before
++	   the device is opened for the first time. */
++	if (!blkif->dev)
++		return;
++
+ 	err = blkif_bdev_reopen(be->blkif);
+ 	if (err)

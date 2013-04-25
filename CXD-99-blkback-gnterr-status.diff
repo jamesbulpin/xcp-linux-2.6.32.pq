@@ -1,0 +1,13 @@
+diff -r 7586d89f9254 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Tue Sep 08 15:21:57 2009 -0700
++++ b/drivers/xen/blkback/blkback.c	Tue Sep 08 15:23:01 2009 -0700
+@@ -557,7 +557,8 @@
+ 
+ 	for (i = 0; i < nseg; i++) {
+ 		if (unlikely(map[i].status != 0)) {
+-			DPRINTK("invalid buffer -- could not remap it\n");
++			DPRINTK("grant map of dom %u gref %u failed: status %d\n",
++				blkif->domid, req->seg[i].gref, map[i].status);
+ 			map[i].handle = BLKBACK_INVALID_HANDLE;
+ 			ret |= 1;
+ 			continue;

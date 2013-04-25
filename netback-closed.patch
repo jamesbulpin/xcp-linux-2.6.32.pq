@@ -1,0 +1,33 @@
+[CA-36432] Call disconnect_backend() when we go into CLOSED if the
+           frontend missed the CLOSING transition. This allows us to
+           work with old Windows frontends that misbehaved in this way.
+           Also, for simplicity, move the OFFLINE udev event into the
+           disconnect code.
+
+diff -r 8d11e4265530 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Thu Jan 27 12:38:06 2011 +0000
++++ b/drivers/xen/netback/xenbus.c	Thu Jan 27 13:14:59 2011 +0000
+@@ -228,6 +228,7 @@ static void disconnect_backend(struct ba
+ 	struct xenbus_device *dev = be->dev;
+ 
+ 	if (be->netif) {
++		kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
+ 		unregister_gso_watch(be);
+ 		unregister_gso_prefix_watch(be);
+ 		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");
+@@ -269,13 +270,13 @@ static void frontend_changed(struct xenb
+ 		break;
+ 
+ 	case XenbusStateClosing:
+-		if (be->netif)
+-			kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
+ 		disconnect_backend(be);
+ 		xenbus_switch_state(dev, XenbusStateClosing);
+ 		break;
+ 
+ 	case XenbusStateClosed:
++		if (dev->state == XenbusStateConnected)
++			disconnect_backend(be);
+ 		xenbus_switch_state(dev, XenbusStateClosed);
+ 		if (xenbus_dev_is_online(dev))
+ 			break;

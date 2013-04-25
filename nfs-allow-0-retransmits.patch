@@ -1,0 +1,14 @@
+diff -r 4e25fd8bbcb0 fs/nfs/client.c
+--- a/fs/nfs/client.c	Wed Jan 07 11:58:50 2009 +0000
++++ b/fs/nfs/client.c	Wed Jan 07 13:15:37 2009 +0000
+@@ -435,7 +435,9 @@
+ 	switch (proto) {
+ 	case XPRT_TRANSPORT_TCP:
+ 	case XPRT_TRANSPORT_RDMA:
+-		if (to->to_retries == 0)
++		if (to->to_retries == 0x7fffffff)
++			to->to_retries = 0;
++		else if (to->to_retries == 0)
+ 			to->to_retries = NFS_DEF_TCP_RETRANS;
+ 		if (to->to_initval == 0)
+ 			to->to_initval = NFS_DEF_TCP_TIMEO * HZ / 10;

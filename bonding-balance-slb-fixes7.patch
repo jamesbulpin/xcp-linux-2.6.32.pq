@@ -1,0 +1,42 @@
+diff -r d243c26a8b1d net/bridge/br_fdb.c
+--- a/net/bridge/br_fdb.c	Tue May 25 14:55:28 2010 +0100
++++ b/net/bridge/br_fdb.c	Wed May 26 11:24:31 2010 +0100
+@@ -416,8 +416,28 @@
+ 	if (eth_hdr(skb)->h_proto != htons(ETH_P_ARP))
+ 		return 0;
+ 
+-	if (arp->op_code != htons(ARPOP_REPLY))
++	if (arp->hw_addr_space != htons(ARPHRD_ETHER)
++	    || arp->hw_addr_len != ETH_ALEN)
+ 		return 0;
++
++	if (arp->prot_addr_space != htons(ETH_P_IP)
++	    || arp->prot_addr_len != 4)
++		return 0;
++
++
++	switch (arp->op_code) {
++	case htons(ARPOP_REQUEST):
++		if (arp->ip_src != arp->ip_dst)
++			return 0;
++
++		break;
++
++	case htons(ARPOP_REPLY):
++		break;
++
++	default:
++		return 0;
++	}
+ 
+ 	return 1;
+ }
+@@ -445,7 +465,7 @@
+ 	/* ignore packets unless we are using this port */
+ 	if (!(source->state == BR_STATE_LEARNING ||
+ 	      source->state == BR_STATE_FORWARDING))
+-		return;
++		return 1;
+ 
+ 	fdb = fdb_find(head, addr);
+ 	if (likely(fdb)) {

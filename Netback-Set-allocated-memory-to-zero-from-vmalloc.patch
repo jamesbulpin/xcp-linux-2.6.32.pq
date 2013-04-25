@@ -1,0 +1,28 @@
+From 595b10dfaad7653d7ce310ede5df686f6249b8b2 Mon Sep 17 00:00:00 2001
+From: Dongxiao Xu <dongxiao.xu@intel.com>
+Date: Thu, 10 Jun 2010 19:03:15 +0800
+Subject: [PATCH] Netback: Set allocated memory to zero from vmalloc.
+
+This should fix the windows/linux pv driver issue.
+
+Signed-off-by: Dongxiao Xu <dongxiao.xu@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/netback.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index b23fab0..f76913d 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -1623,6 +1623,7 @@ static int __init netback_init(void)
+ 		printk(KERN_ALERT "%s: out of memory\n", __func__);
+ 		return -ENOMEM;
+ 	}
++	memset(xen_netbk, 0, sizeof(struct xen_netbk) * xen_netbk_group_nr);
+ 
+ 	/* We can increase reservation by this much in net_rx_action(). */
+ //	balloon_update_driver_allowance(NET_RX_RING_SIZE);
+-- 
+1.5.6.5
+

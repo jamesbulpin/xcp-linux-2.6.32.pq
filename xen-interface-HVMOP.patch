@@ -1,0 +1,67 @@
+diff -r fe88b8f8f514 include/xen/interface/hvm/hvm_op.h
+--- a/include/xen/interface/hvm/hvm_op.h	Thu Mar 05 11:59:13 2009 +0000
++++ b/include/xen/interface/hvm/hvm_op.h	Thu Mar 05 12:00:22 2009 +0000
+@@ -73,11 +73,21 @@
+ /* Flushes all VCPU TLBs: @arg must be NULL. */
+ #define HVMOP_flush_tlbs          5
+ 
+-/* Following tools-only interfaces may change in future. */
+-#if defined(__XEN__) || defined(__XEN_TOOLS__)
++/* Get the current Xen time, in nanoseconds since system boot. */
++#define HVMOP_get_time_compat     6
++#define HVMOP_get_time            0x101
++struct xen_hvm_get_time {
++    uint64_t now;      /* OUT */
++};
++typedef struct xen_hvm_get_time xen_hvm_get_time_t;
++DEFINE_XEN_GUEST_HANDLE(xen_hvm_get_time_t);
++
++/* Hint from PV drivers for process destruction. */
++#define HVMOP_process_dying_compat 7
++#define HVMOP_process_dying        0x102
+ 
+ /* Track dirty VRAM. */
+-#define HVMOP_track_dirty_vram    6
++#define HVMOP_track_dirty_vram    128
+ struct xen_hvm_track_dirty_vram {
+     /* Domain to be tracked. */
+     domid_t  domid;
+@@ -93,7 +103,7 @@
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_track_dirty_vram_t);
+ 
+ /* Notify that some pages got modified by the Device Model. */
+-#define HVMOP_modified_memory    7
++#define HVMOP_modified_memory    129
+ struct xen_hvm_modified_memory {
+     /* Domain to be updated. */
+     domid_t  domid;
+@@ -105,7 +115,7 @@
+ typedef struct xen_hvm_modified_memory xen_hvm_modified_memory_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_modified_memory_t);
+ 
+-#define HVMOP_set_mem_type    8
++#define HVMOP_set_mem_type    130
+ typedef enum {
+     HVMMEM_ram_rw,             /* Normal read/write guest RAM */
+     HVMMEM_ram_ro,             /* Read-only; writes are discarded */
+@@ -125,7 +135,19 @@
+ typedef struct xen_hvm_set_mem_type xen_hvm_set_mem_type_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_mem_type_t);
+ 
++#define HVMOP_xentrace        0x100
++struct xen_hvm_xentrace {
++    uint16_t event, extra_bytes;
++    uint8_t extra[28];
++};
++typedef struct xen_hvm_xentrace xen_hvm_xentrace_t;
++DEFINE_XEN_GUEST_HANDLE(xen_hvm_xentrace_t);
+ 
+-#endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
++#define HVMOP_set_driver_version 0x103
++struct xen_hvm_set_driver_version {
++    uint32_t build;
++};
++typedef struct xen_hvm_set_driver_version xen_hvm_set_driver_version_t;
++DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_driver_version_t);
+ 
+ #endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */

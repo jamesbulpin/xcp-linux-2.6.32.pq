@@ -1,0 +1,12 @@
+diff -r cb9668955337 buildconfigs/create_config.sh
+--- a/buildconfigs/create_config.sh	Tue Sep 16 09:05:24 2008 +0100
++++ b/buildconfigs/create_config.sh	Tue Sep 16 09:05:39 2008 +0100
+@@ -28,7 +28,7 @@ echo "Using $skeleton as base config"
+ # Update
+ #
+ filter_template="s/^#\{0,1\} *\(CONFIG[^= ]*\).*/\/^#\\\{0,1\\\} *\1[= ].*\/d/p"
+-config_dirs="buildconfigs/conf.linux buildconfigs/conf.linux-${target_arch} buildconfigs/conf.linux${extraversion} buildconfigs/conf.linux-${target_arch}${extraversion}"
++: ${config_dirs:="buildconfigs/conf.linux buildconfigs/conf.linux-${target_arch} buildconfigs/conf.linux${extraversion} buildconfigs/conf.linux-${target_arch}${extraversion}"}
+ 
+ for config_dir in $config_dirs
+ do

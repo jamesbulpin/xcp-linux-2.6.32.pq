@@ -1,0 +1,43 @@
+From b34e5649ea3fc0f70f87e104c9b08a0dc013b6bb Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Thu, 3 Jun 2010 12:07:53 -0700
+Subject: [PATCH] blktap: Dequeue requests before completion.
+
+The blk_end_request path won't dequeue implicitly any more.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    4 +++-
+ 1 files changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index a50b622..8650f02 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -795,11 +795,13 @@ blktap_device_run_queue(struct blktap *tap)
+ 
+ 	while ((req = blk_peek_request(rq)) != NULL) {
+ 		if (!blk_fs_request(req)) {
++			blk_start_request(req);
+ 			__blk_end_request_cur(req, 0);
+ 			continue;
+ 		}
+ 
+ 		if (blk_barrier_rq(req)) {
++			blk_start_request(req);
+ 			__blk_end_request_cur(req, 0);
+ 			continue;
+ 		}
+@@ -882,7 +884,7 @@ blktap_device_do_request(struct request_queue *rq)
+ 	return;
+ 
+ fail:
+-	while ((req = blk_peek_request(rq))) {
++	while ((req = blk_fetch_request(rq))) {
+ 		BTERR("device closed: failing secs %llu - %llu\n",
+ 		      (unsigned long long)blk_rq_pos(req),
+ 		      (unsigned long long)blk_rq_pos(req) + blk_rq_sectors(req));
+-- 
+1.7.0.4
+

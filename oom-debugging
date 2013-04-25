@@ -1,0 +1,54 @@
+diff -r 81d702aede32 mm/oom_kill.c
+--- a/mm/oom_kill.c	Thu May 28 09:29:55 2009 +0100
++++ b/mm/oom_kill.c	Thu May 28 09:47:59 2009 +0100
+@@ -32,7 +32,7 @@
+ int sysctl_oom_kill_allocating_task;
+ int sysctl_oom_dump_tasks;
+ static DEFINE_SPINLOCK(zone_scan_lock);
+-/* #define DEBUG */
++#define DEBUG
+ 
+ /*
+  * Is all threads of the target process nodes overlap ours?
+@@ -163,7 +163,7 @@
+ 	}
+ 
+ #ifdef DEBUG
+-	printk(KERN_DEBUG "OOMkill: task %d (%s) got %lu points\n",
++	printk(KERN_INFO "OOMkill: task %d (%s) got %lu points\n",
+ 	p->pid, p->comm, points);
+ #endif
+ 	return points;
+@@ -424,6 +424,7 @@
+ {
+ 	unsigned long points = 0;
+ 	struct task_struct *p;
++	int orig_log_level;
+ 
+ 	cgroup_lock();
+ 	read_lock(&tasklist_lock);
+@@ -525,11 +526,15 @@
+ 	unsigned long points = 0;
+ 	unsigned long freed = 0;
+ 	enum oom_constraint constraint;
++	int orig_log_level;
+ 
+ 	blocking_notifier_call_chain(&oom_notify_list, 0, &freed);
+ 	if (freed > 0)
+ 		/* Got some memory back in the last second. */
+ 		return;
++
++	orig_log_level = console_loglevel;
++	console_loglevel = 7;
+ 
+ 	if (sysctl_panic_on_oom == 2)
+ 		panic("out of memory. Compulsory panic_on_oom is selected.\n");
+@@ -583,6 +588,8 @@
+ out:
+ 	read_unlock(&tasklist_lock);
+ 
++	console_loglevel = orig_log_level;
++
+ 	/*
+ 	 * Give "p" a good chance of killing itself before we
+ 	 * retry to allocate memory unless "p" is current

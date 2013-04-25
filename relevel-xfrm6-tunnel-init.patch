@@ -1,0 +1,36 @@
+---
+ net/ipv6/xfrm6_tunnel.c |   10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+Index: linux-2.6.32.hg/net/ipv6/xfrm6_tunnel.c
+===================================================================
+--- linux-2.6.32.hg.orig/net/ipv6/xfrm6_tunnel.c	2012-03-09 14:32:56.000000000 +0000
++++ linux-2.6.32.hg/net/ipv6/xfrm6_tunnel.c	2012-03-09 14:35:12.000000000 +0000
+@@ -344,22 +344,22 @@ static struct xfrm6_tunnel xfrm46_tunnel
+ 
+ static int __init xfrm6_tunnel_init(void)
+ {
+-	if (xfrm6_tunnel_spi_init() < 0)
+-		goto err;
+ 	if (xfrm_register_type(&xfrm6_tunnel_type, AF_INET6) < 0)
+-		goto err_spi;
++		goto err;
+ 	if (xfrm6_tunnel_register(&xfrm6_tunnel_handler, AF_INET6))
+ 		goto unreg;
+ 	if (xfrm6_tunnel_register(&xfrm46_tunnel_handler, AF_INET))
+ 		goto dereg6;
++	if (xfrm6_tunnel_spi_init() < 0)
++		goto dereg46;
+ 	return 0;
+ 
++dereg46:
++	xfrm6_tunnel_deregister(&xfrm46_tunnel_handler, AF_INET);
+ dereg6:
+ 	xfrm6_tunnel_deregister(&xfrm6_tunnel_handler, AF_INET6);
+ unreg:
+ 	xfrm_unregister_type(&xfrm6_tunnel_type, AF_INET6);
+-err_spi:
+-	xfrm6_tunnel_spi_fini();
+ err:
+ 	return -EAGAIN;
+ }

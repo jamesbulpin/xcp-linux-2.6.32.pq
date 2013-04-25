@@ -1,0 +1,813 @@
+SCTX-758: add page pools for pending_req pages and make the size of pending_reqs dynamic
+
+diff -r 9b990dc24f52 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Apr 12 15:49:16 2012 +0100
++++ b/drivers/xen/blkback/blkback.c	Mon Apr 16 17:27:52 2012 +0100
+@@ -44,28 +44,42 @@
+ #include <asm/hypervisor.h>
+ #include "common.h"
+ 
+-/*
+- * These are rather arbitrary. They are fairly large because adjacent requests
+- * pulled from a communication ring are quite likely to end up being part of
+- * the same scatter/gather request at the disc.
+- * 
+- * ** TRY INCREASING 'blkif_reqs' IF WRITE SPEEDS SEEM TOO LOW **
+- * 
+- * This will increase the chances of being able to write whole tracks.
+- * 64 should be enough to keep us competitive with Linux.
+- */
+-#define BLKIF_REQS_MIN 32
+-#define BLKIF_REQS_MAX 256
+-int blkif_reqs = 64;
+-module_param_named(reqs, blkif_reqs, int, 0444);
+-MODULE_PARM_DESC(reqs, "Number of blkback requests to allocate");
+-
+ /* Run-time switchable: /sys/module/blkback/parameters/ */
+ static unsigned int log_stats = 0;
+ static unsigned int debug_lvl = 0;
+ module_param(log_stats, int, 0644);
+ module_param(debug_lvl, int, 0644);
+ 
++
++/* max pages per shared page pool */
++#define POOL_MIN_PAGES           (32 * BLKIF_MAX_SEGMENTS_PER_REQUEST)
++#define POOL_MAX_PAGES           (256 * BLKIF_MAX_SEGMENTS_PER_REQUEST)
++
++/* default page pool size */
++#define POOL_DEFAULT_PAGES       (2 * \
++		BLK_RING_SIZE(blkif_max_ring_page_order) * \
++		BLKIF_MAX_SEGMENTS_PER_REQUEST)
++
++/* max number of pages allocatable per request. */
++#define POOL_MAX_REQUEST_PAGES   BLKIF_MAX_SEGMENTS_PER_REQUEST
++
++/* min request structs per pool. These grow dynamically. */
++#define POOL_MIN_REQS            BLK_RING_SIZE(blkif_max_ring_page_order)
++
++static struct kset *pool_set;
++
++#define kobj_to_pool(_kobj) container_of(_kobj, struct blkback_page_pool, kobj)
++
++static struct kmem_cache *request_cache;
++static mempool_t *request_pool;
++
++static void
++__page_pool_wake(struct blkback_page_pool *pool)
++{
++	if (pool->nr_free > 0)
++		wake_up(&pool->wait);
++}
++
+ /*
+  * Each outstanding request that we've passed to the lower device layers has a 
+  * 'pending_req' allocated to it. Each buffer_head that completes decrements 
+@@ -73,32 +87,21 @@
+  * response queued for it, with the saved 'id' passed back.
+  */
+ typedef struct {
+-	blkif_t       *blkif;
+-	u64            id;
+-	int            nr_pages;
+-	atomic_t       pendcnt;
+-	unsigned short operation;
+-	int            status;
+-	struct timeval time;
+-	struct list_head free_list;
++	blkif_t		       *blkif;
++	u64                     id;
++	int                     nr_pages;
++	atomic_t                pendcnt;
++	unsigned short          operation;
++	int                     status;
++	struct timeval          time;
++	struct page_group      *pgroup;
++	grant_handle_t          grant_handles[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+ } pending_req_t;
+ 
+-static pending_req_t *pending_reqs;
+-static struct list_head pending_free;
+-static DEFINE_SPINLOCK(pending_free_lock);
+-static DECLARE_WAIT_QUEUE_HEAD(pending_free_wq);
+-
+ #define BLKBACK_INVALID_HANDLE (~0)
+ 
+-static struct page **pending_pages;
+-static grant_handle_t *pending_grant_handles;
+-
+-static inline int vaddr_pagenr(pending_req_t *req, int seg)
+-{
+-	return (req - pending_reqs) * BLKIF_MAX_SEGMENTS_PER_REQUEST + seg;
+-}
+-
+-#define pending_page(req, seg) pending_pages[vaddr_pagenr(req, seg)]
++#define pending_page(req, seg) \
++	req->blkif->pool->pages[req->pgroup->idx * POOL_MAX_REQUEST_PAGES + seg]
+ 
+ static inline unsigned long vaddr(pending_req_t *req, int seg)
+ {
+@@ -106,10 +109,6 @@
+ 	return (unsigned long)pfn_to_kaddr(pfn);
+ }
+ 
+-#define pending_handle(_req, _seg) \
+-	(pending_grant_handles[vaddr_pagenr(_req, _seg)])
+-
+-
+ static int do_block_io_op(blkif_t *blkif);
+ static void dispatch_rw_block_io(blkif_t *blkif,
+ 				 blkif_request_t *req,
+@@ -255,31 +254,79 @@
+ /******************************************************************
+  * misc small helpers
+  */
+-static pending_req_t* alloc_req(void)
++
++static int blkback_req_get_pages(blkif_t *blkif, pending_req_t *request,
++		int nr_pages)
+ {
+-	pending_req_t *req = NULL;
++	struct blkback_page_pool *pool = blkif->pool;
++	struct page_group *pgroup;
++
++	BUG_ON(request->nr_pages != 0);
++	/* the check for (nr_pages > POOL_MAX_REQUEST_PAGES) is done later */
++
++	if (pool->nr_free == 0)
++		return -ENOMEM;
++
++	spin_lock_irq(&pool->lock);
++
++	if (list_empty(&pool->free_groups)) {
++		spin_unlock_irq(&pool->lock);
++		return -ENOMEM;
++	}
++
++	pgroup = list_entry(pool->free_groups.next, struct page_group,
++			free_list);
++	list_del(&pgroup->free_list);
++	pool->nr_free--;
++
++	request->pgroup = pgroup;
++	request->nr_pages = nr_pages;
++	request->blkif = blkif;
++	spin_unlock_irq(&pool->lock);
++
++	return 0;
++}
++
++static void blkback_req_put_pages(pending_req_t *request)
++{
++	struct blkback_page_pool *pool = NULL;
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&pending_free_lock, flags);
+-	if (!list_empty(&pending_free)) {
+-		req = list_entry(pending_free.next, pending_req_t, free_list);
+-		list_del(&req->free_list);
+-	}
+-	spin_unlock_irqrestore(&pending_free_lock, flags);
+-	return req;
++	BUG_ON(!request->blkif);
++	BUG_ON(!request->blkif->pool);
++	pool = request->blkif->pool;
++	spin_lock_irqsave(&pool->lock, flags);
++	list_add(&request->pgroup->free_list, &pool->free_groups);
++	pool->nr_free++;
++	request->nr_pages = 0;
++	request->pgroup = NULL;
++	spin_unlock_irqrestore(&pool->lock, flags);
+ }
+ 
+-static void free_req(pending_req_t *req)
++static pending_req_t* blkback_request_alloc(void)
+ {
+-	unsigned long flags;
+-	int was_empty;
++	pending_req_t *request;
+ 
+-	spin_lock_irqsave(&pending_free_lock, flags);
+-	was_empty = list_empty(&pending_free);
+-	list_add(&req->free_list, &pending_free);
+-	spin_unlock_irqrestore(&pending_free_lock, flags);
+-	if (was_empty)
+-		wake_up(&pending_free_wq);
++	request = mempool_alloc(request_pool, GFP_NOWAIT);
++	if (!request)
++		return NULL;
++
++	memset(request, 0, sizeof(*request));
++	return request;
++}
++
++static void blkback_request_free(pending_req_t *request)
++{
++	blkif_t *blkif;
++	BUG_ON(!request);
++	blkif = request->blkif;
++	if (request->pgroup)
++		blkback_req_put_pages(request);
++
++	mempool_free(request, request_pool);
++
++	if (blkif)
++		__page_pool_wake(blkif->pool);
+ }
+ 
+ static void unplug_queue(blkif_t *blkif)
+@@ -311,13 +358,12 @@
+ 	int ret;
+ 
+ 	for (i = 0; i < req->nr_pages; i++) {
+-		handle = pending_handle(req, i);
++		handle = req->grant_handles[i];
+ 		if (handle == BLKBACK_INVALID_HANDLE)
+ 			continue;
+-		blkback_pagemap_clear(pending_page(req, i));
+ 		gnttab_set_unmap_op(&unmap[invcount], vaddr(req, i),
+ 				    GNTMAP_host_map, handle);
+-		pending_handle(req, i) = BLKBACK_INVALID_HANDLE;
++		req->grant_handles[i] = BLKBACK_INVALID_HANDLE;
+ 		invcount++;
+ 	}
+ 
+@@ -374,7 +420,7 @@
+ 		return 1;
+ 
+ 	if (blkif->waiting_reqs)
+-		return !list_empty(&pending_free);
++		return (blkif->pool->nr_free > 0);
+ 
+ 	return 0;
+ }
+@@ -406,7 +452,7 @@
+ 		if (try_to_freeze())
+ 			continue;
+ 
+-		wait_event_interruptible(pending_free_wq,
++		wait_event_interruptible(blkif->pool->wait,
+ 					 blkif_activate(blkif));
+ 
+ 		blkif->waiting_reqs = 0;
+@@ -505,7 +551,7 @@
+ 		make_response(pending_req->blkif, pending_req->id,
+ 			      pending_req->operation, pending_req->status);
+ 
+-		free_req(pending_req);
++		blkback_request_free(pending_req);
+ 
+ 		if (atomic_dec_and_test(&blkif->requests_pending)) {
+ 			unsigned long flags;
+@@ -580,7 +626,7 @@
+ 			break;
+ 		}
+ 
+-		pending_req = alloc_req();
++		pending_req = blkback_request_alloc();
+ 		if (NULL == pending_req) {
+ 			blkif->st_oo_req++;
+ 			more_to_do = 1;
+@@ -600,6 +646,15 @@
+ 		default:
+ 			BUG();
+ 		}
++
++		if (blkback_req_get_pages(blkif, pending_req,
++					req.nr_segments)) {
++			blkback_request_free(pending_req);
++			blkif->st_oo_req++;
++			more_to_do = 1;
++			break;
++		}
++
+ 		blk_rings->common.req_cons = ++rc; /* before make_response() */
+ 
+ 		/* Apply all sanity checks to /private copy/ of request. */
+@@ -625,7 +680,7 @@
+ 				req.operation);
+ 			make_response(blkif, req.id, req.operation,
+ 				      BLKIF_RSP_ERROR);
+-			free_req(pending_req);
++			blkback_request_free(pending_req);
+ 			break;
+ 		}
+ 
+@@ -694,11 +749,10 @@
+ 	preq.sector_number = req->sector_number;
+ 	preq.nr_sects      = 0;
+ 
+-	pending_req->blkif     = blkif;
++	BUG_ON(pending_req->nr_pages != nseg);
+ 	pending_req->id        = req->id;
+ 	pending_req->operation = req->operation;
+ 	pending_req->status    = BLKIF_RSP_OKAY;
+-	pending_req->nr_pages  = nseg;
+ 	do_gettimeofday(&pending_req->time);
+ 
+ 	for (i = 0; i < nseg; i++) {
+@@ -736,11 +790,7 @@
+ 			FOREIGN_FRAME(map[i].dev_bus_addr >> PAGE_SHIFT));
+ 		seg[i].buf  = map[i].dev_bus_addr | 
+ 			(req->seg[i].first_sect << 9);
+-		blkback_pagemap_set(vaddr_pagenr(pending_req, i),
+-				    pending_page(pending_req, i),
+-				    blkif->domid, req->handle,
+-				    req->seg[i].gref);
+-		pending_handle(pending_req, i) = map[i].handle;
++		pending_req->grant_handles[i] = map[i].handle;
+ 	}
+ 
+ 	if (ret)
+@@ -815,7 +865,7 @@
+ 	fast_flush_area(pending_req);
+  fail_response:
+ 	make_response(blkif, req->id, req->operation, BLKIF_RSP_ERROR);
+-	free_req(pending_req);
++	blkback_request_free(pending_req);
+ 	msleep(1); /* back off a bit */
+ 	return;
+ 
+@@ -872,52 +922,246 @@
+ 		notify_remote_via_irq(blkif->irq);
+ }
+ 
++struct pool_attribute {
++	struct attribute attr;
++
++	ssize_t (*show)(struct blkback_page_pool *pool,
++			char *buf);
++
++	ssize_t (*store)(struct blkback_page_pool *pool,
++			 const char *buf, size_t count);
++};
++
++#define kattr_to_pool_attr(_kattr) \
++	container_of(_kattr, struct pool_attribute, attr)
++
++static ssize_t
++blkback_page_pool_show_size(struct blkback_page_pool *pool,
++			   char *buf)
++{
++	return sprintf(buf, "%d\n", pool->nr_pages);
++}
++
++static struct pool_attribute blkback_page_pool_attr_size =
++	__ATTR(size, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH,
++	       blkback_page_pool_show_size, NULL);
++
++static ssize_t
++blkback_page_pool_show_free(struct blkback_page_pool *pool,
++			   char *buf)
++{
++	return sprintf(buf, "%d\n", pool->nr_free * POOL_MAX_REQUEST_PAGES);
++}
++
++static struct pool_attribute blkback_page_pool_attr_free =
++	__ATTR(free, S_IRUSR|S_IRGRP|S_IROTH,
++	       blkback_page_pool_show_free, NULL);
++
++static struct attribute *blkback_page_pool_attrs[] = {
++	&blkback_page_pool_attr_size.attr,
++	&blkback_page_pool_attr_free.attr,
++	NULL,
++};
++
++static inline struct kobject*
++__blkback_kset_find_obj(struct kset *kset, const char *name)
++{
++	struct kobject *k;
++	struct kobject *ret = NULL;
++
++	spin_lock(&kset->list_lock);
++	list_for_each_entry(k, &kset->list, entry) {
++		if (kobject_name(k) && !strcmp(kobject_name(k), name)) {
++			ret = kobject_get(k);
++			break;
++		}
++	}
++	spin_unlock(&kset->list_lock);
++	return ret;
++}
++
++static ssize_t
++blkback_page_pool_show_attr(struct kobject *kobj, struct attribute *kattr,
++			   char *buf)
++{
++	struct blkback_page_pool *pool = kobj_to_pool(kobj);
++	struct pool_attribute *attr = kattr_to_pool_attr(kattr);
++
++	if (attr->show)
++		return attr->show(pool, buf);
++
++	return -EIO;
++}
++
++static ssize_t
++blkback_page_pool_store_attr(struct kobject *kobj, struct attribute *kattr,
++			    const char *buf, size_t size)
++{
++	struct blkback_page_pool *pool = kobj_to_pool(kobj);
++	struct pool_attribute *attr = kattr_to_pool_attr(kattr);
++
++	if (attr->show)
++		return attr->store(pool, buf, size);
++
++	return -EIO;
++}
++
++static struct sysfs_ops blkback_page_pool_sysfs_ops = {
++	.show		= blkback_page_pool_show_attr,
++	.store		= blkback_page_pool_store_attr,
++};
++
++static void
++blkback_page_pool_release(struct kobject *kobj)
++{
++	int i;
++
++	struct blkback_page_pool *pool = kobj_to_pool(kobj);
++	BUG_ON(pool->nr_free * POOL_MAX_REQUEST_PAGES != pool->nr_pages);
++	for (i = 0; i < pool->nr_pages; i++)
++		set_phys_to_machine(page_to_pfn(pool->pages[i]),
++				INVALID_P2M_ENTRY);
++	free_empty_pages_and_pagevec(pool->pages, pool->nr_pages);
++	kfree(pool->page_groups);
++	kfree(pool);
++}
++
++struct kobj_type blkback_page_pool_ktype = {
++	.release       = blkback_page_pool_release,
++	.sysfs_ops     = &blkback_page_pool_sysfs_ops,
++	.default_attrs = blkback_page_pool_attrs,
++};
++
++struct blkback_page_pool*
++blkback_page_pool_create(const char *name, int nr_pages)
++{
++	struct blkback_page_pool *pool;
++	int nr_groups, i, err;
++
++	if (!nr_pages)
++		nr_pages = POOL_DEFAULT_PAGES;
++	nr_pages = max(POOL_MIN_PAGES, nr_pages);
++	nr_pages = min(nr_pages, POOL_MAX_PAGES);
++	nr_groups = nr_pages / POOL_MAX_REQUEST_PAGES;
++	nr_pages = nr_groups * POOL_MAX_REQUEST_PAGES;
++
++	err = -ENOMEM;
++	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
++	if (!pool) 
++		goto fail;
++
++	spin_lock_init(&pool->lock);
++	init_waitqueue_head(&pool->wait);
++
++	pool->pages = alloc_empty_pages_and_pagevec(nr_pages);
++	if (!pool->pages)
++		goto fail_pool;
++
++	pool->page_groups = kzalloc(nr_groups * sizeof(struct page_group),
++			GFP_KERNEL);
++	if (!pool->page_groups)
++		goto fail_pages;
++
++	pool->nr_pages = nr_pages;
++	pool->nr_free = nr_groups;
++
++	INIT_LIST_HEAD(&pool->free_groups);
++	for (i = 0; i < nr_groups; i++) {
++		pool->page_groups[i].idx = i;
++		list_add_tail(&pool->page_groups[i].free_list,
++				&pool->free_groups);
++	}
++
++	kobject_init(&pool->kobj, &blkback_page_pool_ktype);
++	pool->kobj.kset = pool_set;
++	err = kobject_add(&pool->kobj, &pool_set->kobj, "%s", name);
++	if (err)
++		goto fail_groups;
++
++	return pool;
++
++	kobject_del(&pool->kobj);
++fail_groups:
++	kfree(pool->page_groups);
++fail_pages:
++	free_empty_pages_and_pagevec(pool->pages, nr_pages);
++fail_pool:
++	kfree(pool);
++fail:
++	return ERR_PTR(err);
++}
++
++struct blkback_page_pool* blkback_page_pool_find(const char *name)
++{
++	struct kobject *kobj;
++
++	kobj = __blkback_kset_find_obj(pool_set, name);
++	if (!kobj)
++		return NULL;
++
++	return kobj_to_pool(kobj);
++}
++
++static void pending_req_ctor(void *obj)
++{
++	pending_req_t *request = obj;
++	memset(request, 0, sizeof(*request));
++}
++
++int __init blkback_req_pool_init(struct kobject *parent)
++{
++	request_cache =
++		kmem_cache_create("blkback-request",
++				  sizeof(pending_req_t), 0,
++				  0, pending_req_ctor);
++	if (!request_cache)
++		return -ENOMEM;
++
++	request_pool =
++		mempool_create_slab_pool(POOL_MIN_REQS, request_cache);
++	if (!request_pool)
++		return -ENOMEM;
++
++	pool_set = kset_create_and_add("blkback-pools", NULL, parent);
++	if (!pool_set)
++		return -ENOMEM;
++
++	return 0;
++}
++
++void blkback_page_pool_exit(void)
++{
++	if (pool_set) {
++		BUG_ON(!list_empty(&pool_set->list));
++		kset_unregister(pool_set);
++		pool_set = NULL;
++	}
++
++	if (request_pool) {
++		mempool_destroy(request_pool);
++		request_pool = NULL;
++	}
++
++	if (request_cache) {
++		kmem_cache_destroy(request_cache);
++		request_cache = NULL;
++	}
++}
++
+ static int __init blkif_init(void)
+ {
+-	int i, mmap_pages;
++	int err;
+ 
+ 	if (!is_running_on_xen())
+ 		return -ENODEV;
+ 
+-	if (blkif_reqs < BLKIF_REQS_MIN)
+-		blkif_reqs = BLKIF_REQS_MIN;
+-
+-	if (blkif_reqs > BLKIF_REQS_MAX)
+-		blkif_reqs = BLKIF_REQS_MAX;
+-
+-	mmap_pages = blkif_reqs * BLKIF_MAX_SEGMENTS_PER_REQUEST;
+-
+-	pending_reqs          = kmalloc(sizeof(pending_reqs[0]) *
+-					blkif_reqs, GFP_KERNEL);
+-	pending_grant_handles = kmalloc(sizeof(pending_grant_handles[0]) *
+-					mmap_pages, GFP_KERNEL);
+-	pending_pages         = alloc_empty_pages_and_pagevec(mmap_pages);
+-
+-	if (blkback_pagemap_init(mmap_pages))
+-		goto out_of_memory;
+-
+-	if (!pending_reqs || !pending_grant_handles || !pending_pages)
+-		goto out_of_memory;
+-
+-	for (i = 0; i < mmap_pages; i++)
+-		pending_grant_handles[i] = BLKBACK_INVALID_HANDLE;
+-
+-	memset(pending_reqs, 0, sizeof(pending_reqs));
+-	INIT_LIST_HEAD(&pending_free);
+-
+-	for (i = 0; i < blkif_reqs; i++)
+-		list_add_tail(&pending_reqs[i].free_list, &pending_free);
++	err = blkback_req_pool_init(kernel_kobj);
++	if (err)
++		return err;
+ 
+ 	blkif_xenbus_init();
+ 
+ 	return 0;
+-
+- out_of_memory:
+-	kfree(pending_reqs);
+-	kfree(pending_grant_handles);
+-	free_empty_pages_and_pagevec(pending_pages, mmap_pages);
+-	printk("%s: out of memory\n", __FUNCTION__);
+-	return -ENOMEM;
+ }
+ 
+ module_init(blkif_init);
+diff -r 9b990dc24f52 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Apr 12 15:49:16 2012 +0100
++++ b/drivers/xen/blkback/common.h	Mon Apr 16 17:27:52 2012 +0100
+@@ -68,7 +68,6 @@
+ #define BLKIF_MAX_RING_PAGES      (1 << BLKIF_MAX_RING_PAGE_ORDER)
+ #define BLK_RING_SIZE(_order)     __CONST_RING_SIZE(blkif, PAGE_SIZE << (_order))
+ 
+-extern int blkif_reqs;
+ extern int blkif_max_ring_page_order;
+ 
+ typedef struct blkif_st {
+@@ -98,6 +97,7 @@
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+ 	struct request_queue *plug;
++	struct blkback_page_pool *pool;
+ 
+ 	/* queue management */
+ 	atomic_t            requests_pending;
+@@ -121,6 +121,23 @@
+ 	grant_handle_t shmem_handle[BLKIF_MAX_RING_PAGES];
+ } blkif_t;
+ 
++/* keep track of empty pages in groups of POOL_MAX_REQUEST_PAGES */
++struct page_group {
++	int                     idx; /* index into the **pages vec */
++	struct list_head        free_list;
++};
++
++struct blkback_page_pool {
++	int                     nr_pages;
++	int                     nr_free; /* page groups */
++	struct page           **pages;
++	struct page_group      *page_groups;
++	struct list_head        free_groups;
++	spinlock_t              lock;
++	struct kobject          kobj;
++	wait_queue_head_t       wait;
++};
++
+ blkif_t *blkif_alloc(domid_t domid);
+ void blkif_disconnect(blkif_t *blkif);
+ void blkif_free(blkif_t *blkif);
+@@ -157,4 +174,8 @@
+ 
+ void blkback_queue_stopped(struct backend_info *be);
+ 
++struct blkback_page_pool* blkback_page_pool_find(const char *name);
++struct blkback_page_pool* blkback_page_pool_create(const char *name,
++		int nr_pages);
++
+ #endif /* __BLKIF__BACKEND__COMMON_H__ */
+diff -r 9b990dc24f52 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Apr 12 15:49:16 2012 +0100
++++ b/drivers/xen/blkback/xenbus.c	Mon Apr 16 17:27:52 2012 +0100
+@@ -68,13 +68,6 @@
+ 	    order > BLKIF_MAX_RING_PAGE_ORDER)
+ 		return -EINVAL;
+ 
+-	if (blkif_reqs < BLK_RING_SIZE(order))
+-		printk(KERN_WARNING "WARNING: "
+-		       "I/O request space (%d reqs) < ring order %ld, "
+-		       "consider increasing %s.reqs to >= %ld.",
+-		       blkif_reqs, order, KBUILD_MODNAME,
+-		       roundup_pow_of_two(BLK_RING_SIZE(order)));
+-
+ 	blkif_max_ring_page_order = order;
+ 
+ 	return 0;
+@@ -465,7 +458,7 @@
+ 			  char *buf)
+ {
+ 	struct backend_info *be = dev_get_drvdata(dev);
+-	return sprintf(buf, "%#lx", be->queue_events);
++	return sprintf(buf, "%#lx\n", be->queue_events);
+ }
+ ssize_t store_queue_events(struct device *dev, struct device_attribute *attr,
+ 			   const char *buf, size_t count)
+@@ -478,6 +471,17 @@
+ static DEVICE_ATTR(queue_events, S_IRUGO|S_IWUSR,
+ 		   show_queue_events, store_queue_events);
+ 
++static ssize_t blkback_sysfs_show_pool(struct device *dev,
++		       struct device_attribute *attr,
++		       char *buf)
++{
++	struct backend_info *be = dev_get_drvdata(dev);
++	blkif_t *blkif = be->blkif;
++	return sprintf(buf, "%s\n", kobject_name(&blkif->pool->kobj));
++}
++
++DEVICE_ATTR(page_pool, S_IRUSR, blkback_sysfs_show_pool, NULL);
++
+ static int xenvbd_sysfs_addif(struct xenbus_device *dev)
+ {
+ 	int error;
+@@ -503,11 +507,16 @@
+ 	if (error)
+ 		goto fail5;
+ 
++	error = device_create_file(&dev->dev, &dev_attr_page_pool);
++	if (error)
++		goto fail6;
++
+ 	be->group_added = 1;
+ 
+ 	return 0;
+ 
+-	device_remove_file(&dev->dev, &dev_attr_io_ring);
++	device_remove_file(&dev->dev, &dev_attr_page_pool);
++fail6:	device_remove_file(&dev->dev, &dev_attr_io_ring);
+ fail5:	device_remove_file(&dev->dev, &dev_attr_queue_events);
+ fail4:	sysfs_remove_group(&dev->dev.kobj, &vbdstat_group);
+ fail3:	device_remove_file(&dev->dev, &dev_attr_mode);
+@@ -536,6 +545,10 @@
+ 
+ 		blkif_bdev_close(blkif);
+ 		blkif_disconnect(blkif);
++
++		if (blkif->pool)
++			kobject_put(&be->blkif->pool->kobj);
++
+ 		blkif_free(blkif);
+ 
+ 		kfree(be);
+@@ -676,6 +689,53 @@
+ 	return err;
+ }
+ 
++static int blkback_page_pool_assign(blkif_t *blkif, const char *nodename)
++{
++	char *path, *pool_name, *pool_sz_str = NULL;
++	int pool_size;
++	int err, free_pool_name = 0;
++
++	err = 0;
++	path = kasprintf(GFP_KERNEL, "%s/%s", nodename, "sm-data");
++	if (!path)
++		return -ENOMEM;
++
++	if (xenbus_exists(XBT_NIL, path, "mem-pool")) {
++		pool_name = xenbus_read(XBT_NIL, path, "mem-pool", NULL);
++		if (IS_ERR(pool_name)) {
++			err = PTR_ERR(pool_name);
++			goto out;
++		}
++		free_pool_name = 1;
++	} else {
++		pool_name = "default";
++	}
++
++	pool_size = 0;
++	if (xenbus_exists(XBT_NIL, path, "mem-pool-size")) {
++		pool_sz_str = xenbus_read(XBT_NIL, path, "mem-pool-size", NULL);
++		if (IS_ERR(pool_sz_str)) {
++			err = PTR_ERR(pool_sz_str);
++			pool_sz_str = NULL;
++			goto out;
++		}
++		pool_size = (int)simple_strtoul(pool_sz_str, NULL, 10);
++	}
++
++	blkif->pool = blkback_page_pool_find(pool_name);
++	if (!blkif->pool)
++		blkif->pool = blkback_page_pool_create(pool_name, pool_size);
++	if (IS_ERR(blkif->pool))
++		err = PTR_ERR(blkif->pool);
++
++out:
++	if (free_pool_name)
++		kfree(pool_name);
++	kfree(pool_sz_str);
++	kfree(path);
++	return err;
++}
++
+ /**
+  * Entry point to this code when a new device is created.  Allocate the basic
+  * structures, and watch the store waiting for the hotplug scripts to tell us
+@@ -692,6 +752,7 @@
+ 				 "allocating backend structure");
+ 		return -ENOMEM;
+ 	}
++
+ 	be->dev = dev;
+ 	dev_set_drvdata(&dev->dev, be);
+ 	atomic_set(&be->refcnt, 1);
+@@ -715,6 +776,13 @@
+ 		goto fail;
+ 	}
+ 
++	
++	err = blkback_page_pool_assign(be->blkif, dev->nodename);
++	if (err) {
++		xenbus_dev_fatal(dev, err, "assigning mem pool");
++		goto fail;
++	}
++
+ 	err = xenvbd_sysfs_addif(dev);
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err, "creating sysfs entries");

@@ -1,0 +1,30 @@
+--- b/drivers/scsi/iscsi_tcp.c
++++ a/drivers/scsi/iscsi_tcp.c
+@@ -1140,25 +1140,14 @@
+ 		 * is getting stopped. libiscsi will know so propogate err
+ 		 * for it to do the right thing.
+ 		 */
++		if (rc == -EAGAIN)
+-		if (rc == -EAGAIN) {
+-			if (consumed > 0) {
+-				conn->txdata_octets += consumed;
+-				conn->last_recv = jiffies;
+-			}
+ 			return rc;
++		else if (rc < 0) {
+-		}
+-		if (rc < 0) {
+ 			rc = ISCSI_ERR_CONN_FAILED;
+ 			goto error;
+ 		} else if (rc == 0)
+ 			break;
+ 
+-		/*
+-		 * Hijack the 'last_recv' for counting xmits, too.
+-		 * This avoids transport timeouts when running
+-		 * write-intensive loads.
+-		 */
+-		conn->last_recv = jiffies;
+ 		consumed += rc;
+ 
+ 		if (segment->total_copied >= segment->total_size) {

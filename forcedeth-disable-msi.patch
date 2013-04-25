@@ -1,0 +1,12 @@
+diff -r fb20394ff551 drivers/net/forcedeth.c
+--- a/drivers/net/forcedeth.c	Mon Nov 09 13:28:04 2009 +0000
++++ b/drivers/net/forcedeth.c	Tue Nov 17 15:27:52 2009 +0000
+@@ -848,7 +848,7 @@
+ 	NV_MSI_INT_DISABLED,
+ 	NV_MSI_INT_ENABLED
+ };
+-static int msi = NV_MSI_INT_ENABLED;
++static int msi = NV_MSI_INT_DISABLED;
+ 
+ /*
+  * MSIX interrupts

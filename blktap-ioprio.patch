@@ -1,0 +1,81 @@
+diff -r 998ed831dd4d include/linux/init_task.h
+--- a/include/linux/init_task.h	Wed Jan 07 13:27:22 2009 +0000
++++ b/include/linux/init_task.h	Wed Jan 07 13:37:49 2009 +0000
+@@ -126,6 +126,7 @@
+ 	.lock_depth	= -1,						\
+ 	.prio		= MAX_PRIO-20,					\
+ 	.static_prio	= MAX_PRIO-20,					\
++	.special_prio	= 0,						\
+ 	.normal_prio	= MAX_PRIO-20,					\
+ 	.policy		= SCHED_NORMAL,					\
+ 	.cpus_allowed	= CPU_MASK_ALL,					\
+diff -r 998ed831dd4d include/linux/resource.h
+--- a/include/linux/resource.h	Wed Jan 07 13:27:22 2009 +0000
++++ b/include/linux/resource.h	Wed Jan 07 13:37:49 2009 +0000
+@@ -47,6 +47,7 @@
+ 
+ #define	PRIO_MIN	(-20)
+ #define	PRIO_MAX	20
++#define PRIO_SPECIAL_IO -9999
+ 
+ #define	PRIO_PROCESS	0
+ #define	PRIO_PGRP	1
+diff -r 998ed831dd4d include/linux/sched.h
+--- a/include/linux/sched.h	Wed Jan 07 13:27:22 2009 +0000
++++ b/include/linux/sched.h	Wed Jan 07 13:37:49 2009 +0000
+@@ -1052,6 +1052,8 @@
+ 	/* list of struct preempt_notifier: */
+ 	struct hlist_head preempt_notifiers;
+ #endif
++
++	int special_prio; /* XXX maybe move to struct io_context ??? */
+ 
+ 	/*
+ 	 * fpu_counter contains the number of consecutive context switches
+diff -r 998ed831dd4d kernel/sys.c
+--- a/kernel/sys.c	Wed Jan 07 13:27:22 2009 +0000
++++ b/kernel/sys.c	Wed Jan 07 13:37:49 2009 +0000
+@@ -121,6 +121,11 @@
+ 		error = -EPERM;
+ 		goto out;
+ 	}
++	if (niceval == PRIO_SPECIAL_IO) {
++		p->special_prio = PRIO_SPECIAL_IO;
++		error = 0;
++		goto out;
++	}
+ 	if (niceval < task_nice(p) && !can_nice(p, niceval)) {
+ 		error = -EACCES;
+ 		goto out;
+@@ -149,10 +154,15 @@
+ 
+ 	/* normalize: avoid signed division (rounding problems) */
+ 	error = -ESRCH;
+-	if (niceval < -20)
+-		niceval = -20;
+-	if (niceval > 19)
+-		niceval = 19;
++	if (niceval == PRIO_SPECIAL_IO) {
++		if (which != PRIO_PROCESS)
++			return -EINVAL;
++	} else {
++		if (niceval < -20)
++			niceval = -20;
++		if (niceval > 19)
++			niceval = 19;
++	}
+ 
+ 	read_lock(&tasklist_lock);
+ 	switch (which) {
+diff -r 998ed831dd4d mm/page-writeback.c
+--- a/mm/page-writeback.c	Wed Jan 07 13:27:22 2009 +0000
++++ b/mm/page-writeback.c	Wed Jan 07 13:37:49 2009 +0000
+@@ -504,6 +504,8 @@
+ 			break;
+ 		if (pages_written >= write_chunk)
+ 			break;		/* We've done our duty */
++		if (current->special_prio == PRIO_SPECIAL_IO)
++			break;          /* Exempt IO processes */
+ 
+ 		congestion_wait(WRITE, HZ/10);
+ 	}

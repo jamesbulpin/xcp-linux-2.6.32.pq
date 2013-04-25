@@ -1,0 +1,111 @@
+Watch the online node in the backend area, as well as the state node
+in the frontend area, and fire the frontend state changed watch
+whenever it changes.  This allows us to catch the case where a device
+shuts down in a domU and then gets xm detach'd from in dom0.
+
+Otherwise, the backend doesn't shut down correctly, since online was
+set when the frontend shut down and we don't get another kick when it
+becomes unset.
+
+diff -r 0b1452d7e278 drivers/xen/xenbus/xenbus_probe.c
+--- a/drivers/xen/xenbus/xenbus_probe.c	Wed Jun 17 14:09:46 2009 +0100
++++ b/drivers/xen/xenbus/xenbus_probe.c	Wed Jun 17 14:12:48 2009 +0100
+@@ -138,6 +138,11 @@
+ 		unregister_xenbus_watch(&dev->otherend_watch);
+ 		kfree(dev->otherend_watch.node);
+ 		dev->otherend_watch.node = NULL;
++        }
++        if (dev->online_watch.node) {
++		unregister_xenbus_watch(&dev->online_watch);
++		kfree(dev->online_watch.node);
++		dev->online_watch.node = NULL;
+ 	}
+ }
+ 
+@@ -220,22 +225,11 @@
+ #endif
+ };
+ 
+-static void otherend_changed(struct xenbus_watch *watch,
+-			     const char **vec, unsigned int len)
++static void otherend_changed_common(struct xenbus_device *dev,
++                                    const char **vec, unsigned int len)
+ {
+-	struct xenbus_device *dev =
+-		container_of(watch, struct xenbus_device, otherend_watch);
+ 	struct xenbus_driver *drv = to_xenbus_driver(dev->dev.driver);
+ 	enum xenbus_state state;
+-
+-	/* Protect us against watches firing on old details when the otherend
+-	   details change, say immediately after a resume. */
+-	if (!dev->otherend ||
+-	    strncmp(dev->otherend, vec[XS_WATCH_PATH],
+-		    strlen(dev->otherend))) {
+-		dev_dbg(&dev->dev, "Ignoring watch at %s", vec[XS_WATCH_PATH]);
+-		return;
+-	}
+ 
+ 	state = xenbus_read_driver_state(dev->otherend);
+ 
+@@ -263,6 +257,33 @@
+ 		drv->otherend_changed(dev, state);
+ }
+ 
++static void online_changed(struct xenbus_watch *watch,
++                           const char **vec, unsigned int len)
++{
++	struct xenbus_device *dev =
++		container_of(watch, struct xenbus_device, online_watch);
++
++        otherend_changed_common(dev, vec, len);
++}
++
++static void otherend_changed(struct xenbus_watch *watch,
++			     const char **vec, unsigned int len)
++{
++	struct xenbus_device *dev =
++		container_of(watch, struct xenbus_device, otherend_watch);
++
++	/* Protect us against watches firing on old details when the otherend
++	   details change, say immediately after a resume. */
++	if (!dev->otherend ||
++	    strncmp(dev->otherend, vec[XS_WATCH_PATH],
++		    strlen(dev->otherend))) {
++		DPRINTK("Ignoring watch at %s", vec[XS_WATCH_PATH]);
++		return;
++	}
++
++        otherend_changed_common(dev, vec, len);
++}
++
+ 
+ static int talk_to_otherend(struct xenbus_device *dev)
+ {
+@@ -278,8 +299,14 @@
+ static int watch_otherend(struct xenbus_device *dev)
+ {
+ #if defined(CONFIG_XEN) || defined(MODULE)
+-	return xenbus_watch_path2(dev, dev->otherend, "state",
+-				  &dev->otherend_watch, otherend_changed);
++        int i;
++	i = xenbus_watch_path2(dev, dev->otherend, "state",
++                               &dev->otherend_watch, otherend_changed);
++        if (i >= 0) {
++                i = xenbus_watch_path2(dev, dev->nodename, "online",
++                                       &dev->online_watch, online_changed);
++        }
++        return i;
+ #else
+ 	return xenbus_watch_pathfmt(dev, &dev->otherend_watch, otherend_changed,
+ 				    "%s/%s", dev->otherend, "state");
+diff -r 0b1452d7e278 include/xen/xenbus.h
+--- a/include/xen/xenbus.h	Wed Jun 17 14:09:46 2009 +0100
++++ b/include/xen/xenbus.h	Wed Jun 17 14:12:48 2009 +0100
+@@ -79,6 +79,7 @@
+ 	const char *otherend;
+ 	int otherend_id;
+ 	struct xenbus_watch otherend_watch;
++	struct xenbus_watch online_watch;
+ 	struct device dev;
+ 	enum xenbus_state state;
+ 	struct completion down;

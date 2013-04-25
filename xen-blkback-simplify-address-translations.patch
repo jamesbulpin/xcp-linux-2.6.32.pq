@@ -1,0 +1,50 @@
+From 69d64727c42eecd47fdf82c15a54474d21a4012a Mon Sep 17 00:00:00 2001
+From: Jan Beulich <jbeulich@novell.com>
+Date: Fri, 5 Feb 2010 19:19:33 +0000
+Subject: [PATCH 19/23] blkback/blktap2: simplify address translations
+
+There are quite a number of places where e.g. page->va->page
+translations happen.
+
+Besides yielding smaller code (source and binary), a second goal is to
+make it easier to determine where virtual addresses of pages allocated
+through alloc_empty_pages_and_pagevec() are really used (in turn in
+order to determine whether using highmem pages would be possible
+there).
+
+linux-2.6-pvops:
+ * Stripped drivers/xen/gntdev/*
+ * Stripped drivers/xen/netback/*
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blkback/blkback.c |   14 ++++++++------
+ drivers/xen/blktap/blktap.h   |    9 ++++++++-
+ drivers/xen/blktap/device.c   |   30 ++++++++++++++----------------
+ drivers/xen/blktap/request.c  |    7 +++----
+ 4 files changed, 33 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/xen/blkback/blkback.c b/drivers/xen/blkback/blkback.c
+index 1309555..832bcfe 100644
+--- a/drivers/xen/blkback/blkback.c
++++ b/drivers/xen/blkback/blkback.c
+@@ -178,7 +180,7 @@ static void fast_flush_area(pending_req_t *req)
+ 		handle = pending_handle(req, i);
+ 		if (handle == BLKBACK_INVALID_HANDLE)
+ 			continue;
+-		blkback_pagemap_clear(virt_to_page(vaddr(req, i)));
++		blkback_pagemap_clear(pending_page(req, i));
+ 		gnttab_set_unmap_op(&unmap[invcount], vaddr(req, i),
+ 				    GNTMAP_host_map, handle);
+ 		pending_handle(req, i) = BLKBACK_INVALID_HANDLE;
+@@ -456,7 +458,7 @@ static void dispatch_rw_block_io(blkif_t *blkif,
+ 			ret |= 1;
+ 		} else {
+ 			blkback_pagemap_set(vaddr_pagenr(pending_req, i),
+-					    virt_to_page(vaddr(pending_req, i)),
++					    pending_page(pending_req, i),
+ 					    blkif->domid, req->handle,
+ 					    req->seg[i].gref);
+ 		}

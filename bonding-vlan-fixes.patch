@@ -1,0 +1,67 @@
+diff -r da575c595e96 net/core/dev.c
+--- a/net/core/dev.c	Wed Jan 07 16:29:07 2009 +0000
++++ b/net/core/dev.c	Wed Jan 07 16:35:50 2009 +0000
+@@ -88,6 +88,7 @@
+ #include <linux/errno.h>
+ #include <linux/interrupt.h>
+ #include <linux/if_ether.h>
++#include <linux/if_vlan.h>
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
+ #include <linux/ethtool.h>
+@@ -2044,6 +2045,8 @@
+ 
+ EXPORT_SYMBOL(netif_rx_ni);
+ 
++#include <../drivers/net/bonding/bonding.h>
++
+ static void net_tx_action(struct softirq_action *h)
+ {
+ 	struct softnet_data *sd = &__get_cpu_var(softnet_data);
+@@ -2334,8 +2337,45 @@
+ 	if (orig_dev->master) {
+ 		if (skb_bond_should_drop(skb))
+ 			null_or_orig = orig_dev; /* deliver only exact match */
+-		else
++		else {
+ 			skb->dev = orig_dev->master;
++
++			/* The bonding driver claims to support rx vlan h/w acceleration.
++			 * It actually just assumes the slave supports it and offloads the
++			 * the responsibility for the acceleration to the slave.
++			 * If the slave does not support rx vlan h/w acceleration
++			 * then the tagged frames will end up here.
++			 * When this happens we need to emulate the rx vlan h/w acceleration
++			 * feature that is missing in the slave.
++			 */
++			if (!(skb->dev->features & NETIF_F_HW_VLAN_RX) &&
++			    (skb->dev->master->features & NETIF_F_HW_VLAN_RX)) {
++
++				struct bonding *bond = netdev_priv(skb->dev->master);
++				struct vlan_group *grp = bond->vlgrp;
++				struct ethhdr *hdr = eth_hdr(skb);
++
++				if (hdr->h_proto == htons(ETH_P_8021Q) && grp &&
++				    skb->len >= VLAN_ETH_HLEN) {
++					struct vlan_ethhdr *vhdr = vlan_eth_hdr(skb);
++					u16 vtag = ntohs(vhdr->h_vlan_TCI);
++
++					/* Reset skb->data to the start of the frame */
++					__skb_push(skb, skb->data - skb_mac_header(skb));
++
++					/* Ditch the 4 byte vlan shim */
++					memmove(skb_mac_header(skb) + VLAN_HLEN, skb_mac_header(skb), ETH_ALEN * 2);
++					__skb_pull(skb, VLAN_HLEN);
++
++					/* Update the skb details */
++					skb->protocol = eth_type_trans(skb, skb->dev);
++
++					/* Pass up the stack as if it came from bond0 */
++					vlan_hwaccel_rx(skb, grp, vtag);
++					return NET_RX_SUCCESS;
++				}
++			}
++		}
+ 	}
+ 
+ 	__get_cpu_var(netdev_rx_stat).total++;

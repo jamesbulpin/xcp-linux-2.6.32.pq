@@ -1,0 +1,154 @@
+diff -r 2eacc3b7dcc5 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 23:17:00 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 23:17:47 2010 -0700
+@@ -456,7 +456,7 @@
+ 	if (debug_lvl)
+ 		printk(KERN_DEBUG "%s: exiting\n", current->comm);
+ 
+-	blkback_close(blkif);
++	blkback_close(blkif->be);
+ 
+ 	return 0;
+ }
+diff -r 2eacc3b7dcc5 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 23:17:00 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 23:17:47 2010 -0700
+@@ -151,6 +151,6 @@
+ void blkback_resume(blkif_t *blkif);
+ void blkback_signal_resumed(blkif_t *blkif);
+ 
+-void blkback_close(blkif_t *blkif);
++void blkback_close(struct backend_info *be);
+ 
+ #endif /* __BLKIF__BACKEND__COMMON_H__ */
+diff -r 2eacc3b7dcc5 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 23:17:00 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 23:17:47 2010 -0700
+@@ -29,6 +29,7 @@
+ 
+ struct backend_info
+ {
++	struct mutex mutex;
+ 	struct xenbus_device *dev;
+ 	blkif_t *blkif;
+ 	struct xenbus_watch backend_watch;
+@@ -42,8 +43,6 @@
+ 	int shutdown_signalled;
+ };
+ 
+-DECLARE_MUTEX(blkback_dev_sem);
+-
+ static void connect(struct backend_info *);
+ static int connect_ring(struct backend_info *);
+ static void backend_changed(struct xenbus_watch *, const char **,
+@@ -206,11 +205,11 @@
+ 
+ 	/* NB. this should actually be a link to /sys/block. */
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 	bdev = blkif->bdev;
+ 	if (bdev)
+ 		rdev = bdev->bd_inode->i_rdev;
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ 
+ 	if (rdev)
+ 		rv = sprintf(buf, "%x:%x\n", MAJOR(rdev), MINOR(rdev));
+@@ -275,7 +274,7 @@
+ 	struct xenbus_device *xbdev = be->dev;
+ 	int err;
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 
+ 	if (be->shutdown_signalled)
+ 		goto out;
+@@ -291,7 +290,7 @@
+ 	be->shutdown_signalled = 1;
+ 
+  out:
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ }
+ 
+ static void backend_release(struct backend_info *be)
+@@ -320,9 +319,9 @@
+ {
+ 	struct backend_info *be = xbdev->dev.driver_data;
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 	be->dev = NULL;
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ 
+ 	if (be->backend_watch.node) {
+ 		unregister_xenbus_watch(&be->backend_watch);
+@@ -356,18 +355,20 @@
+ /*
+  * called by kthread when closing
+  */
+-void blkback_close(blkif_t *blkif)
++void blkback_close(struct backend_info *be)
+ {
++	blkif_t *blkif = be->blkif;
++
+ 	blkif_disconnect(blkif);
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 
+ 	blkif_bdev_close(blkif);
+ 	blkif->be->major = 0;
+ 	blkif->be->minor = 0;
+ 	blkif->remove_requested = 0;
+ 
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ 
+ 	blkif->xenblkd = NULL;
+ 	backend_release(blkif->be);
+@@ -435,14 +436,14 @@
+ 	int err;
+ 	struct backend_info *be = blkif->be;
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 	if (be->dev) {
+ 		err = xenbus_write(XBT_NIL,
+ 				   be->dev->nodename, "pause-done", "");
+ 		if (err)
+ 			xenbus_dev_error(be->dev, err, "writing pause-done");
+ 	}
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ }
+ 
+ void blkback_signal_resumed(blkif_t *blkif)
+@@ -450,7 +451,7 @@
+ 	int err;
+ 	struct backend_info *be = blkif->be;
+ 
+-	down(&blkback_dev_sem);
++	mutex_lock(&be->mutex);
+ 	if (be->dev) {
+ 		if (blkif->bdev &&
+ 		    be->dev->state == XenbusStateConnected)
+@@ -460,7 +461,7 @@
+ 		if (err)
+ 			xenbus_dev_error(be->dev, err, "removing pause-done");
+ 	}
+-	up(&blkback_dev_sem);
++	mutex_unlock(&be->mutex);
+ }
+ 
+ static void backend_pause(struct xenbus_watch *watch,
+@@ -519,6 +520,7 @@
+ 	be->dev = dev;
+ 	dev->dev.driver_data = be;
+ 	atomic_set(&be->refcnt, 1);
++	mutex_init(&be->mutex);
+ 
+ 	be->blkif = blkif_alloc(dev->otherend_id);
+ 	if (IS_ERR(be->blkif)) {

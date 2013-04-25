@@ -1,0 +1,32 @@
+Subject: ixgbe: Disable LRO by default
+
+Disable LRO for XenServer because this feature is not compatible with ip
+forwarding and bridging.
+
+From ixgbe release notes:
+"WARNING:  The ixgbe driver compiles by default with the LRO (Large Receive
+Offload) feature enabled.  This option offers the lowest CPU utilization for
+receives, but is completely incompatible with *routing/ip forwarding* and
+*bridging*.  If enabling ip forwarding or bridging is a requirement, it is
+necessary to disable LRO using compile time options as noted in the LRO
+section later in this document.  The result of not disabling LRO when combined
+with ip forwarding or bridging can be low throughput or even a kernel PANIC."
+
+---
+ drivers/net/ixgbe/kcompat.h |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff -r b8a5c2d890f1 drivers/net/ixgbe/kcompat.h
+--- a/drivers/net/ixgbe/kcompat.h
++++ b/drivers/net/ixgbe/kcompat.h
+@@ -55,6 +55,10 @@
+ #include <linux/ethtool.h>
+ #include <linux/if_vlan.h>
+ 
++/* Disable LRO by default for XenServer.  It is completely incompatible */
++/* with ip forwarding and bridging.  See release notes. */
++#define IXGBE_NO_LRO
++
+ /* NAPI enable/disable flags here */
+ /* enable NAPI for ixgbe by default */
+ #undef CONFIG_IXGBE_NAPI

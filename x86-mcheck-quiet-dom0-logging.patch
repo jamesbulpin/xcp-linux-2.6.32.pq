@@ -1,0 +1,40 @@
+# HG changeset patch
+# Parent f1425f7e5262d43262db179f9337f1937daaa5ad
+
+diff -r f1425f7e5262 arch/x86/kernel/cpu/mcheck/mce_dom0.c
+--- a/arch/x86/kernel/cpu/mcheck/mce_dom0.c	Fri Oct 21 14:35:33 2011 +0100
++++ b/arch/x86/kernel/cpu/mcheck/mce_dom0.c	Fri Oct 21 14:41:50 2011 +0100
+@@ -54,9 +54,6 @@ static int convert_log(struct mc_info *m
+ 			m.addr = mc_bank->mc_addr;
+ 			m.tsc = mc_bank->mc_tsc;
+ 			m.bank = mc_bank->mc_bank;
+-			printk(KERN_DEBUG "[CPU%d, BANK%d, addr %llx, state %llx]\n", 
+-						m.bank, m.cpu, m.addr, m.status);
+-			/*log this record*/
+ 			mce_log(&m);
+ 		}
+ 		mic = x86_mcinfo_next(mic);
+@@ -74,7 +71,6 @@ static irqreturn_t mce_dom0_interrupt(in
+ 	xen_mc_t mc_op;
+ 	int result = 0;
+ 
+-	printk(KERN_DEBUG "MCE_DOM0_LOG: enter dom0 mce vIRQ handler\n");
+ 	mc_op.cmd = XEN_MC_fetch;
+ 	mc_op.interface_version = XEN_MCA_INTERFACE_VERSION;
+ 	set_xen_guest_handle(mc_op.u.mc_fetch.data, g_mi);
+@@ -84,7 +80,6 @@ urgent:
+ 	if (result || mc_op.u.mc_fetch.flags & XEN_MC_NODATA ||
+ 			mc_op.u.mc_fetch.flags & XEN_MC_FETCHFAILED)
+ 	{
+-		printk(KERN_DEBUG "MCE_DOM0_LOG: No more urgent data\n");
+ 		goto nonurgent;
+ 	}
+ 	else
+@@ -109,7 +104,6 @@ nonurgent:
+ 	if (result || mc_op.u.mc_fetch.flags & XEN_MC_NODATA ||
+ 			mc_op.u.mc_fetch.flags & XEN_MC_FETCHFAILED)
+ 	{
+-		printk(KERN_DEBUG "MCE_DOM0_LOG: No more nonurgent data\n");
+ 		goto end;
+ 	}
+ 	else

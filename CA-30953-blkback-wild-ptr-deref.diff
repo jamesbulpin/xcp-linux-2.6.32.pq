@@ -1,0 +1,19 @@
+CA-30953: Fix dangling pointer deref after backend release.
+
+Call to backend_release() may free the blkif struct if the xenbus
+device is already gone. Accessing xenblkd dereferences a dangling
+pointer, so rather clear it beforehand.
+
+diff -r eb04d7ac9138 -r 1bd6fa33a406 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jul 15 17:31:27 2009 -0700
++++ b/drivers/xen/blkback/xenbus.c	Fri Jul 17 10:45:37 2009 -0700
+@@ -344,8 +344,8 @@
+ 
+ 	up(&blkback_dev_sem);
+ 
++	blkif->xenblkd = NULL;
+ 	backend_release(blkif->be);
+-	blkif->xenblkd = NULL;
+ }
+ 
+ static int xenbus_write_state(struct xenbus_device *dev,

@@ -1,0 +1,31 @@
+From 8bc5e330be7de542590970aa027c145cc70aae66 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Wed, 24 Feb 2010 17:56:41 -0800
+Subject: [PATCH 21/23] blktap: Fix wild ptr deref during device destruction.
+
+A put_disk() before blk_cleanup_queue() would free gd before gd->queue
+is read.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index bfc825d..de4aaef 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -1027,8 +1027,8 @@ blktap_device_destroy(struct blktap *tap)
+ #endif
+ 
+ 	del_gendisk(dev->gd);
+-	put_disk(dev->gd);
+ 	blk_cleanup_queue(dev->gd->queue);
++	put_disk(dev->gd);
+ 
+ 	dev->gd = NULL;
+ 
+-- 
+1.7.0.4
+

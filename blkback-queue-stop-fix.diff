@@ -1,0 +1,45 @@
+blkback: Fix paused shutdown-normal path.
+
+Calls to blkback_queue_stop completed normal shutdown requests
+immediately if the queue was not running. In case where we were
+connected but just paused, this preempts a clean frontend queue drain
+and subsequent switch to Closed.
+
+Separate xenbus 'closed' from queue 'stopped' states and fix the
+condition logic.
+
+diff -r 04e4e40933cb drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jul 15 15:46:46 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Tue Jul 20 01:48:42 2010 -0700
+@@ -227,22 +227,24 @@
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+ 	blkif_t *blkif = be->blkif;
+-	int stopped;
++	int closed, stopped;
+ 
+ 	WARN_ON(!mutex_is_locked(&be->mutex));
+ 
+-	stopped = xbdev->state == XenbusStateClosed;
+-	WARN_ON(stopped && be->kthread_pid);
++	closed =
++		xbdev->state == XenbusStateClosed ||
++		xbdev->state == XenbusStateInitWait;
++	stopped = !be->kthread_pid;
+ 
+-	if (!stopped && closing)
++	WARN_ON(closed && !stopped);
++
++	if (!closed && closing)
+ 		xenbus_switch_state(xbdev, XenbusStateClosing);
+ 
+-	stopped = !be->kthread_pid;
+-
+ 	if (!stopped && force)
+ 		blkif_queue_stop(blkif);
+ 
+-	if (stopped)
++	if (closed || (stopped && force))
+ 		__blkback_queue_stopped(be, XBT_NIL);
+ }
+ 

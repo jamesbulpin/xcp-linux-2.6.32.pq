@@ -1,0 +1,20 @@
+diff -r fd6ad23a5f6c drivers/net/s2io.c
+--- a/drivers/net/s2io.c	Tue Sep 01 16:24:02 2009 +0100
++++ b/drivers/net/s2io.c	Tue Sep 01 16:25:04 2009 +0100
+@@ -146,12 +146,12 @@
+ #include <asm/checksum.h>
+ 
+ /* local include */
+-#include "spdm_cfg.h"
+-
+-#include "kcompat.h"
++#include "s2io/spdm_cfg.h"
++
++#include "s2io/kcompat.h"
+ #include "s2io.h"
+ #include "s2io-regs.h"
+-#include "util.h"
++#include "s2io/util.h"
+ 
+ #define DRV_VERSION "2.1.37.17590"
+ /* S2io Driver name & version. */

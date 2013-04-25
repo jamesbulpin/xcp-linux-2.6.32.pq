@@ -1,0 +1,12 @@
+diff -r 8100d002fe16 fs/nfs/client.c
+--- a/fs/nfs/client.c	Thu Jul 15 12:10:15 2010 +0100
++++ b/fs/nfs/client.c	Thu Jul 15 12:11:38 2010 +0100
+@@ -763,7 +763,7 @@
+ 	 * - RFC 2623, sec 2.3.2
+ 	 */
+ 	error = nfs_create_rpc_client(clp, timeparms, RPC_AUTH_UNIX,
+-				      0, data->flags & NFS_MOUNT_NORESVPORT);
++				      1, data->flags & NFS_MOUNT_NORESVPORT);
+ 	if (error < 0)
+ 		goto error;
+ 	nfs_mark_client_ready(clp, NFS_CS_READY);

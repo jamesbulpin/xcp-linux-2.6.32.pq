@@ -1,0 +1,285 @@
+diff -r a1ea1a50c7ec drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Apr 02 08:50:18 2008 +0100
++++ b/drivers/xen/blkback/blkback.c	Wed Apr 02 08:51:17 2008 +0100
+@@ -185,6 +185,61 @@ static void fast_flush_area(pending_req_
+ }
+ 
+ /******************************************************************
++ * QUEUE MANAGEMENT FUNCTIONS
++ */
++
++static inline int blkif_activate(blkif_t *blkif)
++{
++	mutex_lock(&blkif->queue_mutex);
++
++	if (atomic_read(&blkif->requests_pending) == 0 &&
++	    blkif->queue_state == QUEUE_PAUSE_REQUESTED) {
++		blkif->queue_state = QUEUE_PAUSED;
++		blkback_signal_paused(blkif);
++	}
++
++	mutex_unlock(&blkif->queue_mutex);
++
++	if (blkif->remove_requested)
++		return 1;
++
++	if (blkif->waiting_reqs)
++		return (!list_empty(&pending_free) &&
++			blkif->queue_state == QUEUE_RUNNING);
++
++	return 0;
++}
++
++void blkback_pause(blkif_t *blkif)
++{
++	mutex_lock(&blkif->queue_mutex);
++
++	if (atomic_read(&blkif->requests_pending) == 0) {
++		blkif->queue_state = QUEUE_PAUSED;
++		blkback_signal_paused(blkif);
++	} else
++		blkif->queue_state = QUEUE_PAUSE_REQUESTED;
++
++	mutex_unlock(&blkif->queue_mutex);
++}
++
++void blkback_resume(blkif_t *blkif)
++{
++	mutex_lock(&blkif->queue_mutex);
++
++	if (blkif->queue_state == QUEUE_PAUSED ||
++	    blkif->queue_state == QUEUE_PAUSE_REQUESTED) {
++		blkif->queue_state = QUEUE_RUNNING;
++		if (blkif->xenblkd)
++			wake_up_process(blkif->xenblkd);
++	}
++
++	blkback_signal_resumed(blkif);
++
++	mutex_unlock(&blkif->queue_mutex);
++}
++
++/******************************************************************
+  * SCHEDULER FUNCTIONS
+  */
+ 
+@@ -212,12 +267,15 @@ int blkif_schedule(void *arg)
+ 		if (try_to_freeze())
+ 			continue;
+ 
+-		wait_event_interruptible(
+-			blkif->wq,
+-			blkif->waiting_reqs || blkif->remove_requested);
+-		wait_event_interruptible(
+-			pending_free_wq,
+-			!list_empty(&pending_free) || blkif->remove_requested);
++		wait_event_interruptible(pending_free_wq,
++					 blkif_activate(blkif));
++
++		mutex_lock(&blkif->queue_mutex);
++
++		if (blkif->queue_state != QUEUE_RUNNING) {
++			mutex_unlock(&blkif->queue_mutex);
++			continue;
++		}
+ 
+ 		blkif->waiting_reqs = 0;
+ 		smp_mb(); /* clear flag *before* checking for work */
+@@ -225,6 +283,8 @@ int blkif_schedule(void *arg)
+ 		if (do_block_io_op(blkif))
+ 			blkif->waiting_reqs = 1;
+ 		unplug_queue(blkif);
++
++		mutex_unlock(&blkif->queue_mutex);
+ 
+ 		if (log_stats && time_after(jiffies, blkif->st_print))
+ 			print_stats(blkif);
+@@ -260,11 +320,16 @@ static void __end_block_io_op(pending_re
+ 	}
+ 
+ 	if (atomic_dec_and_test(&pending_req->pendcnt)) {
++		blkif_t *blkif = pending_req->blkif;
++
+ 		fast_flush_area(pending_req);
+ 		make_response(pending_req->blkif, pending_req->id,
+ 			      pending_req->operation, pending_req->status);
+ 		blkif_put(pending_req->blkif);
+ 		free_req(pending_req);
++
++		if (atomic_dec_and_test(&blkif->requests_pending))
++			wake_up_process(blkif->xenblkd);
+ 	}
+ }
+ 
+@@ -285,7 +350,8 @@ void blkif_notify_work(blkif_t *blkif)
+ void blkif_notify_work(blkif_t *blkif)
+ {
+ 	blkif->waiting_reqs = 1;
+-	wake_up(&blkif->wq);
++	if (blkif->xenblkd)
++		wake_up_process(blkif->xenblkd);
+ }
+ 
+ irqreturn_t blkif_be_int(int irq, void *dev_id, struct pt_regs *regs)
+@@ -515,6 +581,7 @@ static void dispatch_rw_block_io(blkif_t
+ 	plug_queue(blkif, bio);
+ 	atomic_set(&pending_req->pendcnt, nbio);
+ 	blkif_get(blkif);
++	atomic_inc(&blkif->requests_pending);
+ 
+ 	for (i = 0; i < nbio; i++)
+ 		submit_bio(operation, biolist[i]);
+diff -r a1ea1a50c7ec drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Apr 02 08:50:18 2008 +0100
++++ b/drivers/xen/blkback/common.h	Wed Apr 02 08:50:44 2008 +0100
+@@ -54,6 +54,10 @@ do {								\
+ 		printk(KERN_WARNING "blk_back: " fmt, ##args);	\
+ } while(0)
+ 
++#define QUEUE_RUNNING           1
++#define QUEUE_PAUSE_REQUESTED   2
++#define QUEUE_PAUSED            3
++
+ struct vbd {
+ 	blkif_vdev_t   handle;      /* what the domain refers to this vbd as */
+ 	unsigned char  readonly;    /* Non-zero -> read-only */
+@@ -83,10 +87,14 @@ typedef struct blkif_st {
+ 	spinlock_t       blk_ring_lock;
+ 	atomic_t         refcnt;
+ 
+-	wait_queue_head_t   wq;
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+ 	struct request_queue *plug;
++
++	/* queue management */
++	int                 queue_state;
++	struct mutex        queue_mutex;
++	atomic_t            requests_pending;
+ 
+ 	/* statistics */
+ 	unsigned long       st_print;
+@@ -146,6 +154,11 @@ int blkback_barrier(struct xenbus_transa
+ int blkback_barrier(struct xenbus_transaction xbt,
+ 		    struct backend_info *be, int state);
+ 
++void blkback_pause(blkif_t *blkif);
++void blkback_signal_paused(blkif_t *blkif);
++void blkback_resume(blkif_t *blkif);
++void blkback_signal_resumed(blkif_t *blkif);
++
+ void blkback_close(blkif_t *blkif);
+ 
+ #endif /* __BLKIF__BACKEND__COMMON_H__ */
+diff -r a1ea1a50c7ec drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Wed Apr 02 08:50:18 2008 +0100
++++ b/drivers/xen/blkback/interface.c	Wed Apr 02 08:50:44 2008 +0100
+@@ -48,9 +48,11 @@ blkif_t *blkif_alloc(domid_t domid)
+ 	blkif->domid = domid;
+ 	spin_lock_init(&blkif->blk_ring_lock);
+ 	atomic_set(&blkif->refcnt, 1);
+-	init_waitqueue_head(&blkif->wq);
+ 	blkif->st_print = jiffies;
+ 	init_waitqueue_head(&blkif->waiting_to_free);
++	blkif->queue_state = QUEUE_RUNNING;
++	mutex_init(&blkif->queue_mutex);
++	atomic_set(&blkif->requests_pending, 0);
+ 
+ 	return blkif;
+ }
+diff -r a1ea1a50c7ec drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Apr 02 08:50:18 2008 +0100
++++ b/drivers/xen/blkback/xenbus.c	Wed Apr 02 08:50:44 2008 +0100
+@@ -33,6 +33,7 @@ struct backend_info
+ 	blkif_t *blkif;
+ 	struct xenbus_watch backend_watch;
+ 	struct xenbus_watch shutdown_watch;
++	struct xenbus_watch pause_watch;
+ 	unsigned major;
+ 	unsigned minor;
+ 	char *mode;
+@@ -279,6 +280,12 @@ static int blkback_remove(struct xenbus_
+ 		be->shutdown_watch.node = NULL;
+ 	}
+ 
++	if (be->pause_watch.node) {
++		unregister_xenbus_watch(&be->pause_watch);
++		kfree(be->pause_watch.node);
++		be->pause_watch.node = NULL;
++	}
++
+ 	if (kthread_remove(be))
+ 		WPRINTK("BAD REMOVE REQUEST for %s\n", be->nodename);
+ 
+@@ -367,6 +374,59 @@ static void start_shutdown(struct xenbus
+ 			signal_shutdown(be); /* shutdown immediately */
+ 
+ 	kfree(type);
++}
++
++void blkback_signal_paused(blkif_t *blkif)
++{
++	int err;
++	struct backend_info *be = blkif->be;
++
++	down(&blkback_dev_sem);
++	if (be->dev) {
++		err = xenbus_write(XBT_NIL,
++				   be->dev->nodename, "pause-done", "");
++		if (err)
++			xenbus_dev_error(be->dev, err, "writing pause-done");
++	}
++	up(&blkback_dev_sem);
++}
++
++void blkback_signal_resumed(blkif_t *blkif)
++{
++	int err;
++	struct backend_info *be = blkif->be;
++
++	down(&blkback_dev_sem);
++	if (be->dev) {
++		connect(be);
++		err = xenbus_rm(XBT_NIL, be->dev->nodename, "pause-done");
++		if (err)
++			xenbus_dev_error(be->dev, err, "removing pause-done");
++	}
++	up(&blkback_dev_sem);
++}
++
++static void backend_pause(struct xenbus_watch *watch,
++			  const char **vec, unsigned int length)
++{
++	struct backend_info *be
++		= container_of(watch, struct backend_info, pause_watch);
++	struct xenbus_device *dev = be->dev;
++
++	if (xenbus_exists(XBT_NIL, dev->nodename, "pause")) {
++		if (xenbus_exists(XBT_NIL, dev->nodename, "pause-done")) {
++			WPRINTK("got pause request for paused vbd %s\n",
++				dev->nodename);
++			return;
++		}
++
++		WPRINTK("pausing %s\n", dev->nodename);
++		blkback_pause(be->blkif);
++
++	} else if (xenbus_exists(XBT_NIL, dev->nodename, "pause-done")) {
++		WPRINTK("resuming %s\n", dev->nodename);
++		blkback_resume(be->blkif);
++	}
+ }
+ 
+ int blkback_barrier(struct xenbus_transaction xbt,
+@@ -429,6 +489,11 @@ static int blkback_probe(struct xenbus_d
+ 
+ 	err = xenbus_watch_path2(dev, dev->nodename, "shutdown-request",
+ 				 &be->shutdown_watch, start_shutdown);
++	if (err)
++		goto fail;
++
++	err = xenbus_watch_path2(dev, dev->nodename, "pause",
++				 &be->pause_watch, backend_pause);
+ 	if (err)
+ 		goto fail;
+ 

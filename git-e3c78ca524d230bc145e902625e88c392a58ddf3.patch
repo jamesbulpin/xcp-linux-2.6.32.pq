@@ -1,0 +1,186 @@
+From e3c78ca524d230bc145e902625e88c392a58ddf3 Mon Sep 17 00:00:00 2001
+From: Tejun Heo <tj@kernel.org>
+Date: Wed, 19 Oct 2011 14:32:38 +0200
+Subject: [PATCH] block: reorganize queue draining
+
+Reorganize queue draining related code in preparation of queue exit
+changes.
+
+* Factor out actual draining from elv_quiesce_start() to
+  blk_drain_queue().
+
+* Make elv_quiesce_start/end() responsible for their own locking.
+
+* Replace open-coded ELVSWITCH clearing in elevator_switch() with
+  elv_quiesce_end().
+
+This patch doesn't cause any visible functional difference.
+
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+---
+ block/blk-core.c |   28 ++++++++++++++++++++++++++++
+ block/blk.h      |    1 +
+ block/elevator.c |   37 +++++++++++--------------------------
+ 3 files changed, 40 insertions(+), 26 deletions(-)
+
+diff -r abad721bc03e block/blk-core.c
+--- a/block/blk-core.c	Wed Oct 19 14:31:22 2011 +0200
++++ b/block/blk-core.c	Thu May 24 15:34:59 2012 +0100
+@@ -27,6 +27,7 @@
+ #include <linux/writeback.h>
+ #include <linux/task_io_accounting_ops.h>
+ #include <linux/fault-inject.h>
++#include <linux/delay.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/block.h>
+@@ -252,6 +253,33 @@ int blk_remove_plug(struct request_queue
+ }
+ EXPORT_SYMBOL(blk_remove_plug);
+ 
++/**
++ * blk_drain_queue - drain requests from request_queue
++ * @q: queue to drain
++ *
++ * Drain ELV_PRIV requests from @q.  The caller is responsible for ensuring
++ * that no new requests which need to be drained are queued.
++ */
++void blk_drain_queue(struct request_queue *q)
++{
++	while (true) {
++		int nr_rqs;
++
++		spin_lock_irq(q->queue_lock);
++
++		elv_drain_elevator(q);
++
++		__blk_run_queue(q);
++		nr_rqs = q->rq.elvpriv;
++
++		spin_unlock_irq(q->queue_lock);
++
++		if (!nr_rqs)
++			break;
++		msleep(10);
++	}
++}
++
+ /*
+  * remove the plug and let it rip..
+  */
+diff -r abad721bc03e block/blk.h
+--- a/block/blk.h	Wed Oct 19 14:31:22 2011 +0200
++++ b/block/blk.h	Thu May 24 15:34:59 2012 +0100
+@@ -15,6 +15,7 @@ void blk_rq_bio_prep(struct request_queu
+ 			struct bio *bio);
+ int blk_rq_append_bio(struct request_queue *q, struct request *rq,
+ 		      struct bio *bio);
++void blk_drain_queue(struct request_queue *q);
+ void blk_dequeue_request(struct request *rq);
+ void __blk_queue_free_tags(struct request_queue *q);
+ 
+diff -r abad721bc03e block/elevator.c
+--- a/block/elevator.c	Wed Oct 19 14:31:22 2011 +0200
++++ b/block/elevator.c	Thu May 24 15:34:59 2012 +0100
+@@ -31,7 +31,6 @@
+ #include <linux/slab.h>
+ #include <linux/init.h>
+ #include <linux/compiler.h>
+-#include <linux/delay.h>
+ #include <linux/blktrace_api.h>
+ #include <linux/hash.h>
+ #include <linux/uaccess.h>
+@@ -556,43 +555,35 @@ void elv_requeue_request(struct request_
+ void elv_drain_elevator(struct request_queue *q)
+ {
+ 	static int printed;
++
++	lockdep_assert_held(q->queue_lock);
++
+ 	while (q->elevator->ops->elevator_dispatch_fn(q, 1))
+ 		;
+-	if (q->nr_sorted == 0)
+-		return;
+-	if (printed++ < 10) {
++	if (q->nr_sorted && printed++ < 10) {
+ 		printk(KERN_ERR "%s: forced dispatching is broken "
+ 		       "(nr_sorted=%u), please report this\n",
+ 		       q->elevator->elevator_type->elevator_name, q->nr_sorted);
+ 	}
+ }
+ 
+-/*
+- * Call with queue lock held, interrupts disabled
+- */
+ void elv_quiesce_start(struct request_queue *q)
+ {
+ 	if (!q->elevator)
+ 		return;
+ 
++	spin_lock_irq(q->queue_lock);
+ 	queue_flag_set(QUEUE_FLAG_ELVSWITCH, q);
++	spin_unlock_irq(q->queue_lock);
+ 
+-	/*
+-	 * make sure we don't have any requests in flight
+-	 */
+-	elv_drain_elevator(q);
+-	while (q->rq.elvpriv) {
+-		__blk_run_queue(q);
+-		spin_unlock_irq(q->queue_lock);
+-		msleep(10);
+-		spin_lock_irq(q->queue_lock);
+-		elv_drain_elevator(q);
+-	}
++	blk_drain_queue(q);
+ }
+ 
+ void elv_quiesce_end(struct request_queue *q)
+ {
++	spin_lock_irq(q->queue_lock);
+ 	queue_flag_clear(QUEUE_FLAG_ELVSWITCH, q);
++	spin_unlock_irq(q->queue_lock);
+ }
+ 
+ void elv_insert(struct request_queue *q, struct request *rq, int where)
+@@ -1021,7 +1012,6 @@ static int elevator_switch(struct reques
+ 	/*
+ 	 * Turn on BYPASS and drain all requests w/ elevator private data
+ 	 */
+-	spin_lock_irq(q->queue_lock);
+ 	elv_quiesce_start(q);
+ 
+ 	/*
+@@ -1032,8 +1022,8 @@ static int elevator_switch(struct reques
+ 	/*
+ 	 * attach and start new elevator
+ 	 */
++	spin_lock_irq(q->queue_lock);
+ 	elevator_attach(q, e, data);
+-
+ 	spin_unlock_irq(q->queue_lock);
+ 
+ 	__elv_unregister_queue(old_elevator);
+@@ -1045,9 +1035,7 @@ static int elevator_switch(struct reques
+ 	 * finally exit old elevator and turn off BYPASS.
+ 	 */
+ 	elevator_exit(old_elevator);
+-	spin_lock_irq(q->queue_lock);
+ 	elv_quiesce_end(q);
+-	spin_unlock_irq(q->queue_lock);
+ 
+ 	blk_add_trace_msg(q, "elv switch: %s", e->elevator_type->elevator_name);
+ 
+@@ -1061,10 +1049,7 @@ fail_register:
+ 	elevator_exit(e);
+ 	q->elevator = old_elevator;
+ 	elv_register_queue(q);
+-
+-	spin_lock_irq(q->queue_lock);
+-	queue_flag_clear(QUEUE_FLAG_ELVSWITCH, q);
+-	spin_unlock_irq(q->queue_lock);
++	elv_quiesce_end(q);
+ 
+ 	return 0;
+ }

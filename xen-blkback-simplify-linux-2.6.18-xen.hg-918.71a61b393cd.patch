@@ -1,0 +1,44 @@
+From f0aedbbd171334a24f94c811149d3c732ded51cc Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Fri, 5 Feb 2010 19:19:34 +0000
+Subject: [PATCH 20/23] blkback: simplify linux-2.6.18-xen.hg-918.71a61b393cdf
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blkback/blkback.c |   16 ++++++----------
+ 1 files changed, 6 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/xen/blkback/blkback.c b/drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c
++++ b/drivers/xen/blkback/blkback.c
+@@ -454,23 +454,19 @@
+ 			DPRINTK("invalid buffer -- could not remap it\n");
+ 			map[i].handle = BLKBACK_INVALID_HANDLE;
+ 			ret |= 1;
+-		} else {
+-			blkback_pagemap_set(vaddr_pagenr(pending_req, i),
+-					    pending_page(pending_req, i),
+-					    blkif->domid, req->handle,
+-					    req->seg[i].gref);
++			continue;
+ 		}
+ 
+-		pending_handle(pending_req, i) = map[i].handle;
+-
+-		if (ret)
+-			continue;
+-
+ 		set_phys_to_machine(
+ 			page_to_pfn(pending_page(pending_req, i)),
+ 			FOREIGN_FRAME(map[i].dev_bus_addr >> PAGE_SHIFT));
+ 		seg[i].buf  = map[i].dev_bus_addr | 
+ 			(req->seg[i].first_sect << 9);
++		blkback_pagemap_set(vaddr_pagenr(pending_req, i),
++				    pending_page(pending_req, i),
++				    blkif->domid, req->handle,
++				    req->seg[i].gref);
++		pending_handle(pending_req, i) = map[i].handle;
+ 	}
+ 
+ 	if (ret)

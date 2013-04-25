@@ -1,0 +1,25 @@
+xen: blkback: handle spurious physical-device watch events
+
+If a spurious physical-device watch event occurs don't try to open the
+already open block device or connect.  Such event may occur if a watch
+event for the node being absent is delayed until after the toolstack
+has written the key.
+
+Already fixed upstream.
+
+diff -r 79c86b799a7c drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Feb 15 11:41:48 2012 +0000
++++ b/drivers/xen/blkback/xenbus.c	Wed Feb 15 13:24:01 2012 +0000
+@@ -848,8 +848,10 @@ static void backend_changed(struct xenbu
+ 
+ 	mutex_lock(&be->mutex);
+ 
+-	blkback_open_bdev(be);
+-	blkback_queue_start(be);
++	if (!be->blkif->bdev)
++		blkback_open_bdev(be);
++	if (xbdev->state != XenbusStateConnected)
++		blkback_queue_start(be);
+ 
+ 	mutex_unlock(&be->mutex);
+ }

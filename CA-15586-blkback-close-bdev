@@ -1,0 +1,174 @@
+diff -r 88f69ac33e07 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Fri Mar 28 12:15:46 2008 -0700
++++ b/drivers/xen/blkback/common.h	Fri Mar 28 13:56:45 2008 -0700
+@@ -48,7 +48,11 @@
+ 	pr_debug("(file=%s, line=%d) " _f,	\
+ 		 __FILE__ , __LINE__ , ## _a )
+ 
+-#define WPRINTK(fmt, args...) printk(KERN_WARNING "blk_tap: " fmt, ##args)
++#define WPRINTK(fmt, args...)					\
++do {								\
++	if (printk_ratelimit())					\
++		printk(KERN_WARNING "blk_back: " fmt, ##args);	\
++} while(0)
+ 
+ struct vbd {
+ 	blkif_vdev_t   handle;      /* what the domain refers to this vbd as */
+diff -r 88f69ac33e07 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Fri Mar 28 12:15:46 2008 -0700
++++ b/drivers/xen/blkback/xenbus.c	Fri Mar 28 13:56:45 2008 -0700
+@@ -298,7 +298,9 @@ void blkback_close(blkif_t *blkif)
+ void blkback_close(blkif_t *blkif)
+ {
+ 	blkif_disconnect(blkif);
+-	vbd_sync(&blkif->vbd);
++	vbd_free(&blkif->vbd);
++	blkif->be->major = 0;
++	blkif->be->minor = 0;
+ 	blkif->remove_requested = 0;
+ 
+ 	down(&blkback_dev_sem);
+@@ -442,6 +444,71 @@ fail:
+ 	return err;
+ }
+ 
++static int blkback_open_bdev(struct backend_info *be)
++{
++	int err;
++	char *p;
++	long handle;
++	int cdrom = 0;
++	unsigned major;
++	unsigned minor;
++	char *device_type;
++	struct xenbus_device *dev = be->dev;
++
++	if (be->blkif->vbd.bdev) {
++		xenbus_dev_fatal(dev, -EINVAL, "attempting invalid vbd open");
++		return -EINVAL;
++	}
++
++	err = xenbus_scanf(XBT_NIL, dev->nodename, "physical-device", "%x:%x",
++			   &major, &minor);
++	if (err != 2) {
++		xenbus_dev_fatal(dev, err, "reading physical-device");
++		return err;
++	}
++
++	if ((be->major || be->minor) &&
++	    ((be->major != major) || (be->minor != minor))) {
++		printk(KERN_WARNING
++		       "blkback: changing physical device (from %x:%x to "
++		       "%x:%x) not supported.\n", be->major, be->minor,
++		       major, minor);
++		xenbus_dev_fatal(dev, err, "invalid physical-device change");
++		return -EINVAL;
++	}
++
++	if (!be->mode) {
++		be->mode = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
++		if (IS_ERR(be->mode)) {
++			err = PTR_ERR(be->mode);
++			be->mode = NULL;
++			xenbus_dev_fatal(dev, err, "reading mode");
++			return err;
++		}
++	}
++
++	device_type = xenbus_read(XBT_NIL, dev->otherend, "device-type", NULL);
++	if (!IS_ERR(device_type)) {
++		cdrom = strcmp(device_type, "cdrom") == 0;
++		kfree(device_type);
++	}
++
++	/* Front end dir is a number, which is used as the handle. */
++	p = strrchr(dev->otherend, '/') + 1;
++	handle = simple_strtoul(p, NULL, 0);
++
++	err = vbd_create(be->blkif, handle, major, minor,
++			 (NULL == strchr(be->mode, 'w')), cdrom);
++	if (err) {
++		xenbus_dev_fatal(dev, err, "creating vbd structure");
++		return err;
++	}
++
++	be->major = major;
++	be->minor = minor;
++
++	return 0;
++}
+ 
+ /**
+  * Callback received when the hotplug scripts have placed the physical-device
+@@ -457,8 +524,6 @@ static void backend_changed(struct xenbu
+ 	struct backend_info *be
+ 		= container_of(watch, struct backend_info, backend_watch);
+ 	struct xenbus_device *dev = be->dev;
+-	int cdrom = 0;
+-	char *device_type;
+ 
+ 	DPRINTK("");
+ 
+@@ -484,6 +549,11 @@ static void backend_changed(struct xenbu
+ 		return;
+ 	}
+ 
++	if (be->mode) {
++		kfree(be->mode);
++		be->mode = NULL;
++	}
++
+ 	be->mode = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
+ 	if (IS_ERR(be->mode)) {
+ 		err = PTR_ERR(be->mode);
+@@ -492,28 +562,10 @@ static void backend_changed(struct xenbu
+ 		return;
+ 	}
+ 
+-	device_type = xenbus_read(XBT_NIL, dev->otherend, "device-type", NULL);
+-	if (!IS_ERR(device_type)) {
+-		cdrom = strcmp(device_type, "cdrom") == 0;
+-		kfree(device_type);
+-	}
+-
+ 	if (be->major == 0 && be->minor == 0) {
+-		/* Front end dir is a number, which is used as the handle. */
+-
+-		char *p = strrchr(dev->otherend, '/') + 1;
+-		long handle = simple_strtoul(p, NULL, 0);
+-
+-		be->major = major;
+-		be->minor = minor;
+-
+-		err = vbd_create(be->blkif, handle, major, minor,
+-				 (NULL == strchr(be->mode, 'w')), cdrom);
+-		if (err) {
+-			be->major = be->minor = 0;
+-			xenbus_dev_fatal(dev, err, "creating vbd structure");
++		err = blkback_open_bdev(be);
++		if (err)
+ 			return;
+-		}
+ 
+ 		err = xenvbd_sysfs_addif(dev);
+ 		if (err) {
+@@ -558,10 +610,18 @@ static void frontend_changed(struct xenb
+ 		/* Ensure we connect even when two watches fire in 
+ 		   close successsion and we miss the intermediate value 
+ 		   of frontend_state. */
+-		if (dev->state != XenbusStateConnected && dev->state != XenbusStateClosing) {
++		if (dev->state != XenbusStateConnected &&
++		    dev->state != XenbusStateClosing) {
+ 			err = connect_ring(be);
+ 			if (err)
+ 				break;
++
++			if (!be->blkif->vbd.bdev) {
++				err = blkback_open_bdev(be);
++				if (err)
++					break;
++			}
++
+ 			update_blkif_status(be->blkif);
+ 		}
+ 

@@ -1,0 +1,488 @@
+diff -r 4f66025924a6 drivers/net/bonding/bond_alb.c
+--- a/drivers/net/bonding/bond_alb.c	Wed Feb 11 15:53:37 2009 +0000
++++ b/drivers/net/bonding/bond_alb.c	Wed Feb 11 16:00:15 2009 +0000
+@@ -112,6 +112,7 @@
+ 
+ /* Forward declaration */
+ static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[]);
++static void slb_send_learning_packets(struct bonding *bond);
+ 
+ static inline u8 _simple_hash(const u8 *hash_start, int hash_size)
+ {
+@@ -307,6 +308,19 @@
+ }
+ 
+ /*********************** slb specific functions ***************************/
++
++static void slb_send_learning_packets(struct bonding *bond)
++{
++	struct vlan_entry *vlan;
++	struct net_device *vlan_dev;
++
++	br_send_gratuitous_switch_learning_packet(bond->dev);
++
++	list_for_each_entry(vlan, &bond->vlan_list, vlan_list) {
++		vlan_dev = vlan_group_get_device(bond->vlgrp, vlan->vlan_id);
++		br_send_gratuitous_switch_learning_packet(vlan_dev);
++	}
++}
+ 
+ void bond_info_show_slb(struct seq_file *seq)
+ {
+@@ -1020,7 +1034,8 @@
+ 
+ 	/* fasten the change in the switch */
+ 	if (SLAVE_IS_OK(slave1)) {
+-		alb_send_learning_packets(slave1, slave1->dev->dev_addr);
++		if (!bond->alb_info.slb_enabled)
++			alb_send_learning_packets(slave1, slave1->dev->dev_addr);
+ 		if (bond->alb_info.rlb_enabled) {
+ 			/* inform the clients that the mac address
+ 			 * has changed
+@@ -1032,7 +1047,8 @@
+ 	}
+ 
+ 	if (SLAVE_IS_OK(slave2)) {
+-		alb_send_learning_packets(slave2, slave2->dev->dev_addr);
++		if (!bond->alb_info.slb_enabled)
++			alb_send_learning_packets(slave2, slave2->dev->dev_addr);
+ 		if (bond->alb_info.rlb_enabled) {
+ 			/* inform the clients that the mac address
+ 			 * has changed
+@@ -1042,6 +1058,9 @@
+ 	} else {
+ 		disabled_slave = slave2;
+ 	}
++
++	if (bond->alb_info.slb_enabled)
++		slb_send_learning_packets(bond);
+ 
+ 	if (bond->alb_info.rlb_enabled && slaves_state_differ) {
+ 		/* A disabled slave was assigned an active mac addr */
+@@ -1408,16 +1427,8 @@
+ 		/* unbalanced or unassigned, send through primary */
+ 		tx_slave = bond->curr_active_slave;
+ 		bond_info->unbalanced_load += skb->len;
+-		printk(KERN_ERR "No slave for %02x:%02x:%02x:%02x:%02x:%02x.\n",
+-		       eth_data->h_source[0], eth_data->h_source[1],
+-		       eth_data->h_source[2], eth_data->h_source[3],
+-		       eth_data->h_source[4], eth_data->h_source[5]);
+-		if (tx_slave) {
+-			printk(KERN_ERR "Sending via primary %s (hash_index %x, length %x)\n",
+-			       tx_slave->dev->name, hash_index, hash_size);
+-		} else {
++		if (!tx_slave)
+ 			printk(KERN_ERR "No primary interface found\n");
+-		}
+ 	}
+ 
+ 	if (tx_slave && SLAVE_IS_OK(tx_slave)) {
+@@ -1469,7 +1480,7 @@
+ 	bond_info->lp_counter++;
+ 
+ 	/* send learning packets */
+-	if (bond_info->lp_counter >= BOND_ALB_LP_TICKS) {
++	if (!bond->alb_info.slb_enabled && bond_info->lp_counter >= BOND_ALB_LP_TICKS) {
+ 		/* change of curr_active_slave involves swapping of mac addresses.
+ 		 * in order to avoid this swapping from happening while
+ 		 * sending the learning packets, the curr_slave_lock must be held for
+@@ -1499,13 +1510,10 @@
+ 						BOND_TLB_REBALANCE_INTERVAL;
+ 				bond_info->unbalanced_load = 0;
+ 			}
+-			/*
+-			 * No need for ARP in the SLB case since the
+-			 * RX path remains valid, although we may
+-			 * shortly be choosing a different TX path
+-			 * which will cause RX to change too.
+-			 */
+ 		}
++
++		if (bond->alb_info.slb_enabled)
++			slb_send_learning_packets(bond);
+ 
+ 		read_unlock(&bond->curr_slave_lock);
+ 
+@@ -1638,7 +1646,7 @@
+ 			 * gone away. Send a gratuitous packet which
+ 			 * will cause the switch to update its tables.
+ 			 */
+-			br_send_gratuitous_switch_learning_packet(bond->dev);
++			slb_send_learning_packets(bond);
+ 		}
+ 	} else if (link == BOND_LINK_UP) {
+ 		/* order a rebalance ASAP */
+@@ -1736,7 +1744,10 @@
+ 		read_lock(&bond->lock);
+ 	} else {
+ 		read_lock(&bond->lock);
+-		alb_send_learning_packets(new_slave, bond->dev->dev_addr);
++		if (bond->alb_info.slb_enabled)
++			slb_send_learning_packets(bond);
++		else
++			alb_send_learning_packets(new_slave, bond->dev->dev_addr);
+ 	}
+ 
+ 	write_lock_bh(&bond->curr_slave_lock);
+@@ -1791,8 +1802,11 @@
+ 		alb_set_slave_mac_addr(bond->curr_active_slave, bond_dev->dev_addr,
+ 				       bond->alb_info.rlb_enabled);
+ 
+ 		read_lock(&bond->lock);
+-		alb_send_learning_packets(bond->curr_active_slave, bond_dev->dev_addr);
++		if (bond->alb_info.slb_enabled)
++			slb_send_learning_packets(bond);
++		else
++			alb_send_learning_packets(bond->curr_active_slave, bond_dev->dev_addr);
+ 		if (bond->alb_info.rlb_enabled) {
+ 			/* inform clients mac address has changed */
+ 			rlb_req_update_slave_clients(bond, bond->curr_active_slave);
+diff -r 4f66025924a6 drivers/net/bonding/bond_main.c
+--- a/drivers/net/bonding/bond_main.c	Wed Feb 11 15:53:37 2009 +0000
++++ b/drivers/net/bonding/bond_main.c	Wed Feb 11 16:00:15 2009 +0000
+@@ -794,7 +794,7 @@
+ static int bond_set_promiscuity(struct bonding *bond, int inc)
+ {
+ 	int err = 0;
+-	if (USES_PRIMARY(bond->params.mode)) {
++	if (USES_PRIMARY(bond->params.mode) && bond->params.mode != BOND_MODE_SLB) {
+ 		/* write lock already acquired */
+ 		if (bond->curr_active_slave) {
+ 			err = dev_set_promiscuity(bond->curr_active_slave->dev,
+@@ -1580,6 +1581,11 @@
+ 			dev_mc_add (slave_dev, dmi->dmi_addr, dmi->dmi_addrlen, 0);
+ 		}
+ 		netif_addr_unlock_bh(bond_dev);
++	} else if (bond->params.mode == BOND_MODE_SLB) {
++		/* set promiscuity level to new slave */
++		if (bond_dev->flags & IFF_PROMISC) {
++			dev_set_promiscuity(slave_dev, 1);
++		}
+ 	}
+ 
+ 	if (bond->params.mode == BOND_MODE_8023AD) {
+@@ -4489,9 +4495,9 @@
+ 		bond_set_xmit_hash_policy(bond);
+ 		break;
+ 	case BOND_MODE_ALB:
++	case BOND_MODE_SLB:
+ 		bond_set_master_alb_flags(bond);
+ 		/* FALLTHRU */
+-	case BOND_MODE_SLB:
+ 	case BOND_MODE_TLB:
+ 		bond_dev->hard_start_xmit = bond_alb_xmit;
+ 		bond_dev->set_mac_address = bond_alb_set_mac_address;
+diff -r 4f66025924a6 drivers/net/bonding/bonding.h
+--- a/drivers/net/bonding/bonding.h	Wed Feb 11 15:53:37 2009 +0000
++++ b/drivers/net/bonding/bonding.h	Wed Feb 11 16:00:15 2009 +0000
+@@ -65,7 +65,7 @@
+ #define USES_PRIMARY(mode)				\
+ 		(((mode) == BOND_MODE_ACTIVEBACKUP) ||	\
+ 		 ((mode) == BOND_MODE_TLB)          ||	\
+-		 ((mode) == BOND_MODE_ALB)          ||  \
++		 ((mode) == BOND_MODE_ALB)          ||	\
+ 		 ((mode) == BOND_MODE_SLB))
+ 
+ /*
+diff -r 4f66025924a6 net/bridge/br_fdb.c
+--- a/net/bridge/br_fdb.c	Wed Feb 11 15:53:37 2009 +0000
++++ b/net/bridge/br_fdb.c	Wed Feb 11 16:00:15 2009 +0000
+@@ -20,6 +20,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/jhash.h>
+ #include <linux/random.h>
++#include <linux/if_arp.h>
+ #include <asm/atomic.h>
+ #include <asm/unaligned.h>
+ #include "br_private.h"
+@@ -377,15 +378,17 @@
+ 	return ret;
+ }
+ 
+-void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
+-		   const unsigned char *addr)
++int br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
++		   struct sk_buff *skb)
+ {
++	const unsigned char *addr = eth_hdr(skb)->h_source;
+ 	struct hlist_head *head = &br->hash[br_mac_hash(addr)];
+ 	struct net_bridge_fdb_entry *fdb;
++	static const u8 bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+ 
+ 	/* some users want to always flood. */
+ 	if (hold_time(br) == 0)
+-		return;
++		return 1;
+ 
+ 	/* ignore packets unless we are using this port */
+ 	if (!(source->state == BR_STATE_LEARNING ||
+@@ -394,8 +397,51 @@
+ 
+ 	fdb = fdb_find(head, addr);
+ 	if (likely(fdb)) {
++		/*
++		 * If this is an address arriving on the physical port
++		 * which we have previously seen on a non-physical
++		 * port then ignore it.
++                 *
++                 * _Unless_ it is a broadcast ARP reply in which case
++                 * the guest in question has migrated.
++		 */
++		extern struct net_bridge_port *br_locate_physical_port(struct net_bridge *br);
++		struct net_bridge_port *phys_port = br_locate_physical_port(br);
++		if (phys_port && phys_port != fdb->dst && phys_port == source) {
++#pragma pack(1)
++			struct arp_pkt {
++				u16     hw_addr_space;
++				u16     prot_addr_space;
++				u8      hw_addr_len;
++				u8      prot_addr_len;
++				u16     op_code;
++				u8      mac_src[ETH_ALEN];	/* sender hardware address */
++				u32     ip_src;			/* sender IP address */
++				u8      mac_dst[ETH_ALEN];	/* target hardware address */
++				u32     ip_dst;			/* target IP address */
++			};
++#pragma pack()
++			struct arp_pkt *arp = (struct arp_pkt *)skb->data;
++
++			if (compare_ether_addr(bcast, addr) != 0)
++				return 0;
++
++			if (!arp)
++				return 0;
++
++			if (skb->len < sizeof(struct arp_pkt))
++				return 0;
++
++			if (eth_hdr(skb)->h_proto != htons(ETH_P_ARP))
++				return 0;
++
++			if (arp->op_code != htons(ARPOP_REPLY))
++				return 0;
++		}
++
+ 		/* attempt to update an entry for a local interface */
+ 		if (unlikely(fdb->is_local)) {
++			return 0;
+ 			if (net_ratelimit())
+ 				printk(KERN_WARNING "%s: received packet with "
+ 				       " own address as source address\n",
+@@ -414,4 +460,6 @@
+ 		 */
+ 		spin_unlock(&br->hash_lock);
+ 	}
++
++	return 1;
+ }
+diff -r 4f66025924a6 net/bridge/br_if.c
+--- a/net/bridge/br_if.c	Wed Feb 11 15:53:37 2009 +0000
++++ b/net/bridge/br_if.c	Wed Feb 11 16:00:15 2009 +0000
+@@ -13,6 +13,7 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/netdevice.h>
++#include <linux/pkt_sched.h>
+ #include <linux/etherdevice.h>
+ #include <linux/ethtool.h>
+ #include <linux/if_arp.h>
+@@ -205,6 +206,7 @@
+ 	br->topology_change = 0;
+ 	br->topology_change_detected = 0;
+ 	br->ageing_time = 300 * HZ;
++	br->phys_port = NULL;
+ 
+ 	br_netfilter_rtable_init(br);
+ 
+@@ -266,6 +268,20 @@
+ 	return p;
+ }
+ 
++struct net_bridge_port *br_locate_physical_port(struct net_bridge *br)
++{
++	struct net_bridge_port *p;
++	if (!br->phys_port) {
++		list_for_each_entry(p, &br->port_list, list) {
++			if (!compare_ether_addr(br->dev->dev_addr, p->dev->dev_addr)) {
++				br->phys_port = p;
++				break;
++			}
++		}
++	}
++	return br->phys_port;
++}
++
+ struct net_device *br_locate_physical_device(struct net_device *dev)
+ {
+ 	struct net_bridge *br;
+@@ -275,55 +291,52 @@
+ 		return dev;
+ 
+ 	br = netdev_priv(dev);
++	p = br_locate_physical_port(br);
+ 
+-	list_for_each_entry(p, &br->port_list, list) {
+-		if (!compare_ether_addr(dev->dev_addr, p->dev->dev_addr))
+-			return p->dev;
+-	}
+-	return dev;
++	return p ? p->dev : dev;
+ }
+ EXPORT_SYMBOL(br_locate_physical_device);
+ 
+ static struct sk_buff *create_switch_learning_packet(struct net_device *dev, unsigned char *src_hw)
+ {
++#pragma pack(1)
++	struct learning_pkt {
++		u8 mac_dst[ETH_ALEN];
++		u8 mac_src[ETH_ALEN];
++		u16 type;
++		u8 padding[ETH_ZLEN - ETH_HLEN];
++	};
++#pragma pack()
+ 	struct sk_buff *skb;
+-	unsigned char *data;
++	struct learning_pkt pkt;
++	int size = sizeof(struct learning_pkt);
++	char *data;
++	const unsigned char dest_hw[ETH_ALEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+ 
+-	/*
+-	 * Xen OUI is 00-16-3E therefore multicast address is 01-16-3E.
+-	 * Use the first of these addresses as our destination address with protocol type 0.
+-	 * Include the physical interface's MAC address as the payload.
+-	 */
+-	unsigned char dest_hw[ETH_ALEN] = {0x01, 0x16, 0x3e, 0x00, 0x00, 0x00};
++	memset(&pkt, 0, size);
++	memcpy(pkt.mac_dst, dest_hw, ETH_ALEN);
++	memcpy(pkt.mac_src, src_hw, ETH_ALEN);
++	pkt.type = __constant_htons(ETH_P_LOOP);
+ 
+-	skb = alloc_skb(ETH_ALEN + LL_RESERVED_SPACE(dev), GFP_ATOMIC);
+-	if (skb == NULL)
++	skb = dev_alloc_skb(size);
++	if (!skb)
+ 		return NULL;
+ 
+-	skb_reserve(skb, LL_RESERVED_SPACE(dev));
+-	skb->nh.raw = skb->data;
+-	data = (unsigned char *) skb_put(skb, ETH_ALEN);
++	data = skb_put(skb, size);
++	memcpy(data, &pkt, size);
+ 
++	skb->protocol = pkt.type;
++	skb->priority = TC_PRIO_CONTROL;
+ 	skb->dev = dev;
+-	skb->protocol = 0;
+-
+-	if (dev->hard_header &&
+-	    dev->hard_header(skb,dev,0,&dest_hw,src_hw,skb->len) < 0)
+-		goto out;
+-
+-	memcpy(data, dev->dev_addr, ETH_ALEN);
+ 
+ 	return skb;
+-
+-out:
+-	kfree_skb(skb);
+-	return NULL;
+ }
+ 
+ void br_send_gratuitous_switch_learning_packet(struct net_device *dev)
+ {
+ 	struct net_bridge *br;
+ 	struct net_device *phys;
++	struct sk_buff *skb;
+ 	int i;
+ 
+ 	if (!dev->br_port)
+@@ -343,16 +356,22 @@
+ 			if (f->dst != phys->br_port &&
+ 			    f->dst->dev->addr_len == ETH_ALEN &&
+ 			    memcmp(&f->dst->dev->dev_addr[0], &f->addr.addr[0], ETH_ALEN) != 0) {
+-				struct sk_buff *skb;
+ 				skb = create_switch_learning_packet(dev, f->addr.addr);
+ 
+ 				if (skb == NULL)
+ 					goto out;
+ 
+ 				dev_queue_xmit(skb);
++
++				f->ageing_timer = jiffies;
+ 			}
+ 		}
+ 	}
++
++	skb = create_switch_learning_packet(dev, dev->dev_addr);
++	if (skb)
++		dev_queue_xmit(skb);
++
+ out:
+ 	spin_unlock_bh(&br->hash_lock);
+ }
+@@ -540,6 +559,9 @@
+ 	if (!p || p->br != br)
+ 		return -EINVAL;
+ 
++	if ( p == br->phys_port )
++		br->phys_port = NULL;
++
+ 	del_nbp(p);
+ 
+ 	spin_lock_bh(&br->lock);
+diff -r 4f66025924a6 net/bridge/br_input.c
+--- a/net/bridge/br_input.c	Wed Feb 11 15:53:37 2009 +0000
++++ b/net/bridge/br_input.c	Wed Feb 11 16:00:15 2009 +0000
+@@ -48,7 +48,8 @@
+ 
+ 	/* insert into forwarding database after filtering to avoid spoofing */
+ 	br = p->br;
+-	br_fdb_update(br, p, eth_hdr(skb)->h_source);
++	if (!br_fdb_update(br, p, skb))
++		goto drop;
+ 
+ 	if (p->state == BR_STATE_LEARNING)
+ 		goto drop;
+@@ -95,11 +96,15 @@
+ {
+ 	struct net_bridge_port *p = rcu_dereference(skb->dev->br_port);
+ 
+-	if (p)
+-		br_fdb_update(p->br, p, eth_hdr(skb)->h_source);
++	if (p) {
++		if (!br_fdb_update(p->br, p, skb)) {
++			kfree_skb(skb);
++			return 1;
++		}
++	}
++
+ 	return 0;	 /* process further */
+ }
+-
+ /* Does address match the link local multicast address.
+  * 01:80:c2:00:00:0X
+  */
+diff -r 4f66025924a6 net/bridge/br_private.h
+--- a/net/bridge/br_private.h	Wed Feb 11 15:53:37 2009 +0000
++++ b/net/bridge/br_private.h	Wed Feb 11 16:00:15 2009 +0000
+@@ -91,6 +91,7 @@
+ 	struct list_head		port_list;
+ 	struct list_head		promiscuous_list;
+ 	struct net_device		*dev;
++	struct net_bridge_port		*phys_port; /* One of our ports will contains the route to the physical world */
+ 	spinlock_t			hash_lock;
+ 	struct hlist_head		hash[BR_HASH_SIZE];
+ 	struct list_head		age_list;
+@@ -164,9 +165,9 @@
+ extern int br_fdb_insert(struct net_bridge *br,
+ 			 struct net_bridge_port *source,
+ 			 const unsigned char *addr);
+-extern void br_fdb_update(struct net_bridge *br,
+-			  struct net_bridge_port *source,
+-			  const unsigned char *addr);
++extern int br_fdb_update(struct net_bridge *br,
++			 struct net_bridge_port *source,
++			 struct sk_buff *skb);
+ 
+ /* br_forward.c */
+ extern void br_deliver(const struct net_bridge_port *to,

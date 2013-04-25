@@ -1,0 +1,63 @@
+From 9ccc03593edcfb70ea846da414d5671952e7e831 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Wed, 21 Jul 2010 13:35:21 -0700
+Subject: [PATCH 3/3] xen/blktap: make protocol specific usage of shared sring explicit
+
+I don't think protocol specific data't really belongs in this header
+but since it is already there and we seem to be stuck with it lets at
+least make the users explicit lest people get caught out by future new
+fields moving the pad field around.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/ring.c  |    4 ++--
+ drivers/xen/blktap2/sysfs.c |    3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index b49c478..d7d0c79 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -335,7 +335,7 @@ blktap_ring_set_message(struct blktap *tap, int msg)
+ 	struct blktap_ring *ring = &tap->ring;
+ 
+ 	if (ring->ring.sring)
+-		ring->ring.sring->pad[0] = msg;
++		ring->ring.sring->private.tapif_user.msg = msg;
+ }
+ 
+ static int
+@@ -400,7 +400,7 @@ static unsigned int blktap_ring_poll(struct file *filp, poll_table *wait)
+ 	up_read(&current->mm->mmap_sem);
+ 
+ 	if (work ||
+-	    ring->ring.sring->pad[0])
++	    ring->ring.sring->private.tapif_user.msg)
+ 		return POLLIN | POLLRDNORM;
+ 
+ 	return 0;
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 49f5e67..e342d15 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -97,6 +97,7 @@ blktap_sysfs_remove_device(struct device *dev,
+ 			   const char *buf, size_t size)
+ {
+ 	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
++	struct blktap_ring *ring = &tap->ring;
+ 
+ 	if (!tap->ring.dev)
+ 		return size;
+@@ -105,7 +106,7 @@ blktap_sysfs_remove_device(struct device *dev,
+ 		return -EBUSY;
+ 
+ 	BTDBG("sending tapdisk close message\n");
+-	tap->ring.ring.sring->pad[0] = BLKTAP2_RING_MESSAGE_CLOSE;
++	ring->ring.sring->private.tapif_user.msg = BLKTAP2_RING_MESSAGE_CLOSE;
+ 	blktap_ring_kick_user(tap);
+ 	wait_event_interruptible(tap->wq,
+ 				 !test_bit(BLKTAP_CONTROL, &tap->dev_inuse));
+-- 
+1.7.0.4
+

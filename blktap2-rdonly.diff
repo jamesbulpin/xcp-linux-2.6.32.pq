@@ -1,0 +1,246 @@
+blktap: Upgrade CREATE_DEVICE ioctl.
+
+1) Replaces the old blktap2_params-compatible call:
+
+ * flags: adds support for disk R/O-mode.
+
+ * physical_sector_size: In addition to the logical size.
+
+ * reserves some extra space for future extensions.
+
+Bumps up the relevant ioctl nr, for new tapdisk sources. The old slot
+remains supported through translation.
+
+2) set_disk_ro might sleep.
+
+That disk isn't live yet, so just drop a presumably gratuitous
+spinlock.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 72eeb188d16f drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Thu Jan 27 00:48:52 2011 -0800
++++ b/drivers/xen/blktap2/device.c	Thu Jan 27 15:51:34 2011 -0800
+@@ -276,20 +276,18 @@
+ 
+ static void
+ blktap_device_configure(struct blktap *tap,
+-			struct blktap_device_info *params)
++			struct blktap_device_info *info)
+ {
+-	struct request_queue *rq;
+-	struct blktap_device *dev = &tap->device;
++	struct blktap_device *tapdev = &tap->device;
++	struct gendisk *gd = tapdev->gd;
++	struct request_queue *rq = gd->queue;
+ 
+-	dev = &tap->device;
+-	rq  = dev->gd->queue;
+-
+-	spin_lock_irq(&dev->lock);
+-
+-	set_capacity(dev->gd, params->capacity);
++	set_capacity(gd, info->capacity);
++	set_disk_ro(gd, !!(info->flags & BLKTAP_DEVICE_RO));
+ 
+ 	/* Hard sector size and max sectors impersonate the equiv. hardware. */
+-	blk_queue_logical_block_size(rq, params->sector_size);
++	blk_queue_logical_block_size(rq, info->sector_size);
++	blk_queue_physical_block_size(rq, info->physical_sector_size);
+ 	blk_queue_max_sectors(rq, 512);
+ 
+ 	/* Each segment in a request is up to an aligned page in size. */
+@@ -305,38 +303,36 @@
+ 
+ 	/* We are reordering, but cacheless. */
+ 	blk_queue_ordered(rq, QUEUE_ORDERED_DRAIN, NULL);
+-
+-	spin_unlock_irq(&dev->lock);
+ }
+ 
+ static int
+-blktap_device_validate_params(struct blktap *tap,
+-			      struct blktap_device_info *params)
++blktap_device_validate_info(struct blktap *tap,
++			    struct blktap_device_info *info)
+ {
+ 	struct device *dev = tap->ring.dev;
+-	int sector_order, name_sz;
++	int sector_order;
+ 
+-	sector_order = ffs(params->sector_size) - 1;
+-
++	sector_order = ffs(info->sector_size) - 1;
+ 	if (sector_order <  9 ||
+ 	    sector_order > 12 ||
+-	    params->sector_size != 1U<<sector_order)
++	    info->sector_size != 1U<<sector_order)
+ 		goto fail;
+ 
+-	if (!params->capacity ||
+-	    (params->capacity > ULLONG_MAX >> sector_order))
++	if (!info->capacity ||
++	    (info->capacity > ULLONG_MAX >> sector_order))
+ 		goto fail;
+ 
+-	name_sz = min(sizeof(params->name), sizeof(tap->name));
+-	if (strnlen(params->name, name_sz) >= name_sz)
++	sector_order = ffs(info->physical_sector_size) - 1;
++	if (sector_order <  9 ||
++	    info->physical_sector_size != 1U<<sector_order)
+ 		goto fail;
+ 
+ 	return 0;
+ 
+ fail:
+-	params->name[name_sz-1] = 0;
+-	dev_err(dev, "capacity: %llu, sector-size: %lu, name: %s\n",
+-		params->capacity, params->sector_size, params->name);
++	dev_err(dev, "capacity: %llu, sector-size: %u/%u\n",
++		info->capacity,
++		info->sector_size, info->physical_sector_size);
+ 	return -EINVAL;
+ }
+ 
+@@ -427,7 +423,7 @@
+ }
+ 
+ int
+-blktap_device_create(struct blktap *tap, struct blktap_device_info *params)
++blktap_device_create(struct blktap *tap, struct blktap_device_info *info)
+ {
+ 	int minor, err;
+ 	struct gendisk *gd;
+@@ -442,7 +438,7 @@
+ 	if (test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
+ 		return -EEXIST;
+ 
+-	if (blktap_device_validate_params(tap, params))
++	if (blktap_device_validate_info(tap, info))
+ 		return -EINVAL;
+ 
+ 	gd = alloc_disk(1);
+@@ -486,16 +482,15 @@
+ 	rq->queuedata = tapdev;
+ 	tapdev->gd    = gd;
+ 
+-	blktap_device_configure(tap, params);
++	blktap_device_configure(tap, info);
+ 	add_disk(gd);
+ 
+-	if (params->name[0])
+-		strncpy(tap->name, params->name, sizeof(tap->name)-1);
+-
+ 	set_bit(BLKTAP_DEVICE, &tap->dev_inuse);
+ 
+-	dev_info(disk_to_dev(gd), "sector-size: %u capacity: %llu\n",
+-		 queue_logical_block_size(rq), get_capacity(gd));
++	dev_info(disk_to_dev(gd), "sector-size: %u/%u capacity: %llu\n",
++		 queue_logical_block_size(rq),
++		 queue_physical_block_size(rq),
++		 get_capacity(gd));
+ 
+ 	return 0;
+ 
+diff -r e83e745abc78 drivers/xen/blktap2/ring.c
+--- a/drivers/xen/blktap2/ring.c	Wed Jan 26 20:54:15 2011 -0800
++++ b/drivers/xen/blktap2/ring.c	Thu Jan 27 00:24:30 2011 -0800
+@@ -382,6 +382,8 @@
+ {
+ 	struct blktap *tap = filp->private_data;
+ 	struct blktap_ring *ring = &tap->ring;
++	void __user *ptr = (void *)arg;
++	int err;
+ 
+ 	BTDBG("%d: cmd: %u, arg: %lu\n", tap->minor, cmd, arg);
+ 
+@@ -394,12 +396,32 @@
+ 		blktap_read_ring(tap);
+ 		return 0;
+ 
++	case BLKTAP_IOCTL_CREATE_DEVICE_COMPAT: {
++		struct blktap_device_info info;
++		struct blktap2_params params;
++
++		if (copy_from_user(&params, ptr, sizeof(params)))
++			return -EFAULT;
++
++		info.capacity             = params.capacity;
++		info.sector_size          = params.sector_size;
++		info.physical_sector_size = params.sector_size;
++		info.flags                = 0;
++
++		err = blktap_device_create(tap, &info);
++		if (err)
++			return err;
++
++		if (params.name[0]) {
++			strncpy(tap->name, params.name, sizeof(params.name));
++			tap->name[sizeof(tap->name)-1] = 0;
++		}
++
++		return 0;
++	}
++
+ 	case BLKTAP_IOCTL_CREATE_DEVICE: {
+ 		struct blktap_device_info info;
+-		void __user *ptr = (void *)arg;
+-
+-		if (!arg)
+-			return -EINVAL;
+ 
+ 		if (copy_from_user(&info, ptr, sizeof(info)))
+ 			return -EFAULT;
+diff -r e83e745abc78 include/linux/blktap.h
+--- a/include/linux/blktap.h	Wed Jan 26 20:54:15 2011 -0800
++++ b/include/linux/blktap.h	Thu Jan 27 00:24:30 2011 -0800
+@@ -13,11 +13,9 @@
+ #define BLKTAP_IOCTL_RESPOND        1
+ #define BLKTAP_IOCTL_ALLOC_TAP      200
+ #define BLKTAP_IOCTL_FREE_TAP       201
+-#define BLKTAP_IOCTL_CREATE_DEVICE  202
++#define BLKTAP_IOCTL_CREATE_DEVICE  208
+ #define BLKTAP_IOCTL_REMOVE_DEVICE  207
+ 
+-#define BLKTAP_NAME_MAX             256
+-
+ struct blktap_info {
+ 	unsigned int            ring_major;
+ 	unsigned int            bdev_major;
+@@ -25,11 +23,15 @@
+ };
+ 
+ struct blktap_device_info {
+-	char                    name[BLKTAP_NAME_MAX];
+ 	unsigned long long      capacity;
+-	unsigned long           sector_size;
++	unsigned int            sector_size;
++	unsigned int            physical_sector_size;
++	unsigned long           flags;
++	unsigned long           __rsvd[4];
+ };
+ 
++#define BLKTAP_DEVICE_RO        0x00000001UL
++
+ /*
+  * I/O ring
+  */
+@@ -77,9 +79,17 @@
+ #define BLKTAP_RING_SIZE __CONST_RING_SIZE(blktap, BLKTAP_PAGE_SIZE)
+ 
+ /*
+- * Ring messages (DEPRECATED)
++ * Ring messages + old ioctls (DEPRECATED)
+  */
+ 
+ #define BLKTAP_RING_MESSAGE_CLOSE   3
++#define BLKTAP_IOCTL_CREATE_DEVICE_COMPAT 202
++#define BLKTAP_NAME_MAX 256
++
++struct blktap2_params {
++	char               name[BLKTAP_NAME_MAX];
++	unsigned long long capacity;
++	unsigned long      sector_size;
++};
+ 
+ #endif /* _LINUX_BLKTAP_H */

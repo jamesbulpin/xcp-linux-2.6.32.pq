@@ -1,0 +1,56 @@
+Describe: v3.2-rc5-4-g8ba6143
+commit 8ba61435d73f2274e12d4d823fde06735e8f6a54
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Dec 14 00:33:37 2011 +0100
+
+    block: add missing blk_queue_dead() checks
+
+    blk_insert_cloned_request(), blk_execute_rq_nowait() and
+    blk_flush_plug_list() either didn't check whether the queue was dead
+    or did it without holding queue_lock.  Update them so that dead state
+    is checked while holding queue_lock.
+
+    AFAICS, this plugs all holes (requeue doesn't matter as the request is
+    transitioning atomically from in_flight to queued).
+
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff -r 39ba26a6fa7b block/blk-core.c
+--- a/block/blk-core.c	Wed Dec 14 00:33:37 2011 +0100
++++ b/block/blk-core.c	Fri May 25 12:11:20 2012 +0100
+@@ -1746,6 +1746,10 @@ int blk_insert_cloned_request(struct req
+ #endif
+ 
+ 	spin_lock_irqsave(q->queue_lock, flags);
++	if (unlikely(blk_queue_dead(q))) {
++		spin_unlock_irqrestore(q->queue_lock, flags);
++		return -ENODEV;
++	}
+ 
+ 	/*
+ 	 * Submitting request must be dequeued before calling this function
+diff -r 39ba26a6fa7b block/blk-exec.c
+--- a/block/blk-exec.c	Wed Dec 14 00:33:37 2011 +0100
++++ b/block/blk-exec.c	Fri May 25 12:11:20 2012 +0100
+@@ -50,7 +50,11 @@ void blk_execute_rq_nowait(struct reques
+ {
+ 	int where = at_head ? ELEVATOR_INSERT_FRONT : ELEVATOR_INSERT_BACK;
+ 
++	WARN_ON(irqs_disabled());
++	spin_lock_irq(q->queue_lock);
++
+ 	if (unlikely(blk_queue_dead(q))) {
++		spin_unlock_irq(q->queue_lock);
+ 		rq->errors = -ENXIO;
+ 		if (rq->end_io)
+ 			rq->end_io(rq, rq->errors);
+@@ -59,8 +63,6 @@ void blk_execute_rq_nowait(struct reques
+ 
+ 	rq->rq_disk = bd_disk;
+ 	rq->end_io = done;
+-	WARN_ON(irqs_disabled());
+-	spin_lock_irq(q->queue_lock);
+ 	__elv_add_request(q, rq, where, 1);
+ 	__generic_unplug_device(q);
+ 	/* the queue is stopped so it won't be plugged+unplugged */

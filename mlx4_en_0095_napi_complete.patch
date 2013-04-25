@@ -1,0 +1,21 @@
+diff --git a/drivers/net/mlx4/en_rx.c b/drivers/net/mlx4/en_rx.c
+--- a/drivers/net/mlx4/en_rx.c
++++ b/drivers/net/mlx4/en_rx.c
+@@ -937,7 +937,7 @@
+ 	struct mlx4_en_priv *priv = netdev_priv(cq->dev);
+ 
+ 	if (priv->port_up)
+-		napi_schedule(&cq->napi);
++		netif_rx_schedule(cq->dev, &cq->napi);
+ 	else
+ 		mlx4_en_arm_cq(priv, cq);
+ }
+@@ -960,7 +960,7 @@
+ 		INC_PERF_COUNTER(priv->pstats.napi_quota);
+ 	else {
+ 		/* Done for now */
+-		napi_complete(napi);
++		netif_rx_complete(dev, napi);
+ 		mlx4_en_arm_cq(priv, cq);
+ 	}
+ 	return done;

@@ -1,0 +1,70 @@
+# HG changeset patch
+# Parent e7c335d70436ad41eaa451a0b0bf27ce3e58f53b
+
+diff -r e7c335d70436 drivers/xen/pciback/pci_stub.c
+--- a/drivers/xen/pciback/pci_stub.c	Thu Jan 19 18:46:48 2012 +0000
++++ b/drivers/xen/pciback/pci_stub.c	Fri Jan 27 15:52:42 2012 +0000
+@@ -119,6 +119,7 @@ static struct pciback_dev_data *pcistub_
+ static void pcistub_device_release(struct kref *kref)
+ {
+ 	struct pcistub_device *psdev;
++	unsigned long flags;
+ 
+ 	psdev = container_of(kref, struct pcistub_device, kref);
+ 
+@@ -131,6 +132,10 @@ static void pcistub_device_release(struc
+ 	kfree(pci_get_drvdata(psdev->dev));
+ 	pci_set_drvdata(psdev->dev, NULL);
+ 
++	spin_lock_irqsave(&pcistub_devices_lock, flags);
++	list_del(&psdev->dev_list);
++	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
++
+ 	pci_dev_put(psdev->dev);
+ 
+ 	kfree(psdev);
+@@ -579,10 +584,6 @@ static void pcistub_remove(struct pci_de
+ 						found_psdev->dev);
+ 		}
+ 
+-		spin_lock_irqsave(&pcistub_devices_lock, flags);
+-		list_del(&found_psdev->dev_list);
+-		spin_unlock_irqrestore(&pcistub_devices_lock, flags);
+-
+ 		/* the final put for releasing from the list */
+ 		pcistub_device_put(found_psdev);
+ 	}
+@@ -1365,14 +1366,17 @@ DRIVER_ATTR(resets, S_IWUSR, NULL, pcist
+ int pciback_get_owner(struct pci_dev *dev)
+ {
+ 	struct pcistub_device *psdev;
++	domid_t domid = DOMID_SELF;
+ 
+ 	psdev = pcistub_device_find(pci_domain_nr(dev->bus), dev->bus->number,
+ 			PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn));
++	if (psdev) {
++		if (psdev->pdev)
++			domid = psdev->pdev->xdev->otherend_id;
++		pcistub_device_put(psdev);
++	}
+ 
+-	if (!psdev || !psdev->pdev)
+-		return -1;
+-
+-	return psdev->pdev->xdev->otherend_id;
++	return domid;
+ }
+ #endif
+ 
+diff -r e7c335d70436 drivers/xen/pciback/pciback_ops.c
+--- a/drivers/xen/pciback/pciback_ops.c	Thu Jan 19 18:46:48 2012 +0000
++++ b/drivers/xen/pciback/pciback_ops.c	Fri Jan 27 15:52:42 2012 +0000
+@@ -191,6 +191,8 @@ void pciback_reset_device(struct pci_dev
+ 
+ 	/* Disable devices (but not bridges) */
+ 	if (dev->hdr_type == PCI_HEADER_TYPE_NORMAL) {
++		pci_disable_msi(dev);
++		pci_disable_msix(dev);
+ 		pci_disable_device(dev);
+ 
+ 		pci_write_config_word(dev, PCI_COMMAND, 0);

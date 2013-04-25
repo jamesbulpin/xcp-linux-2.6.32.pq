@@ -1,0 +1,69 @@
+commit 5933dd2f028cdcbb4b3169dca594324704ba10ae
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Tue Jun 15 18:16:43 2010 -0700
+
+    net: NET_SKB_PAD should depend on L1_CACHE_BYTES
+    
+    In old kernels, NET_SKB_PAD was defined to 16.
+    
+    Then commit d6301d3dd1c2 (net: Increase default NET_SKB_PAD to 32), and
+    commit 18e8c134f4e9 (net: Increase NET_SKB_PAD to 64 bytes) increased it
+    to 64.
+    
+    While first patch was governed by network stack needs, second was more
+    driven by performance issues on current hardware. Real intent was to
+    align data on a cache line boundary.
+    
+    So use max(32, L1_CACHE_BYTES) instead of 64, to be more generic.
+    
+    Remove microblaze and powerpc own NET_SKB_PAD definitions.
+    
+    Thanks to Alexander Duyck and David Miller for their comments.
+    
+    Suggested-by: David Miller <davem@davemloft.net>
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+---
+ arch/powerpc/include/asm/system.h |    3 ---
+ include/linux/skbuff.h            |    8 +++++---
+ 2 files changed, 5 insertions(+), 6 deletions(-)
+
+Index: linux-2.6.27.hg/arch/powerpc/include/asm/system.h
+===================================================================
+--- linux-2.6.27.hg.orig/arch/powerpc/include/asm/system.h	2010-07-29 15:50:49.483491525 +0100
++++ linux-2.6.27.hg/arch/powerpc/include/asm/system.h	2010-07-29 15:53:55.131476351 +0100
+@@ -510,11 +510,8 @@
+  * powers of 2 writes until it reaches sufficient alignment).
+  *
+  * Based on this we disable the IP header alignment in network drivers.
+- * We also modify NET_SKB_PAD to be a cacheline in size, thus maintaining
+- * cacheline alignment of buffers.
+  */
+ #define NET_IP_ALIGN	0
+-#define NET_SKB_PAD	L1_CACHE_BYTES
+ 
+ #define cmpxchg64(ptr, o, n)						\
+   ({									\
+Index: linux-2.6.27.hg/include/linux/skbuff.h
+===================================================================
+--- linux-2.6.27.hg.orig/include/linux/skbuff.h	2010-07-29 15:53:52.294750136 +0100
++++ linux-2.6.27.hg/include/linux/skbuff.h	2010-07-29 15:53:55.131476351 +0100
+@@ -1152,12 +1152,14 @@
+  *
+  * Various parts of the networking layer expect at least 32 bytes of
+  * headroom, you should not reduce this.
+- * With RPS, we raised NET_SKB_PAD to 64 so that get_rps_cpus() fetches span
+- * a 64 bytes aligned block to fit modern (>= 64 bytes) cache line sizes
++ *
++ * Using max(32, L1_CACHE_BYTES) makes sense (especially with RPS)
++ * to reduce average number of cache lines per packet.
++ * get_rps_cpus() for example only access one 64 bytes aligned block :
+  * NET_IP_ALIGN(2) + ethernet_header(14) + IP_header(20/40) + ports(8)
+  */
+ #ifndef NET_SKB_PAD
+-#define NET_SKB_PAD	64
++#define NET_SKB_PAD	max(32, L1_CACHE_BYTES)
+ #endif
+ 
+ extern int ___pskb_trim(struct sk_buff *skb, unsigned int len);

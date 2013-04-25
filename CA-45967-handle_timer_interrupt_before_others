@@ -1,0 +1,26 @@
+diff -r 5bfb3e5a2ac9 drivers/xen/core/evtchn.c
+--- a/drivers/xen/core/evtchn.c	Thu Sep 30 11:33:23 2010 +0100
++++ b/drivers/xen/core/evtchn.c	Thu Sep 30 11:43:25 2010 +0100
+@@ -360,6 +360,22 @@
+ #else
+ 		barrier();
+ #endif
++
++		/*
++		 * Handle timer interrupts before all others, so that all
++		 * hardirq handlers see an up-to-date system time even if we
++		 * have just woken from a long idle period.
++		 */
++		irq = percpu_read(virq_to_irq[VIRQ_TIMER]);
++		if (irq != -1) {
++		  port = evtchn_from_irq(irq);
++		  l1i = port / BITS_PER_LONG;
++		  l2i = port % BITS_PER_LONG;
++		  if (VALID_EVTCHN(port) &&
++		      (active_evtchns(l1i) & (1ul << l2i)))
++		    (void)handle_irq(irq, regs);
++		}
++
+ 		l1 = vcpu_info_xchg(evtchn_pending_sel, 0);
+ 
+ 		start_l1i = l1i = percpu_read(current_l1i);

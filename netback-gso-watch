@@ -1,0 +1,327 @@
+Add watches for gso frontend feature flags. This allows feature to be
+modified dynamically rather than set once at ring connect time.
+
+* * *
+* * *
+
+diff -r 8bda99917b59 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Tue Jan 25 14:51:10 2011 +0000
++++ b/drivers/xen/netback/common.h	Fri Jan 28 10:49:57 2011 +0000
+@@ -55,6 +55,12 @@
+ #define WPRINTK(fmt, args...)				\
+ 	printk(KERN_WARNING "xen_net: " fmt, ##args)
+ 
++enum {
++	NETBK_GSO_INVALID,
++	NETBK_GSO_STANDARD,
++	NETBK_GSO_PREFIX
++};
++
+ struct xen_netif {
+ 	/* Unique identifier for this interface. */
+ 	domid_t          domid;
+@@ -88,6 +94,10 @@ struct xen_netif {
+ 
+ 	/* Internal feature information. */
+ 	u8 can_queue:1;	    /* can queue packets for receiver? */
++
++	/* Does the frontend end want the gso information prefixed, or
++	 * in an extra segment? */
++	int gso_mode;
+ 
+ 	/* Allow netif_be_start_xmit() to peek ahead in the rx request
+ 	 * ring.  This is a prediction of what rx_req_cons will be once
+@@ -157,6 +167,12 @@ struct backend_info {
+ 	enum xenbus_state frontend_state;
+ 	struct xenbus_watch hotplug_status_watch;
+ 	int have_hotplug_status_watch:1;
++
++	struct xenbus_watch gso_watch;
++	struct xenbus_watch gso_prefix_watch;
++
++	int have_gso_watch:1;
++	int have_gso_prefix_watch:1;
+ 
+ 	/* State relating to the netback accelerator */
+ 	void *netback_accel_priv;
+diff -r 8bda99917b59 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Tue Jan 25 14:51:10 2011 +0000
++++ b/drivers/xen/netback/interface.c	Fri Jan 28 10:49:57 2011 +0000
+@@ -125,8 +125,17 @@ void netif_set_features(struct xen_netif
+ 
+ 	if (netif->can_sg)
+ 		features |= NETIF_F_SG;
+-	if (netif->gso || netif->gso_prefix)
++
++	if (netif->gso || netif->gso_prefix) {
+ 		features |= NETIF_F_TSO;
++		/* Never clear gso_mode once it is set */
++		netif->gso_mode = (netif->gso_prefix) ?
++				  NETBK_GSO_PREFIX :
++				  NETBK_GSO_STANDARD;
++	} else {
++		features &= ~NETIF_F_TSO;
++	}
++
+ 	if (netif->csum)
+ 		features |= NETIF_F_IP_CSUM;
+ 
+diff -r 8bda99917b59 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Tue Jan 25 14:51:10 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Jan 28 10:49:57 2011 +0000
+@@ -253,7 +253,7 @@ static struct sk_buff *netbk_copy_skb(st
+ 
+ static inline int netbk_max_required_rx_slots(struct xen_netif *netif)
+ {
+-	if (netif->can_sg || netif->gso || netif->gso_prefix)
++	if (netif->can_sg)
+ 		return MAX_SKB_FRAGS + 2; /* header + extra_info + frags */
+ 	return 1; /* all in one */
+ }
+@@ -510,8 +510,11 @@ static int netbk_gop_skb(struct sk_buff 
+ 
+ 	old_meta_prod = npo->meta_prod;
+ 
++	BUG_ON(skb_shinfo(skb)->gso_size &&
++	       netif->gso_mode == NETBK_GSO_INVALID);
++
+ 	/* Set up a GSO prefix descriptor, if necessary */
+-	if (skb_shinfo(skb)->gso_size && netif->gso_prefix) {
++	if (skb_shinfo(skb)->gso_size && netif->gso_mode == NETBK_GSO_PREFIX) {
+ 		req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
+ 		meta = npo->meta + npo->meta_prod++;
+ 		meta->gso_size = skb_shinfo(skb)->gso_size;
+@@ -522,7 +525,7 @@ static int netbk_gop_skb(struct sk_buff 
+ 	req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
+ 	meta = npo->meta + npo->meta_prod++;
+ 
+-	if (!netif->gso_prefix)
++	if (netif->gso_mode == NETBK_GSO_STANDARD)
+ 		meta->gso_size = skb_shinfo(skb)->gso_size;
+ 	else
+ 		meta->gso_size = 0;
+@@ -538,7 +541,7 @@ static int netbk_gop_skb(struct sk_buff 
+ 			    offset_in_page(skb->data), 1);
+ 
+ 	/* Leave a gap for the GSO descriptor. */
+-	if (skb_shinfo(skb)->gso_size && !netif->gso_prefix)
++	if (skb_shinfo(skb)->gso_size && netif->gso_mode == NETBK_GSO_STANDARD)
+ 		netif->rx.req_cons++;
+ 
+ 	for (i = 0; i < nr_frags; i++) {
+@@ -696,7 +699,8 @@ static void net_rx_action(unsigned long 
+ 
+ 		netif = netdev_priv(skb->dev);
+ 
+-		if (netbk->meta[npo.meta_cons].gso_size && netif->gso_prefix) {
++		if (netbk->meta[npo.meta_cons].gso_size &&
++		    netif->gso_mode == NETBK_GSO_PREFIX) {
+ 			resp = RING_GET_RESPONSE(&netif->rx,
+ 						netif->rx.rsp_prod_pvt++);
+ 
+@@ -734,7 +738,8 @@ static void net_rx_action(unsigned long 
+ 					netbk->meta[npo.meta_cons].size,
+ 					flags);
+ 
+-		if (netbk->meta[npo.meta_cons].gso_size && !netif->gso_prefix) {
++		if (netbk->meta[npo.meta_cons].gso_size &&
++		    netif->gso_mode == NETBK_GSO_STANDARD) {
+ 			struct xen_netif_extra_info *gso =
+ 				(struct xen_netif_extra_info *)
+ 				RING_GET_RESPONSE(&netif->rx,
+diff -r 8bda99917b59 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Tue Jan 25 14:51:10 2011 +0000
++++ b/drivers/xen/netback/xenbus.c	Fri Jan 28 10:49:57 2011 +0000
+@@ -33,6 +33,9 @@ static void connect(struct backend_info 
+ static void connect(struct backend_info *);
+ static void backend_create_netif(struct backend_info *be);
+ static void unregister_hotplug_status_watch(struct backend_info *be);
++static void disconnect_backend(struct backend_info *be);
++static void unregister_gso_watch(struct backend_info *be);
++static void unregister_gso_prefix_watch(struct backend_info *be);
+ 
+ static int netback_remove(struct xenbus_device *dev)
+ {
+@@ -41,17 +44,11 @@ static int netback_remove(struct xenbus_
+ 	netback_remove_accelerators(be, dev);
+ 
+ 	unregister_hotplug_status_watch(be);
+-	if (be->netif) {
+-		kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
+-		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");
+-		netif_disconnect(be->netif);
+-		be->netif = NULL;
+-	}
++	disconnect_backend(be);
+ 	kfree(be);
+ 	dev_set_drvdata(&dev->dev, NULL);
+ 	return 0;
+ }
+-
+ 
+ /**
+  * Entry point to this code when a new device is created.  Allocate the basic
+@@ -215,11 +212,13 @@ static void backend_create_netif(struct 
+ }
+ 
+ 
+-static void disconnect_backend(struct xenbus_device *dev)
++static void disconnect_backend(struct backend_info *be)
+ {
+-	struct backend_info *be = dev_get_drvdata(&dev->dev);
++	struct xenbus_device *dev = be->dev;
+ 
+ 	if (be->netif) {
++		unregister_gso_watch(be);
++		unregister_gso_prefix_watch(be);
+ 		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");
+ 		netif_disconnect(be->netif);
+ 		be->netif = NULL;
+@@ -261,7 +260,7 @@ static void frontend_changed(struct xenb
+ 	case XenbusStateClosing:
+ 		if (be->netif)
+ 			kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
+-		disconnect_backend(dev);
++		disconnect_backend(be);
+ 		xenbus_switch_state(dev, XenbusStateClosing);
+ 		break;
+ 
+@@ -403,6 +402,119 @@ static void connect(struct backend_info 
+ 	netif_wake_queue(be->netif->dev);
+ }
+ 
++static void gso_changed(struct xenbus_watch *watch,
++			const char **vec,
++			unsigned int vec_size)
++{
++	struct backend_info *be = container_of(watch,
++					       struct backend_info,
++					       gso_watch);
++	struct xen_netif *netif = be->netif;
++	struct xenbus_device *dev = be->dev;
++	int val;
++
++	/* If the frontend has already enabled prefix mode then do nothing */
++	if (netif->gso_mode == NETBK_GSO_PREFIX)
++		return;
++
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4",
++			 "%d", &val) < 0)
++		val = 0;
++	netif->gso = !!val;
++
++	/* Adjust dev->features */
++	netif_set_features(netif);
++}
++
++static int register_gso_watch(struct backend_info *be)
++{
++	struct xenbus_device *dev = be->dev;
++	int err;
++
++	if (be->have_gso_watch)
++		return 0;
++
++	err = xenbus_watch_pathfmt(dev, &be->gso_watch,
++				   gso_changed,
++				   "%s/%s",
++				   dev->otherend, "feature-gso-tcpv4");
++	if (err) {
++		xenbus_dev_fatal(dev, err,
++				 "watching %s/feature-gso-tcpv4",
++				 dev->otherend);
++		return err;
++	}
++
++	be->have_gso_watch = 1;
++	return 0;
++}
++
++static void unregister_gso_watch(struct backend_info *be)
++{
++	if (be->have_gso_watch) {
++		unregister_xenbus_watch(&be->gso_watch);
++		kfree(be->gso_watch.node);
++
++		be->have_gso_watch = 0;
++	}
++}
++
++static void gso_prefix_changed(struct xenbus_watch *watch,
++			       const char **vec,
++			       unsigned int vec_size)
++{
++	struct backend_info *be = container_of(watch,
++					       struct backend_info,
++					       gso_prefix_watch);
++	struct xen_netif *netif = be->netif;
++	struct xenbus_device *dev = be->dev;
++	int val;
++
++	/* If the frontend has already enabled standard mode then do nothing */
++	if (netif->gso_mode == NETBK_GSO_STANDARD)
++		return;
++
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4-prefix",
++			 "%d", &val) < 0)
++		val = 0;
++	netif->gso_prefix = !!val;
++
++	/* Adjust dev->features */
++	netif_set_features(netif);
++}
++
++static int register_gso_prefix_watch(struct backend_info *be)
++{
++	struct xenbus_device *dev = be->dev;
++	int err;
++
++	if (be->have_gso_prefix_watch)
++		return 0;
++
++	err = xenbus_watch_pathfmt(dev, &be->gso_prefix_watch,
++				   gso_prefix_changed,
++				   "%s/%s",
++				   dev->otherend, "feature-gso-tcpv4-prefix");
++	if (err) {
++		xenbus_dev_fatal(dev, err,
++				 "watching %s/feature-gso-tcpv4-prefix",
++				 dev->otherend);
++		return err;
++	}
++
++	be->have_gso_prefix_watch = 1;
++	return 0;
++}
++
++static void unregister_gso_prefix_watch(struct backend_info *be)
++{
++	if (be->have_gso_prefix_watch) {
++		unregister_xenbus_watch(&be->gso_prefix_watch);
++		kfree(be->gso_prefix_watch.node);
++
++		be->have_gso_prefix_watch = 0;
++	}
++}
+ 
+ static int connect_rings(struct backend_info *be)
+ {
+@@ -456,15 +568,9 @@ static int connect_rings(struct backend_
+ 		val = 0;
+ 	netif->can_sg = !!val;
+ 
+-	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4",
+-			 "%d", &val) < 0)
+-		val = 0;
+-	netif->gso = !!val;
+-
+-	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-gso-tcpv4-prefix",
+-			 "%d", &val) < 0)
+-		val = 0;
+-	netif->gso_prefix = !!val;
++	/* feature-gso-tcpv4(-prefix) is dynamic */
++	register_gso_watch(be);
++	register_gso_prefix_watch(be);
+ 
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-no-csum-offload",
+ 			 "%d", &val) < 0)

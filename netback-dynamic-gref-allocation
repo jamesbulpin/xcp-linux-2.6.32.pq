@@ -1,0 +1,477 @@
+# HG changeset patch
+# Parent b430fbff50f67092f42ff1312b3d1aaece3dc692
+
+diff -r b430fbff50f6 drivers/xen/core/gnttab.c
+--- a/drivers/xen/core/gnttab.c	Mon Feb 06 10:47:08 2012 +0000
++++ b/drivers/xen/core/gnttab.c	Mon Feb 06 10:48:24 2012 +0000
+@@ -514,6 +514,17 @@ void gnttab_free_grant_reference(grant_r
+ }
+ EXPORT_SYMBOL_GPL(gnttab_free_grant_reference);
+ 
++int gnttab_alloc_grant_reference(void)
++{
++	int ref;
++
++	if (unlikely((ref = get_free_entry()) < 0))
++		return -ENOSPC;
++
++	return ref;
++}
++EXPORT_SYMBOL_GPL(gnttab_alloc_grant_reference);
++
+ void gnttab_free_grant_references(grant_ref_t head)
+ {
+ 	grant_ref_t ref;
+@@ -738,7 +749,7 @@ void *arch_gnttab_alloc_shared(unsigned 
+ 	return area->addr;
+ }
+ 
+-void *arch_gnttab_alloc_status(unsigned long *frames)
++void *arch_gnttab_alloc_status(uint64_t *frames)
+ {
+ 	struct vm_struct *area;
+ 	area = alloc_vm_area(PAGE_SIZE * 
+diff -r b430fbff50f6 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Mon Feb 06 10:47:08 2012 +0000
++++ b/drivers/xen/netback/common.h	Mon Feb 06 10:48:24 2012 +0000
+@@ -95,7 +95,7 @@ struct netbk_tag {
+ 	struct page *page;
+ 	int offset;
+ 	int len;
+-	grant_ref_t gref;
++	int gref;
+ 	int foreign;
+ 	int granted;
+ 	struct page_ext ext;
+@@ -113,9 +113,10 @@ struct netbk_protocol0 {
+ struct netbk_protocol1 {
+ 	struct xen_netif_tx_front_ring front;
+ 	spinlock_t lock;
+-	grant_ref_t gref_head;
+ 	struct netbk_tag tag[NET_TX_RING_SIZE];
+ 	struct netbk_tag *tag_freelist;
++	grant_ref_t gref_head;
++	unsigned int gref_count;
+ 	struct tasklet_struct tasklet;
+ };
+ 
+diff -r b430fbff50f6 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Mon Feb 06 10:47:08 2012 +0000
++++ b/drivers/xen/netback/tx.c	Mon Feb 06 10:48:24 2012 +0000
+@@ -34,7 +34,7 @@
+ static inline int max_skb_slots(struct xen_netif *netif)
+ {
+ 	if (netif->can_sg)
+-		return MAX_SKB_FRAGS + 2; /* header + extra_info + frags */
++		return MAX_SKB_FRAGS + 3; /* header + extra_info + frags */
+ 	return 1; /* all in one */
+ }
+ 
+@@ -268,8 +268,9 @@ static void free_tag(struct xen_netif *n
+ {
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 
+-	tag->skb = NULL;
+-
++	BUG_ON(tag->gref >= 0);
++	BUG_ON(tag->skb != NULL);
++	BUG_ON(tag->page != NULL);
+ 	BUG_ON(tag->next != NULL);
+ 
+ 	tag->next = p1->tag_freelist;
+@@ -304,15 +305,66 @@ static struct netbk_tag *find_tag(struct
+ 	return tag;
+ }
+ 
++static grant_ref_t allocate_gref(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	int rc;
++
++	BUG_ON(p1->gref_count == 0);
++	--p1->gref_count;
++
++	rc = gnttab_claim_grant_reference(&p1->gref_head);
++	BUG_ON(rc < 0);
++
++	return rc;
++}
++
++static void free_gref(struct xen_netif *netif, grant_ref_t gref)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++
++	if (p1->gref_count > max_skb_slots(netif)) {
++		gnttab_free_grant_reference(gref);
++		return;
++	}
++
++	gnttab_release_grant_reference(&p1->gref_head, gref);
++	p1->gref_count++;
++}
++
++static void refill_gref(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++
++	while (p1->gref_count < max_skb_slots(netif)) {
++		int rc;
++
++		rc = gnttab_alloc_grant_reference();
++		if (rc < 0)
++			return;
++
++		gnttab_release_grant_reference(&p1->gref_head, rc);
++		p1->gref_count++;
++	}
++}
++
++static int gref_available(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++
++	return (p1->gref_count >= max_skb_slots(netif));
++}
++
+ static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct sk_buff *skb,
+-                      struct page *page, int offset, int len)
++		      struct page *page, int offset, int len)
+ {
+ 	BUG_ON(offset > PAGE_SIZE);
+ 	BUG_ON(offset + len > PAGE_SIZE);
+ 
+ 	spin_lock_irq(&tag->lock);
+ 
+-	tag->skb = skb;
++	tag->gref = allocate_gref(netif);
++	tag->skb = skb_get(skb);
+ 	tag->page = page;
+ 	tag->offset = offset;
+ 	tag->len = len;
+@@ -328,9 +380,10 @@ static void grant_tag(struct xen_netif *
+ 		gnttab_grant_foreign_access_ref_trans(tag->gref, netif->domid,
+ 						      GTF_readonly, info->netif->domid,
+ 						      info->req.gref);
+-	} else {
++	 	mod_timer(&tag->timer, jiffies + (HZ / 2));
++ 	} else {
+ 		gnttab_grant_foreign_access_ref_subpage(tag->gref, netif->domid,
+-							virt_to_mfn(page_address(tag->page)),
++						        virt_to_mfn(page_address(tag->page)),
+ 						        GTF_readonly, tag->offset, tag->len);
+ 	}
+ 
+@@ -344,7 +397,6 @@ static void expire_tag(unsigned long dat
+ {
+ 	struct netbk_tag *tag = (struct netbk_tag *)data;
+ 	struct xen_netif *netif = tag->netif;
+-	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	struct page *page;
+ 	grant_ref_t gref;
+ 	gnttab_swap_grant_ref_t swap;
+@@ -360,12 +412,13 @@ static void expire_tag(unsigned long dat
+ 	       page_address(tag->page) + tag->offset,
+ 	       tag->len);
+ 
+-	gref = gnttab_claim_grant_reference(&p1->gref_head);
+-	BUG_ON(gref < 0);
++	rc = gnttab_grant_foreign_access_subpage(netif->domid,
++						 virt_to_mfn(page_address(page)),
++					         GTF_readonly, tag->offset, tag->len);
++	if (rc < 0)
++		goto fail2;
+ 
+-	gnttab_grant_foreign_access_ref_subpage(gref, netif->domid,
+-						virt_to_mfn(page_address(page)),
+-					        GTF_readonly, tag->offset, tag->len);
++	gref = rc;
+ 
+ 	swap.ref_a = gref;
+ 	swap.ref_b = tag->gref;
+@@ -374,14 +427,14 @@ static void expire_tag(unsigned long dat
+ 				       &swap, 1);
+ 	BUG_ON(rc);
+ 	if (swap.status == GNTST_eagain)
+-		goto fail2;
++		goto fail3;
+ 
+ 	BUG_ON(swap.status);
++
++	gnttab_end_foreign_access(gref, 0);
++
+ 	tag->page = page;
+ 
+-	rc = gnttab_end_foreign_access_ref(gref);
+-	BUG_ON(rc == 0); /* FIXME */
+-
+ 	if (tag->foreign) {
+ 		netif_put_page_ext(&tag->ext);
+ 		tag->foreign = 0;
+@@ -391,17 +444,13 @@ static void expire_tag(unsigned long dat
+ 	dev_kfree_skb(tag->skb);
+ 	tag->skb = NULL;
+ 
+-	gnttab_release_grant_reference(&p1->gref_head, gref);
+-
+ 	spin_unlock_irq(&tag->lock);
+ 	return;
+ 
++fail3:
++	gnttab_end_foreign_access(gref, 0);
++
+ fail2:
+-	rc = gnttab_end_foreign_access_ref(gref);
+-	BUG_ON(rc == 0); /* FIXME */
+-
+-	gnttab_release_grant_reference(&p1->gref_head, gref);
+-
+ 	__free_page(page);
+ 
+ fail1:
+@@ -410,10 +459,8 @@ fail1:
+ 	mod_timer(&tag->timer, jiffies + HZ);
+ }
+ 
+-static void ungrant_tag(struct netbk_tag *tag)
++static void ungrant_tag(struct xen_netif *netif, struct netbk_tag *tag)
+ {
+-	int rc;
+-
+ 	del_timer_sync(&tag->timer);
+ 
+ 	spin_lock_irq(&tag->lock);
+@@ -421,8 +468,9 @@ static void ungrant_tag(struct netbk_tag
+ 	BUG_ON(!tag->granted);
+ 	tag->granted = 0;
+ 
+-	rc = gnttab_end_foreign_access_ref(tag->gref);
+-	BUG_ON(rc == 0); /* FIXME */
++	gnttab_end_foreign_access_ref(tag->gref);
++	free_gref(netif, tag->gref);
++	tag->gref = -EINVAL;
+ 
+ 	if (tag->foreign) {
+ 		netif_put_page_ext(&tag->ext);
+@@ -447,7 +495,7 @@ static int slot_available(struct xen_net
+ 
+ 	avail = NET_TX_RING_SIZE - (p1->front.req_prod_pvt - p1->front.rsp_cons);
+ 
+-	return (avail > max_skb_slots(netif));
++	return (avail >= max_skb_slots(netif));
+ }
+ 
+ static void xmit_complete(struct xen_netif *netif)
+@@ -479,14 +527,16 @@ static void xmit_complete(struct xen_net
+ 			id = rsp->id;
+ 			tag = find_tag(netif, id);
+ 
+-			ungrant_tag(tag);
++			ungrant_tag(netif, tag);
+ 			free_tag(netif, tag);
+ 		}
+ 
+ 		p1->front.rsp_cons = cons;
+ 	}
+ 
+-	if (unlikely(netif_queue_stopped(dev)) && slot_available(netif))
++	if (unlikely(netif_queue_stopped(dev)) &&
++            slot_available(netif) &&
++	    gref_available(netif))
+ 		netif_wake_queue(dev);
+ }
+ 
+@@ -509,12 +559,11 @@ static void make_frags(struct xen_netif 
+ 		tag = allocate_tag(netif);
+ 		BUG_ON(tag == NULL);
+ 
++		grant_tag(netif, tag, skb, frag->page, frag->page_offset, frag->size);
++
+ 		req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 		req->id = tag->id;
+-
+-		grant_tag(netif, tag, skb_get(skb), frag->page, frag->page_offset, frag->size);
+-
+ 		req->gref = tag->gref;
+ 		req->offset = frag->page_offset;
+ 		req->size = frag->size;
+@@ -548,7 +597,8 @@ void netbk_p1_start_xmit(struct xen_neti
+ 	if (unlikely(!netif_schedulable(netif)))
+ 		goto drop;
+ 
+-	if (!slot_available(netif)) {
++	if (!slot_available(netif) ||
++	    !gref_available(netif)) {
+ 		netif_stop_queue(dev);
+ 		goto drop;
+ 	}
+@@ -568,18 +618,19 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+ 	frags += skb_shinfo(skb)->nr_frags;
+ 
+-	if (unlikely(frags > MAX_SKB_FRAGS))
++	if (unlikely(frags > max_skb_slots(netif))) {
++		printk("%s: too many fragments\n", __func__);
+ 		goto drop;
++	}
+ 
+ 	tag = allocate_tag(netif);
+ 	BUG_ON(tag == NULL);
+ 
++	grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
++
+ 	req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 	req->id = tag->id;
+-
+-	grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
+-
+ 	req->gref = tag->gref;
+ 	req->offset = page_offset;
+ 	req->size = skb->len;
+@@ -631,13 +682,12 @@ void netbk_p1_start_xmit(struct xen_neti
+ 		tag = allocate_tag(netif);
+ 		BUG_ON(tag == NULL);
+ 
++		grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
++
+ 		/* Get a new request for the remaining header */
+ 		req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 		req->id = tag->id;
+-
+-		grant_tag(netif, tag, skb_get(skb), virt_to_page(data), page_offset, frag_size);
+-
+ 		req->gref = tag->gref;
+ 		req->offset = page_offset;
+ 		req->size = frag_size;
+@@ -658,9 +708,13 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+ 	netif->stats.tx_bytes += skb->len;
+ 	netif->stats.tx_packets++;
++	dev_kfree_skb(skb); /* Drop the implicit reference */
+ 
+ 	xmit_complete(netif);
+-	if (!slot_available(netif))
++	refill_gref(netif);
++
++	if (!slot_available(netif) ||
++	    !gref_available(netif))
+ 		netif_stop_queue(dev);
+ 
+ 	spin_unlock_irq(&p1->lock);
+@@ -689,6 +743,7 @@ void netbk_p1_setup(struct xen_netif *ne
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	struct xen_netif_tx_sring *sring;
+ 	int i;
++	int rc;
+ 
+ 	sring = (struct xen_netif_tx_sring *)netif->rx_comms.ring_area->addr;
+ 	FRONT_RING_INIT(&p1->front, sring, PAGE_SIZE);
+@@ -700,11 +755,6 @@ void netbk_p1_setup(struct xen_netif *ne
+ 		     tasklet,
+ 		     (unsigned long)netif);
+ 
+-	if (gnttab_alloc_grant_references(NET_TX_RING_SIZE * 2,
+-					  &p1->gref_head) < 0) {
+-		BUG(); /* FIXME */
+-	}
+-
+ 	p1->tag_freelist = NULL;
+ 
+ 	for (i = 0; i < NET_TX_RING_SIZE; i++) {
+@@ -720,13 +770,16 @@ void netbk_p1_setup(struct xen_netif *ne
+ 
+ 		tag->id = i;
+ 		tag->skb = NULL;
+-
+-		tag->gref = gnttab_claim_grant_reference(&p1->gref_head);
+-		BUG_ON(tag->gref < 0);
++		tag->gref = -EINVAL;
+ 
+ 		tag->next = p1->tag_freelist;
+ 		p1->tag_freelist = tag;
+ 	}
++
++	rc = gnttab_alloc_grant_references(max_skb_slots(netif), &p1->gref_head);
++	BUG_ON(rc < 0);
++
++	p1->gref_count = max_skb_slots(netif);
+ }
+ 
+ void netbk_p1_teardown(struct xen_netif *netif)
+@@ -740,10 +793,13 @@ void netbk_p1_teardown(struct xen_netif 
+ 		if (!tag->granted)
+ 			continue;
+ 
+-		ungrant_tag(tag);
++		ungrant_tag(netif, tag);
+ 		free_tag(netif, tag);
+ 	}
+ 
++	gnttab_free_grant_references(p1->gref_head);
++	p1->gref_count = 0;
++
+ 	i = 0;
+ 	while (p1->tag_freelist != NULL) {
+ 		struct netbk_tag *tag;
+@@ -751,12 +807,9 @@ void netbk_p1_teardown(struct xen_netif 
+ 		tag = p1->tag_freelist;
+ 		p1->tag_freelist = tag->next;
+ 
+-		gnttab_release_grant_reference(&p1->gref_head, tag->gref);
+ 		i++;
+ 	}
+ 	BUG_ON(i != NET_TX_RING_SIZE);
+-
+-	gnttab_free_grant_references(p1->gref_head);	
+ }
+ 
+ void netbk_p1_event(struct xen_netif *netif)
+diff -r b430fbff50f6 include/xen/gnttab.h
+--- a/include/xen/gnttab.h	Mon Feb 06 10:47:08 2012 +0000
++++ b/include/xen/gnttab.h	Mon Feb 06 10:48:24 2012 +0000
+@@ -56,10 +56,10 @@ int gnttab_grant_foreign_access(domid_t 
+ int gnttab_grant_foreign_access_subpage(domid_t domid, unsigned long frame,
+                                         int flags, unsigned page_off,
+                                         unsigned length);
+-void gnttab_grant_foreign_access_ref_trans(grant_ref_t ref, domid_t domid,
+-                                           int flags,
+-                                           domid_t trans_domid,
+-                                           grant_ref_t trans_gref);
++int gnttab_grant_foreign_access_trans(domid_t domid,
++                                      int flags,
++                                      domid_t trans_domid,
++                                      grant_ref_t trans_gref);
+ 
+ /*
+  * Are sub-page grants available on this version of Xen?  Returns 1 if
+@@ -89,13 +89,14 @@ unsigned long gnttab_end_foreign_transfe
+ 
+ int gnttab_query_foreign_access(grant_ref_t ref);
+ 
++int gnttab_alloc_grant_reference(void);
++void gnttab_free_grant_reference(grant_ref_t ref);
++
+ /*
+  * operations on reserved batches of grant references
+  */
+ int gnttab_alloc_grant_references(u16 count, grant_ref_t *pprivate_head);
+ 
+-void gnttab_free_grant_reference(grant_ref_t ref);
+-
+ void gnttab_free_grant_references(grant_ref_t head);
+ 
+ int gnttab_empty_grant_references(const grant_ref_t *pprivate_head);
+diff -r b430fbff50f6 include/xen/interface/grant_table.h
+--- a/include/xen/interface/grant_table.h	Mon Feb 06 10:47:08 2012 +0000
++++ b/include/xen/interface/grant_table.h	Mon Feb 06 10:48:24 2012 +0000
+@@ -490,7 +490,7 @@ struct gnttab_get_status_frames {
+     domid_t  dom;
+     /* OUT parameters. */
+     int16_t  status;              /* GNTST_* */
+-    XEN_GUEST_HANDLE(ulong) frame_list;
++    XEN_GUEST_HANDLE(uint64_t) frame_list;
+ };
+ typedef struct gnttab_get_status_frames gnttab_get_status_frames_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_get_status_frames_t);

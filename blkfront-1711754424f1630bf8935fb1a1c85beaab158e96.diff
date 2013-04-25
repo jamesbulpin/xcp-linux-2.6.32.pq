@@ -1,0 +1,63 @@
+blkfront: Remove obsolete info->users
+
+This is just bd_openers, protected by the bd_mutex.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+diff --git a/drivers/xen/blkfront/blkfront.c b/drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c
++++ b/drivers/xen/blkfront/blkfront.c
+@@ -388,7 +388,7 @@
+ 	mutex_lock(&bdev->bd_mutex);
+ 	info = disk->private_data;
+ 
+-	if (info && !info->users) {
++	if (info && !bdev->bd_openers) {
+ 		xlvbd_release_gendisk(info);
+ 		disk->private_data = NULL;
+ 		kfree(info);
+@@ -472,9 +472,6 @@
+ 
+ 	mutex_unlock(&info->mutex);
+ 
+-	if (!err)
+-		++info->users;
+-
+ 	return err;
+ }
+ 
+@@ -485,7 +482,7 @@
+ 	struct blkfront_info *info = disk->private_data;
+ 	struct xenbus_device *xbdev;
+ 
+-	if (--info->users)
++	if (bdev->bd_openers)
+ 		return 0;
+ 
+ 	/*
+@@ -611,7 +608,7 @@
+ 
+ 	mutex_lock(&bdev->bd_mutex);
+ 
+-	if (info->users) {
++	if (bdev->bd_openers) {
+ 		xenbus_dev_error(xbdev, -EBUSY,
+ 				 "Device in use; refusing to close");
+ 		xenbus_switch_state(xbdev, XenbusStateClosing);
+diff --git a/drivers/xen/blkfront/block.h b/drivers/xen/blkfront/block.h
+--- a/drivers/xen/blkfront/block.h
++++ b/drivers/xen/blkfront/block.h
+@@ -114,12 +114,6 @@
+ 	unsigned long shadow_free;
+ 	int feature_barrier;
+ 	int is_ready;
+-
+-	/**
+-	 * The number of people holding this device open.  We won't allow a
+-	 * hot-unplug unless this is 0.
+-	 */
+-	int users;
+ };
+ 
+ extern spinlock_t blkif_io_lock;

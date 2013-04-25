@@ -1,0 +1,50 @@
+diff -r b705e739ad1c drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jul 11 15:44:16 2007 +0100
++++ b/drivers/xen/blkback/blkback.c	Wed Jul 11 17:36:46 2007 +0100
+@@ -278,7 +278,7 @@ static int end_block_io_op(struct bio *b
+  * NOTIFICATION FROM GUEST OS.
+  */
+ 
+-static void blkif_notify_work(blkif_t *blkif)
++void blkif_notify_work(blkif_t *blkif)
+ {
+ 	blkif->waiting_reqs = 1;
+ 	wake_up(&blkif->wq);
+diff -r b705e739ad1c drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Jul 11 15:44:16 2007 +0100
++++ b/drivers/xen/blkback/common.h	Wed Jul 11 17:36:46 2007 +0100
+@@ -133,6 +133,8 @@ irqreturn_t blkif_be_int(int irq, void *
+ irqreturn_t blkif_be_int(int irq, void *dev_id, struct pt_regs *regs);
+ int blkif_schedule(void *arg);
+ 
++void blkif_notify_work(blkif_t *blkif);
++
+ int blkback_barrier(struct xenbus_transaction xbt,
+ 		    struct backend_info *be, int state);
+ 
+diff -r b705e739ad1c drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jul 11 15:44:16 2007 +0100
++++ b/drivers/xen/blkback/xenbus.c	Wed Jul 11 17:36:46 2007 +0100
+@@ -367,13 +367,16 @@ static void frontend_changed(struct xenb
+ 		/* Ensure we connect even when two watches fire in 
+ 		   close successsion and we miss the intermediate value 
+ 		   of frontend_state. */
++		if (dev->state != XenbusStateConnected) {
++			err = connect_ring(be);
++			if (err)
++				break;
++			update_blkif_status(be->blkif);
++		}
++
+ 		if (dev->state == XenbusStateConnected)
+-			break;
+-
+-		err = connect_ring(be);
+-		if (err)
+-			break;
+-		update_blkif_status(be->blkif);
++			blkif_notify_work(be->blkif);
++
+ 		break;
+ 
+ 	case XenbusStateClosing:

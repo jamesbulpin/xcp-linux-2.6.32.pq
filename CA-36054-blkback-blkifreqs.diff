@@ -1,0 +1,41 @@
+CA-36054: Update blkif_reqs defaults/limits in blkback.
+
+Updates blkback to match blktap.
+
+ * Makes blkif_reqs readable: /sys/module/blkbk/parameters/reqs
+
+ * Minimum is 32. We might allow for 0, but that needs to disable
+   the backend to not cause trouble.
+
+ * Set the maximum to 512. We only need some reasonable maximum
+   because we cannot let people balloon *arbitrary* amounts of memory
+   out of dom0. 22528K to toy around with sounds stupid enough.
+
+diff -r 8452f8ea80eb drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Tue Dec 15 17:43:40 2009 -0800
++++ b/drivers/xen/blkback/blkback.c	Fri Dec 18 17:28:53 2009 -0800
+@@ -53,8 +53,10 @@
+  * This will increase the chances of being able to write whole tracks.
+  * 64 should be enough to keep us competitive with Linux.
+  */
++#define BLKIF_REQS_MIN 32
++#define BLKIF_REQS_MAX 256
+ static int blkif_reqs = 64;
+-module_param_named(reqs, blkif_reqs, int, 0);
++module_param_named(reqs, blkif_reqs, int, 0444);
+ MODULE_PARM_DESC(reqs, "Number of blkback requests to allocate");
+ 
+ /* Run-time switchable: /sys/module/blkback/parameters/ */
+@@ -730,6 +732,12 @@
+ 	if (!is_running_on_xen())
+ 		return -ENODEV;
+ 
++	if (blkif_reqs < BLKIF_REQS_MIN)
++		blkif_reqs = BLKIF_REQS_MIN;
++
++	if (blkif_reqs > BLKIF_REQS_MAX)
++		blkif_reqs = BLKIF_REQS_MAX;
++
+ 	mmap_pages = blkif_reqs * BLKIF_MAX_SEGMENTS_PER_REQUEST;
+ 
+ 	pending_reqs          = kmalloc(sizeof(pending_reqs[0]) *

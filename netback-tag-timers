@@ -1,0 +1,356 @@
+Add a timer to the netback tag
+
+The timer is programmed for a 1s timeout on 'foreign' tags i.e. those
+that reference transitive grants. After the timer expires the page
+that is transitively granted is copied and a local grant is made. This
+is then swapped under grant table lock with the transitive grant so
+the copying guest never sees inconsistent state. The transitive grant
+is then ended and the skb reference freed.
+
+diff -r 35edfa518107 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Mon Jun 27 11:26:10 2011 +0100
++++ b/drivers/xen/netback/common.h	Tue Jun 28 17:03:42 2011 +0100
+@@ -87,12 +87,19 @@ struct page_ext {
+ };
+ 
+ struct netbk_tag {
++	struct xen_netif *netif;
++	spinlock_t lock;
+ 	struct netbk_tag *next;
+ 	unsigned short id;
+ 	struct sk_buff *skb;
++	struct page *page;
++	int offset;
++	int len;
+ 	grant_ref_t gref;
+ 	int foreign;
++	int granted;
+ 	struct page_ext ext;
++	struct timer_list timer;
+ };
+ 
+ #define	NETBK_MIN_RX_PROTOCOL 0
+@@ -319,7 +326,6 @@ struct netbk_rx_meta {
+ struct netbk_tx_pending_inuse {
+ 	struct list_head list;
+ 	unsigned long alloc_time;
+-	int warned;
+ };
+ 
+ #define MAX_PENDING_REQS 256
+diff -r 35edfa518107 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Mon Jun 27 11:26:10 2011 +0100
++++ b/drivers/xen/netback/netback.c	Tue Jun 28 17:03:42 2011 +0100
+@@ -860,23 +860,15 @@ static inline void net_tx_action_dealloc
+ 
+ 			pending_idx = inuse - netbk->pending_inuse;
+ 
+-			pending_tx_info[pending_idx].netif->nr_copied_skbs++;
+-
+ 			switch (copy_pending_req(netbk, pending_idx)) {
+ 			case 0:
++				pending_tx_info[pending_idx].netif->nr_copied_skbs++;
+ 				list_move_tail(&inuse->list, &list);
+ 				continue;
+ 			case -EBUSY:
+ 				list_del_init(&inuse->list);
+ 				continue;
+ 			case -EAGAIN:
+-				if (!inuse->warned) {
+-					inuse->warned = 1;
+-					printk(KERN_CRIT
+-					       "txp %d pending grant_copy?\n",
+-					       pending_idx);
+-				}
+-				continue;
+ 			case -ENOENT:
+ 				continue;
+ 			}
+@@ -1092,7 +1084,6 @@ static void netbk_fill_frags(struct xen_
+ 
+ 		pending_idx = (unsigned long)frag->page;
+ 
+-		netbk->pending_inuse[pending_idx].warned = 0;
+ 		netbk->pending_inuse[pending_idx].alloc_time = jiffies;
+ 		list_add_tail(&netbk->pending_inuse[pending_idx].list,
+ 			      &netbk->pending_inuse_head);
+diff -r 35edfa518107 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Mon Jun 27 11:26:10 2011 +0100
++++ b/drivers/xen/netback/tx.c	Tue Jun 28 17:03:42 2011 +0100
+@@ -300,17 +300,22 @@ static struct netbk_tag *find_tag(struct
+ 	BUG_ON(id >= NET_TX_RING_SIZE);
+ 	tag = &p1->tag[id];
+ 
+-	BUG_ON(tag->skb == NULL);
+ 	BUG_ON(tag->next != NULL);
+ 	return tag;
+ }
+ 
+-static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct page *page,
+-		      int offset, int len)
++static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct sk_buff *skb,
++                      struct page *page, int offset, int len)
+ {
+ 	BUG_ON(offset > PAGE_SIZE);
+ 	BUG_ON(offset + len > PAGE_SIZE);
+ 
++	spin_lock_irq(&tag->lock);
++
++	tag->skb = skb;
++	tag->page = page;
++	tag->offset = offset;
++	tag->len = len;
+ 	tag->foreign = netif_get_page_ext(page, &tag->ext);
+ 
+ 	if (tag->foreign) {
+@@ -325,20 +330,114 @@ static void grant_tag(struct xen_netif *
+ 						      info->req.gref);
+ 	} else {
+ 		gnttab_grant_foreign_access_ref_subpage(tag->gref, netif->domid,
+-							virt_to_mfn(page_address(page)),
+-						        GTF_readonly, offset, len);
++							virt_to_mfn(page_address(tag->page)),
++						        GTF_readonly, tag->offset, tag->len);
+ 	}
++
++	tag->granted = 1;
++	spin_unlock_irq(&tag->lock);
++
++	mod_timer(&tag->timer, jiffies + HZ);
++}
++
++static void expire_tag(unsigned long data)
++{
++	struct netbk_tag *tag = (struct netbk_tag *)data;
++	struct xen_netif *netif = tag->netif;
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct page *page;
++	grant_ref_t gref;
++	gnttab_swap_grant_ref_t swap;
++	int rc;
++    
++	spin_lock_irq(&tag->lock);
++
++	page = alloc_page(GFP_ATOMIC | __GFP_NOWARN);
++	if (!page)
++		goto fail1;
++
++	memcpy(page_address(page) + tag->offset,
++	       page_address(tag->page) + tag->offset,
++	       tag->len);
++
++	gref = gnttab_claim_grant_reference(&p1->gref_head);
++	BUG_ON(gref < 0);
++
++	gnttab_grant_foreign_access_ref_subpage(gref, netif->domid,
++						virt_to_mfn(page_address(page)),
++					        GTF_readonly, tag->offset, tag->len);
++
++	swap.ref_a = gref;
++	swap.ref_b = tag->gref;
++
++	rc = HYPERVISOR_grant_table_op(GNTTABOP_swap_grant_ref,
++				       &swap, 1);
++	BUG_ON(rc);
++	if (swap.status == GNTST_eagain)
++		goto fail2;
++
++	BUG_ON(swap.status);
++	tag->page = page;
++
++	rc = gnttab_end_foreign_access_ref(gref);
++	BUG_ON(rc == 0); /* FIXME */
++
++	if (tag->foreign) {
++		netif_put_page_ext(&tag->ext);
++		tag->foreign = 0;
++	}
++
++	BUG_ON(tag->skb == NULL);
++	dev_kfree_skb(tag->skb);
++	tag->skb = NULL;
++
++	gnttab_release_grant_reference(&p1->gref_head, gref);
++
++	spin_unlock_irq(&tag->lock);
++	return;
++
++fail2:
++	rc = gnttab_end_foreign_access_ref(gref);
++	BUG_ON(rc == 0); /* FIXME */
++
++	gnttab_release_grant_reference(&p1->gref_head, gref);
++
++	__free_page(page);
++
++fail1:
++	spin_unlock_irq(&tag->lock);
++
++	mod_timer(&tag->timer, jiffies + HZ);
+ }
+ 
+ static void ungrant_tag(struct netbk_tag *tag)
+ {
+ 	int rc;
+ 
++	del_timer_sync(&tag->timer);
++
++	spin_lock_irq(&tag->lock);
++
++	BUG_ON(!tag->granted);
++	tag->granted = 0;
++
+ 	rc = gnttab_end_foreign_access_ref(tag->gref);
+ 	BUG_ON(rc == 0); /* FIXME */
+ 
+-	if (tag->foreign)
++	if (tag->foreign) {
+ 		netif_put_page_ext(&tag->ext);
++		tag->foreign = 0;
++	}
++
++	if (tag->skb != NULL) {
++		dev_kfree_skb(tag->skb);
++		tag->skb = NULL;
++	} else {
++		__free_page(tag->page);
++	}
++	tag->page = NULL;
++
++	spin_unlock_irq(&tag->lock);
+ }
+ 
+ static int slot_available(struct xen_netif *netif)
+@@ -381,7 +480,6 @@ static void xmit_complete(struct xen_net
+ 			tag = find_tag(netif, id);
+ 
+ 			ungrant_tag(tag);
+-			dev_kfree_skb_irq(tag->skb);
+ 			free_tag(netif, tag);
+ 		}
+ 
+@@ -411,13 +509,11 @@ static void make_frags(struct xen_netif 
+ 		tag = allocate_tag(netif);
+ 		BUG_ON(tag == NULL);
+ 
+-		tag->skb = skb_get(skb);
+-
+ 		req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 		req->id = tag->id;
+ 
+-		grant_tag(netif, tag, frag->page, frag->page_offset, frag->size);
++		grant_tag(netif, tag, skb_get(skb), frag->page, frag->page_offset, frag->size);
+ 
+ 		req->gref = tag->gref;
+ 		req->offset = frag->page_offset;
+@@ -478,13 +574,11 @@ void netbk_p1_start_xmit(struct xen_neti
+ 	tag = allocate_tag(netif);
+ 	BUG_ON(tag == NULL);
+ 
+-	tag->skb = skb; /* Don't bump the ref. count */
+-
+ 	req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 	req->id = tag->id;
+ 
+-	grant_tag(netif, tag, virt_to_page(data), page_offset, frag_size);
++	grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
+ 
+ 	req->gref = tag->gref;
+ 	req->offset = page_offset;
+@@ -537,14 +631,12 @@ void netbk_p1_start_xmit(struct xen_neti
+ 		tag = allocate_tag(netif);
+ 		BUG_ON(tag == NULL);
+ 
+-		tag->skb = skb_get(skb);
+-
+ 		/* Get a new request for the remaining header */
+ 		req = RING_GET_REQUEST(&p1->front, prod);
+ 
+ 		req->id = tag->id;
+ 
+-		grant_tag(netif, tag, virt_to_page(data), page_offset, frag_size);
++		grant_tag(netif, tag, skb_get(skb), virt_to_page(data), page_offset, frag_size);
+ 
+ 		req->gref = tag->gref;
+ 		req->offset = page_offset;
+@@ -608,7 +700,7 @@ void netbk_p1_setup(struct xen_netif *ne
+ 		     tasklet,
+ 		     (unsigned long)netif);
+ 
+-	if (gnttab_alloc_grant_references(NET_TX_RING_SIZE,
++	if (gnttab_alloc_grant_references(NET_TX_RING_SIZE * 2,
+ 					  &p1->gref_head) < 0) {
+ 		BUG(); /* FIXME */
+ 	}
+@@ -618,6 +710,14 @@ void netbk_p1_setup(struct xen_netif *ne
+ 	for (i = 0; i < NET_TX_RING_SIZE; i++) {
+ 		struct netbk_tag *tag = &p1->tag[i];
+ 
++		tag->netif = netif;
++
++		spin_lock_init(&tag->lock);
++
++		init_timer(&tag->timer);
++		tag->timer.data = (unsigned long)tag;
++		tag->timer.function = expire_tag;		
++
+ 		tag->id = i;
+ 		tag->skb = NULL;
+ 
+@@ -637,11 +737,10 @@ void netbk_p1_teardown(struct xen_netif 
+ 	for (i = 0; i < NET_TX_RING_SIZE; i++) {
+ 		struct netbk_tag *tag = &p1->tag[i];
+ 
+-		if (tag->skb == NULL)
++		if (!tag->granted)
+ 			continue;
+ 
+ 		ungrant_tag(tag);
+-		dev_kfree_skb_irq(tag->skb);
+ 		free_tag(netif, tag);
+ 	}
+ 
+diff -r 35edfa518107 include/xen/interface/grant_table.h
+--- a/include/xen/interface/grant_table.h	Mon Jun 27 11:26:10 2011 +0100
++++ b/include/xen/interface/grant_table.h	Tue Jun 28 17:03:42 2011 +0100
+@@ -511,6 +511,20 @@ typedef struct gnttab_get_version gnttab
+ DEFINE_XEN_GUEST_HANDLE(gnttab_get_version_t);
+ 
+ /*
++ * GNTTABOP_swap_grant_ref: Swap the contents of two grant entries.
++ */
++#define GNTTABOP_swap_grant_ref       11
++struct gnttab_swap_grant_ref {
++    /* IN parameters */
++    grant_ref_t	ref_a;
++    grant_ref_t	ref_b;
++    /* OUT parameters */
++    int16_t  status;              /* GNTST_* */
++};
++typedef struct gnttab_swap_grant_ref gnttab_swap_grant_ref_t;
++DEFINE_XEN_GUEST_HANDLE(gnttab_swap_grant_ref_t);
++
++/*
+  * Bitfield values for gnttab_map_grant_ref.flags.
+  */
+  /* Map the grant entry for access by I/O devices. */
+@@ -563,7 +577,7 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_get_versi
+ #define GNTST_bad_page         (-9) /* Specified page was invalid for op.    */
+ #define GNTST_bad_copy_arg    (-10) /* copy arguments cross page boundary.   */
+ #define GNTST_address_too_big (-11) /* transfer page address too large.      */
+-#define GNTST_eagain          (-12) /* Could not map at the moment. Retry.   */
++#define GNTST_eagain          (-12) /* Retry.   			     */
+ 
+ #define GNTTABOP_error_msgs {                   \
+     "okay",                                     \
+@@ -578,7 +592,7 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_get_versi
+     "bad page",                                 \
+     "copy arguments cross page boundary",       \
+     "page address size too large",              \
+-    "could not map at the moment, retry"        \
++    "retry"   					\
+ }
+ 
+ #endif /* __XEN_PUBLIC_GRANT_TABLE_H__ */

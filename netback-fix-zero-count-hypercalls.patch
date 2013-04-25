@@ -1,0 +1,27 @@
+# HG changeset patch
+# Parent d2718142411478df0743fc8fc7b52f4db5e6e22b
+It is possible for there to be no grant table unmap operations to be done, 
+resulting in the count for the Hypercall to be zero, check that the count is 
+not zero before making the Hypercall.
+
+diff -r d27181424114 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -831,10 +831,13 @@ static inline void net_tx_action_dealloc
+ 
+ 	netbk->dealloc_cons = dc;
+ 
+-	ret = HYPERVISOR_grant_table_op(
+-		GNTTABOP_unmap_grant_ref, netbk->tx_unmap_ops,
+-		gop - netbk->tx_unmap_ops);
+-	BUG_ON(ret);
++	if (gop - netbk->tx_unmap_ops > 0)
++	{
++		ret = HYPERVISOR_grant_table_op(
++			GNTTABOP_unmap_grant_ref, netbk->tx_unmap_ops,
++			gop - netbk->tx_unmap_ops);
++		BUG_ON(ret);
++	}
+ 
+ 	/*
+ 	 * Copy any entries that have been pending for too long

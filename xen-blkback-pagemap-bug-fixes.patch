@@ -1,0 +1,42 @@
+From 49475e37e632ed7111eead74f457343d96c77442 Mon Sep 17 00:00:00 2001
+From: Jake Wires <jake.wires@citrix.com>
+Date: Fri, 5 Feb 2010 19:19:31 +0000
+Subject: [PATCH 17/23] blkback: pagemap bug fixes
+
+Signed-off-by: Jake Wires <jake.wires@citrix.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blkback/blkback.c |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/xen/blkback/blkback.c b/drivers/xen/blkback/blkback.c
+index 815c0c6..1309555 100644
+--- a/drivers/xen/blkback/blkback.c
++++ b/drivers/xen/blkback/blkback.c
+@@ -454,6 +454,11 @@ static void dispatch_rw_block_io(blkif_t *blkif,
+ 			DPRINTK("invalid buffer -- could not remap it\n");
+ 			map[i].handle = BLKBACK_INVALID_HANDLE;
+ 			ret |= 1;
++		} else {
++			blkback_pagemap_set(vaddr_pagenr(pending_req, i),
++					    virt_to_page(vaddr(pending_req, i)),
++					    blkif->domid, req->handle,
++					    req->seg[i].gref);
+ 		}
+ 
+ 		pending_handle(pending_req, i) = map[i].handle;
+@@ -466,10 +471,6 @@ static void dispatch_rw_block_io(blkif_t *blkif,
+ 			FOREIGN_FRAME(map[i].dev_bus_addr >> PAGE_SHIFT));
+ 		seg[i].buf  = map[i].dev_bus_addr |
+ 			(req->seg[i].first_sect << 9);
+-		blkback_pagemap_set(vaddr_pagenr(pending_req, i),
+-				    virt_to_page(vaddr(pending_req, i)),
+-				    blkif->domid, req->handle,
+-				    req->seg[i].gref);
+ 	}
+ 
+ 	if (ret)
+-- 
+1.7.0.4
+

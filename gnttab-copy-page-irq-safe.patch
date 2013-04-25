@@ -1,0 +1,33 @@
+__gnttab_dma_map_page can be called from a softirq (via the network
+transmit softirq for example) therefor gnttab_copy_grant_page needs to
+take gntab_dma_lock in an interrupt safe manner.
+
+diff -r 0647dead0622 drivers/xen/core/gnttab.c
+--- a/drivers/xen/core/gnttab.c	Mon Mar 16 17:06:03 2009 +0000
++++ b/drivers/xen/core/gnttab.c	Thu Mar 19 15:35:58 2009 +0000
+@@ -549,14 +549,14 @@
+ 	mfn = pfn_to_mfn(pfn);
+ 	new_mfn = virt_to_mfn(new_addr);
+ 
+-	write_seqlock(&gnttab_dma_lock);
++	write_seqlock_irq(&gnttab_dma_lock);
+ 
+ 	/* Make seq visible before checking page_mapped. */
+ 	smp_mb();
+ 
+ 	/* Has the page been DMA-mapped? */
+ 	if (unlikely(page_mapped(page))) {
+-		write_sequnlock(&gnttab_dma_lock);
++		write_sequnlock_irq(&gnttab_dma_lock);
+ 		put_page(new_page);
+ 		err = -EBUSY;
+ 		goto out;
+@@ -573,7 +573,7 @@
+ 	BUG_ON(err);
+ 	BUG_ON(unmap.status);
+ 
+-	write_sequnlock(&gnttab_dma_lock);
++	write_sequnlock_irq(&gnttab_dma_lock);
+ 
+ 	if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+ 		set_phys_to_machine(page_to_pfn(new_page), INVALID_P2M_ENTRY);

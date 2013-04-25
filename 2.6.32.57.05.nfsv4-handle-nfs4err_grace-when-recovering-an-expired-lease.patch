@@ -1,0 +1,71 @@
+From a9ed2e2583747fb3139a764c317fac58893b968f Mon Sep 17 00:00:00 2001
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date: Thu, 3 Dec 2009 15:53:21 -0500
+Subject: NFSv4: Handle NFS4ERR_GRACE when recovering an expired lease.
+
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+commit a9ed2e2583747fb3139a764c317fac58893b968f upstream.
+
+If our lease expires, and the server reboots while we're recovering, we
+need to be able to wait until the grace period is over.
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+Cc: Chuck Lever <chuck.lever@oracle.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/nfs/nfs4proc.c |   26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -1490,7 +1490,7 @@ static int _nfs4_open_expired(struct nfs
+ 	return ret;
+ }
+ 
+-static inline int nfs4_do_open_expired(struct nfs_open_context *ctx, struct nfs4_state *state)
++static int nfs4_do_open_expired(struct nfs_open_context *ctx, struct nfs4_state *state)
+ {
+ 	struct nfs_server *server = NFS_SERVER(state->inode);
+ 	struct nfs4_exception exception = { };
+@@ -1498,10 +1498,16 @@ static inline int nfs4_do_open_expired(s
+ 
+ 	do {
+ 		err = _nfs4_open_expired(ctx, state);
+-		if (err != -NFS4ERR_DELAY)
+-			break;
+-		nfs4_handle_exception(server, err, &exception);
++		switch (err) {
++		default:
++			goto out;
++		case -NFS4ERR_GRACE:
++		case -NFS4ERR_DELAY:
++			nfs4_handle_exception(server, err, &exception);
++			err = 0;
++		}
+ 	} while (exception.retry);
++out:
+ 	return err;
+ }
+ 
+@@ -4111,10 +4117,16 @@ static int nfs4_lock_expired(struct nfs4
+ 		if (test_bit(NFS_DELEGATED_STATE, &state->flags) != 0)
+ 			return 0;
+ 		err = _nfs4_do_setlk(state, F_SETLK, request, 0);
+-		if (err != -NFS4ERR_DELAY)
+-			break;
+-		nfs4_handle_exception(server, err, &exception);
++		switch (err) {
++		default:
++			goto out;
++		case -NFS4ERR_GRACE:
++		case -NFS4ERR_DELAY:
++			nfs4_handle_exception(server, err, &exception);
++			err = 0;
++		}
+ 	} while (exception.retry);
++out:
+ 	return err;
+ }
+ 

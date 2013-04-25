@@ -1,0 +1,729 @@
+- Removed codes under TITAN_LEGACY definition.
+- Fixed a compilation warning - Added ULL at end of Unsigned long long constant.
+
+Signed-off-by: Sivakumar Subramani <sivakumar.subramani@neterion.com>
+---
+diff -urpN a/drivers/net/s2io.c b/drivers/net/s2io.c
+--- a/drivers/net/s2io.c	2009-09-04 01:28:35.000000000 +0530
++++ b/drivers/net/s2io.c	2009-09-04 01:44:57.000000000 +0530
+@@ -443,308 +443,6 @@ static char ethtool_driver_dbg_stats_key
+ 	{"link_down_time"}
+ };
+ 
+-#ifdef TITAN_LEGACY
+-static char ethtool_titan_stats_keys[][ETH_GSTRING_LEN] = {
+-	{"tx_frms[0]"},
+-	{"tx_ttl_eth_octets[0]"},
+-	{"tx_data_octets[0]"},
+-	{"tx_mcst_frms[0]"},
+-	{"tx_bcst_frms[0]"},
+-	{"tx_ucst_frms[0]"},
+-	{"tx_tagged_frms[0]"},
+-	{"tx_vld_ip[0]"},
+-	{"tx_vld_ip_octets[0]"},
+-	{"tx_icmp[0]"},
+-	{"tx_tcp[0]"},
+-	{"tx_rst_tcp[0]"},
+-	{"tx_udp[0]"},
+-	{"tx_unknown_protocol[0]"},
+-	{"tx_parse_error[0]"},
+-	{"tx_pause_ctrl_frms[0]"},
+-	{"tx_lacpdu_frms[0]"},
+-	{"tx_marker_pdu_frms[0]"},
+-	{"tx_marker_resp_pdu_frms[0]"},
+-	{"tx_drop_ip[0]"},
+-	{"tx_xgmii_char1_match[0]"},
+-	{"tx_xgmii_char2_match[0]"},
+-	{"tx_xgmii_column1_match[0]"},
+-	{"tx_xgmii_column2_match[0]"},
+-	{"tx_drop_frms[0]"},
+-	{"tx_any_err_frms[0]"},
+-	{"rx_ttl_frms[0]"},
+-	{"rx_vld_frms[0]"},
+-	{"rx_offld_frms[0]"},
+-	{"rx_ttl_eth_octets[0]"},
+-	{"rx_data_octets[0]"},
+-	{"rx_offld_octets[0]"},
+-	{"rx_vld_mcst_frms[0]"},
+-	{"rx_vld_bcst_frms[0]"},
+-	{"rx_accepted_ucst_frms[0]"},
+-	{"rx_accepted_nucst_frms[0]"},
+-	{"rx_tagged_frms[0]"},
+-	{"rx_long_frms[0]"},
+-	{"rx_usized_frms[0]"},
+-	{"rx_osized_frms[0]"},
+-	{"rx_frag_frms[0]"},
+-	{"rx_jabber_frms[0]"},
+-	{"rx_ttl_64_frms[0]"},
+-	{"rx_ttl_65_127_frms[0]"},
+-	{"rx_ttl_128_255_frms[0]"},
+-	{"rx_ttl_256_511_frms[0]"},
+-	{"rx_ttl_512_1023_frms[0]"},
+-	{"rx_ttl_1024_1518_frms[0]"},
+-	{"rx_ttl_1519_4095_frms[0]"},
+-	{"rx_ttl_40956_8191_frms[0]"},
+-	{"rx_ttl_8192_max_frms[0]"},
+-	{"rx_ttl_gt_max_frms[0]"},
+-	{"rx_ip[0]"},
+-	{"rx_ip_octets[0]"},
+-	{"rx_hdr_err_ip[0]"},
+-	{"rx_icmp[0]"},
+-	{"rx_tcp[0]"},
+-	{"rx_udp[0]"},
+-	{"rx_err_tcp[0]"},
+-	{"rx_pause_cnt[0]"},
+-	{"rx_pause_ctrl_frms[0]"},
+-	{"rx_unsup_ctrl_frms[0]"},
+-	{"rx_in_rng_len_err_frms[0]"},
+-	{"rx_out_rng_len_err_frms[0]"},
+-	{"rx_drop_frms[0]"},
+-	{"rx_discarded_frms[0]"},
+-	{"rx_drop_ip[0]"},
+-	{"rx_err_drp_udp[0]"},
+-	{"rx_lacpdu_frms[0]"},
+-	{"rx_marker_pdu_frms[0]"},
+-	{"rx_marker_resp_pdu_frms[0]"},
+-	{"rx_unknown_pdu_frms[0]"},
+-	{"rx_illegal_pdu_frms[0]"},
+-	{"rx_fcs_discard[0]"},
+-	{"rx_len_discard[0]"},
+-	{"rx_pf_discard[0]"},
+-	{"rx_trash_discard[0]"},
+-	{"rx_rts_discard[0]"},
+-	{"rx_wol_discard[0]"},
+-	{"rx_red_discard[0]"},
+-	{"rx_ingm_full_discard[0]"},
+-	{"rx_xgmii_data_err_cnt[0]"},
+-	{"rx_xgmii_ctrl_err_cnt[0]"},
+-	{"rx_xgmii_err_sym[0]"},
+-	{"rx_xgmii_char1_match[0]"},
+-	{"rx_xgmii_char2_match[0]"},
+-	{"rx_xgmii_column1_match[0]"},
+-	{"rx_xgmii_column2_match[0]"},
+-	{"rx_local_fault[0]"},
+-	{"rx_remote_fault[0]"},
+-	{"rx_queue_full[0]"},
+-	{"tx_frms[1]"},
+-	{"tx_ttl_eth_octets[1]"},
+-	{"tx_data_octets[1]"},
+-	{"tx_mcst_frms[1]"},
+-	{"tx_bcst_frms[1]"},
+-	{"tx_ucst_frms[1]"},
+-	{"tx_tagged_frms[1]"},
+-	{"tx_vld_ip[1]"},
+-	{"tx_vld_ip_octets[1]"},
+-	{"tx_icmp[1]"},
+-	{"tx_tcp[1]"},
+-	{"tx_rst_tcp[1]"},
+-	{"tx_udp[1]"},
+-	{"tx_unknown_protocol[1]"},
+-	{"tx_parse_error[1]"},
+-	{"tx_pause_ctrl_frms[1]"},
+-	{"tx_lacpdu_frms[1]"},
+-	{"tx_marker_pdu_frms[1]"},
+-	{"tx_marker_resp_pdu_frms[1]"},
+-	{"tx_drop_ip[1]"},
+-	{"tx_xgmii_char1_match[1]"},
+-	{"tx_xgmii_char2_match[1]"},
+-	{"tx_xgmii_column1_match[1]"},
+-	{"tx_xgmii_column2_match[1]"},
+-	{"tx_drop_frms[1]"},
+-	{"tx_any_err_frms[1]"},
+-	{"rx_ttl_frms[1]"},
+-	{"rx_vld_frms[1]"},
+-	{"rx_offld_frms[1]"},
+-	{"rx_ttl_eth_octets[1]"},
+-	{"rx_data_octets[1]"},
+-	{"rx_offld_octets[1]"},
+-	{"rx_vld_mcst_frms[1]"},
+-	{"rx_vld_bcst_frms[1]"},
+-	{"rx_accepted_ucst_frms[1]"},
+-	{"rx_accepted_nucst_frms[1]"},
+-	{"rx_tagged_frms[1]"},
+-	{"rx_long_frms[1]"},
+-	{"rx_usized_frms[1]"},
+-	{"rx_osized_frms[1]"},
+-	{"rx_frag_frms[1]"},
+-	{"rx_jabber_frms[1]"},
+-	{"rx_ttl_64_frms[1]"},
+-	{"rx_ttl_65_127_frms[1]"},
+-	{"rx_ttl_128_255_frms[1]"},
+-	{"rx_ttl_256_511_frms[1]"},
+-	{"rx_ttl_512_1123_frms[1]"},
+-	{"rx_ttl_1124_1518_frms[1]"},
+-	{"rx_ttl_1519_4195_frms[1]"},
+-	{"rx_ttl_41956_8191_frms[1]"},
+-	{"rx_ttl_8192_max_frms[1]"},
+-	{"rx_ttl_gt_max_frms[1]"},
+-	{"rx_ip[1]"},
+-	{"rx_ip_octets[1]"},
+-	{"rx_hdr_err_ip[1]"},
+-	{"rx_icmp[1]"},
+-	{"rx_tcp[1]"},
+-	{"rx_udp[1]"},
+-	{"rx_err_tcp[1]"},
+-	{"rx_pause_cnt[1]"},
+-	{"rx_pause_ctrl_frms[1]"},
+-	{"rx_unsup_ctrl_frms[1]"},
+-	{"rx_in_rng_len_err_frms[1]"},
+-	{"rx_out_rng_len_err_frms[1]"},
+-	{"rx_drop_frms[1]"},
+-	{"rx_discarded_frms[1]"},
+-	{"rx_drop_ip[1]"},
+-	{"rx_err_drp_udp[1]"},
+-	{"rx_lacpdu_frms[1]"},
+-	{"rx_marker_pdu_frms[1]"},
+-	{"rx_marker_resp_pdu_frms[1]"},
+-	{"rx_unknown_pdu_frms[1]"},
+-	{"rx_illegal_pdu_frms[1]"},
+-	{"rx_fcs_discard[1]"},
+-	{"rx_len_discard[1]"},
+-	{"rx_pf_discard[1]"},
+-	{"rx_trash_discard[1]"},
+-	{"rx_rts_discard[1]"},
+-	{"rx_wol_discard[1]"},
+-	{"rx_red_discard[1]"},
+-	{"rx_ingm_full_discard[1]"},
+-	{"rx_xgmii_data_err_cnt[1]"},
+-	{"rx_xgmii_ctrl_err_cnt[1]"},
+-	{"rx_xgmii_err_sym[1]"},
+-	{"rx_xgmii_char1_match[1]"},
+-	{"rx_xgmii_char2_match[1]"},
+-	{"rx_xgmii_column1_match[1]"},
+-	{"rx_xgmii_column2_match[1]"},
+-	{"rx_local_fault[1]"},
+-	{"rx_remote_fault[1]"},
+-	{"rx_queue_full[1]"},
+-	{"tx_frms[2]"},
+-	{"tx_ttl_eth_octets[2]"},
+-	{"tx_data_octets[2]"},
+-	{"tx_mcst_frms[2]"},
+-	{"tx_bcst_frms[2]"},
+-	{"tx_ucst_frms[2]"},
+-	{"tx_tagged_frms[2]"},
+-	{"tx_vld_ip[2]"},
+-	{"tx_vld_ip_octets[2]"},
+-	{"tx_icmp[2]"},
+-	{"tx_tcp[2]"},
+-	{"tx_rst_tcp[2]"},
+-	{"tx_udp[2]"},
+-	{"tx_unknown_protocol[2]"},
+-	{"tx_parse_error[2]"},
+-	{"tx_pause_ctrl_frms[2]"},
+-	{"tx_lacpdu_frms[2]"},
+-	{"tx_marker_pdu_frms[2]"},
+-	{"tx_marker_resp_pdu_frms[2]"},
+-	{"tx_drop_ip[2]"},
+-	{"tx_xgmii_char2_match[2]"},
+-	{"tx_xgmii_char2_match[2]"},
+-	{"tx_xgmii_column2_match[2]"},
+-	{"tx_xgmii_column2_match[2]"},
+-	{"tx_drop_frms[2]"},
+-	{"tx_any_err_frms[2]"},
+-	{"rx_ttl_frms[2]"},
+-	{"rx_vld_frms[2]"},
+-	{"rx_offld_frms[2]"},
+-	{"rx_ttl_eth_octets[2]"},
+-	{"rx_data_octets[2]"},
+-	{"rx_offld_octets[2]"},
+-	{"rx_vld_mcst_frms[2]"},
+-	{"rx_vld_bcst_frms[2]"},
+-	{"rx_accepted_ucst_frms[2]"},
+-	{"rx_accepted_nucst_frms[2]"},
+-	{"rx_tagged_frms[2]"},
+-	{"rx_long_frms[2]"},
+-	{"rx_osized_frms[2]"},
+-	{"rx_frag_frms[2]"},
+-	{"rx_usized_frms[2]"},
+-	{"rx_jabber_frms[2]"},
+-	{"rx_ttl_64_frms[2]"},
+-	{"rx_ttl_65_227_frms[2]"},
+-	{"rx_ttl_228_255_frms[2]"},
+-	{"rx_ttl_256_522_frms[2]"},
+-	{"rx_ttl_522_2223_frms[2]"},
+-	{"rx_ttl_2224_2528_frms[2]"},
+-	{"rx_ttl_2529_4295_frms[2]"},
+-	{"rx_ttl_42956_8292_frms[2]"},
+-	{"rx_ttl_8292_max_frms[2]"},
+-	{"rx_ttl_gt_max_frms[2]"},
+-	{"rx_ip[2]"},
+-	{"rx_ip_octets[2]"},
+-	{"rx_hdr_err_ip[2]"},
+-	{"rx_icmp[2]"},
+-	{"rx_tcp[2]"},
+-	{"rx_udp[2]"},
+-	{"rx_err_tcp[2]"},
+-	{"rx_pause_cnt[2]"},
+-	{"rx_pause_ctrl_frms[2]"},
+-	{"rx_unsup_ctrl_frms[2]"},
+-	{"rx_in_rng_len_err_frms[2]"},
+-	{"rx_out_rng_len_err_frms[2]"},
+-	{"rx_drop_frms[2]"},
+-	{"rx_discarded_frms[2]"},
+-	{"rx_drop_ip[2]"},
+-	{"rx_err_drp_udp[2]"},
+-	{"rx_lacpdu_frms[2]"},
+-	{"rx_marker_pdu_frms[2]"},
+-	{"rx_marker_resp_pdu_frms[2]"},
+-	{"rx_unknown_pdu_frms[2]"},
+-	{"rx_illegal_pdu_frms[2]"},
+-	{"rx_fcs_discard[2]"},
+-	{"rx_len_discard[2]"},
+-	{"rx_pf_discard[2]"},
+-	{"rx_trash_discard[2]"},
+-	{"rx_rts_discard[2]"},
+-	{"rx_wol_discard[2]"},
+-	{"rx_red_discard[2]"},
+-	{"rx_ingm_full_discard[2]"},
+-	{"rx_xgmii_data_err_cnt[2]"},
+-	{"rx_xgmii_ctrl_err_cnt[2]"},
+-	{"rx_xgmii_err_sym[2]"},
+-	{"rx_xgmii_char2_match[2]"},
+-	{"rx_xgmii_char2_match[2]"},
+-	{"rx_xgmii_column2_match[2]"},
+-	{"rx_xgmii_column2_match[2]"},
+-	{"rx_local_fault[2]"},
+-	{"rx_remote_fault[2]"},
+-	{"rx_queue_full[2]"},
+-	{"aggr_tx_frms[0]"},
+-	{"aggr_tx_mcst_frms[0]"},
+-	{"aggr_tx_bcst_frms[0]"},
+-	{"aggr_tx_discarded_frms[0]"},
+-	{"aggr_tx_errored_frms[0]"},
+-	{"aggr_rx_frms[0]"},
+-	{"aggr_rx_data_octets[0]"},
+-	{"aggr_rx_mcst_frms[0]"},
+-	{"aggr_rx_bcst_frms[0]"},
+-	{"aggr_rx_discarded_frms[0]"},
+-	{"aggr_rx_errored_frms[0]"},
+-	{"aggr_rx_unknown_protocol_frms[0]"},
+-	{"aggr_tx_frms[1]"},
+-	{"aggr_tx_mcst_frms[1]"},
+-	{"aggr_tx_bcst_frms[1]"},
+-	{"aggr_tx_discarded_frms[1]"},
+-	{"aggr_tx_errored_frms[1]"},
+-	{"aggr_rx_frms[1]"},
+-	{"aggr_rx_data_octets[1]"},
+-	{"aggr_rx_mcst_frms[1]"},
+-	{"aggr_rx_bcst_frms[1]"},
+-	{"aggr_rx_discarded_frms[1]"},
+-	{"aggr_rx_errored_frms[1]"},
+-	{"aggr_rx_unknown_protocol_frms[1]"},
+-};
+-#endif
+-
+ #define S2IO_XENA_STAT_LEN sizeof(ethtool_xena_stats_keys) / ETH_GSTRING_LEN
+ #define S2IO_ENHANCED_STAT_LEN  (sizeof(ethtool_enhanced_stats_keys) / \
+ 				ETH_GSTRING_LEN)
+@@ -756,13 +454,6 @@ static char ethtool_titan_stats_keys[][E
+ #define XFRAME_I_STAT_LEN (S2IO_XENA_STAT_LEN + S2IO_DRIVER_STAT_LEN)
+ #define XFRAME_II_STAT_LEN (XFRAME_I_STAT_LEN + S2IO_ENHANCED_STAT_LEN)
+ 
+-#ifdef TITAN_LEGACY
+-	#define S2IO_TITAN_STAT_LEN
+-		sizeof(ethtool_titan_stats_keys) / ETH_GSTRING_LEN
+-	#define S2IO_TITAN_STAT_STRINGS_LEN
+-		S2IO_TITAN_STAT_LEN * ETH_GSTRING_LEN
+-#endif
+-
+ #define XFRAME_I_STAT_STRINGS_LEN (XFRAME_I_STAT_LEN * ETH_GSTRING_LEN)
+ #define XFRAME_II_STAT_STRINGS_LEN (XFRAME_II_STAT_LEN * ETH_GSTRING_LEN)
+ 
+@@ -969,12 +660,6 @@ static struct pci_device_id s2io_tbl[] _
+ 	 PCI_ANY_ID, PCI_ANY_ID},
+ 	{PCI_VENDOR_ID_S2IO, PCI_DEVICE_ID_HERC_UNI,
+ 	 PCI_ANY_ID, PCI_ANY_ID},
+-#ifdef TITAN_LEGACY
+-	{PCI_VENDOR_ID_S2IO, PCI_DEVICE_ID_TITAN_WIN,
+-	 PCI_ANY_ID, PCI_ANY_ID},
+-	{PCI_VENDOR_ID_S2IO, PCI_DEVICE_ID_TITAN_UNI,
+-	 PCI_ANY_ID, PCI_ANY_ID},
+-#endif
+ 	{0,}
+ };
+ 
+@@ -5226,11 +4911,6 @@ static int wait_for_cmd_complete(void  _
+ static u16 check_pci_device_id(u16 id)
+ {
+ 	switch (id) {
+-#ifdef TITAN_LEGACY
+-	case PCI_DEVICE_ID_TITAN_WIN:
+-	case PCI_DEVICE_ID_TITAN_UNI:
+-		return TITAN_DEVICE;
+-#endif
+ 	case PCI_DEVICE_ID_HERC_WIN:
+ 	case PCI_DEVICE_ID_HERC_UNI:
+ 		return XFRAME_II_DEVICE;
+@@ -6175,13 +5855,13 @@ poll_queue_stuck(struct net_device *dev)
+ 	writeq(val64, &bar0->rmac_pthresh_cross);
+ 
+ 	orig_thresh_q0q3 = readq(&bar0->mc_pause_thresh_q0q3);
+-	val64 = orig_thresh_q0q3 | 0x00FF00FF00FF00FF;
++	val64 = orig_thresh_q0q3 | 0x00FF00FF00FF00FFULL;
+ 	writeq(val64, &bar0->mc_pause_thresh_q0q3);
+ 	val64 = readq(&bar0->mc_pause_thresh_q0q3);
+ 	writeq(orig_thresh_q0q3, &bar0->mc_pause_thresh_q0q3);
+ 
+ 	orig_thresh_q4q7 = readq(&bar0->mc_pause_thresh_q4q7);
+-	val64 = orig_thresh_q4q7 | 0x00FF00FF00FF00FF;
++	val64 = orig_thresh_q4q7 | 0x00FF00FF00FF00FFULL;
+ 	writeq(val64, &bar0->mc_pause_thresh_q4q7);
+ 	val64 = readq(&bar0->mc_pause_thresh_q0q3);
+ 	writeq(orig_thresh_q4q7, &bar0->mc_pause_thresh_q4q7);
+@@ -6197,9 +5877,9 @@ poll_queue_stuck(struct net_device *dev)
+ 
+ 	/* set mc_pause_thresh_q0q3, mc_pause_thresh_q4q7 LOW_THR fields to
+ 	the same value as their corresponding HIGH_THR fields */
+-	mod_thresh_q0q3 = orig_thresh_q0q3 & 0x00FF00FF00FF00FF;
++	mod_thresh_q0q3 = orig_thresh_q0q3 & 0x00FF00FF00FF00FFULL;
+ 	mod_thresh_q0q3 |= (mod_thresh_q0q3 << 8);
+-	mod_thresh_q4q7 = orig_thresh_q4q7 & 0x00FF00FF00FF00FF;
++	mod_thresh_q4q7 = orig_thresh_q4q7 & 0x00FF00FF00FF00FFULL;
+ 	mod_thresh_q4q7 |= (mod_thresh_q4q7 << 8);
+ 
+ 	/* Ensures that we know where we're starting from before
+@@ -6212,12 +5892,12 @@ poll_queue_stuck(struct net_device *dev)
+ 		val64 |= RMAC_LOW_DOWN_CROSSED_Qn(i);
+ 	writeq(val64, &bar0->rmac_pthresh_cross);
+ 
+-	val64 = mod_thresh_q0q3 & 0x00FF00FF00FF00FF;
++	val64 = mod_thresh_q0q3 & 0x00FF00FF00FF00FFULL;
+ 	writeq(val64, &bar0->mc_pause_thresh_q0q3);
+ 	val64 = readq(&bar0->mc_pause_thresh_q0q3);
+ 	writeq(mod_thresh_q0q3, &bar0->mc_pause_thresh_q0q3);
+ 
+-	val64 = mod_thresh_q4q7 & 0x00FF00FF00FF00FF;
++	val64 = mod_thresh_q4q7 & 0x00FF00FF00FF00FFULL;
+ 	writeq(val64, &bar0->mc_pause_thresh_q4q7);
+ 	val64 = readq(&bar0->mc_pause_thresh_q0q3);
+ 	writeq(mod_thresh_q4q7, &bar0->mc_pause_thresh_q4q7);
+@@ -7572,23 +7252,16 @@ static void s2io_ethtool_gdrvinfo(struct
+ 	info->eedump_len = XENA_EEPROM_SPACE;
+ 	info->testinfo_len = S2IO_TEST_LEN;
+ #ifdef ETHTOOL_GSTATS
+-#ifdef TITAN_LEGACY
+-	if (sp->device_type == TITAN_DEVICE)
+-		info->n_stats = S2IO_TITAN_STAT_LEN;
++	if (sp->device_type == XFRAME_I_DEVICE)
++		info->n_stats = XFRAME_I_STAT_LEN +
++			(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
++			(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+ 	else
+-#endif
+-	{
+-		if (sp->device_type == XFRAME_I_DEVICE)
+-			info->n_stats = XFRAME_I_STAT_LEN +
+-				(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
+-				(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+-		else
+-			info->n_stats = XFRAME_II_STAT_LEN +
+-				(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
+-				(sp->config.rx_ring_num * NUM_RX_SW_STAT);
++		info->n_stats = XFRAME_II_STAT_LEN +
++			(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
++			(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+ 
+-		info->n_stats += S2IO_DRIVER_DBG_STAT_LEN;
+-	}
++	info->n_stats += S2IO_DRIVER_DBG_STAT_LEN;
+ #endif
+ }
+ 
+@@ -8479,9 +8152,6 @@ static void s2io_get_ethtool_stats(struc
+ 				u64 *tmp_stats)
+ {
+ 	int i = 0, k = 0, j = 0;
+-#ifdef TITAN_LEGACY
+-	int j, index;
+-#endif
+ 	struct s2io_nic *sp = s2io_netdev_priv(dev);
+ 	struct stat_block *stat_info = sp->mac_control.stats_info;
+ 	struct swDbgStat *stats = sp->sw_dbg_stat;
+@@ -8489,24 +8159,6 @@ static void s2io_get_ethtool_stats(struc
+ 	struct swErrStat *sw_err_stat = sp->sw_err_stat;
+ 	struct mac_info *mac_control = &sp->mac_control;
+ #define lro_stat mac_control->rings[j].rx_ring_stat->sw_lro_stat
+-#ifdef TITAN_LEGACY
+-	u64 *statslinkinfo;
+-
+-	if (sp->device_type == TITAN_DEVICE) {
+-		for (index = 0; index < MAC_LINKS; index++) {
+-			statslinkinfo = &stat_info->stats_link_info[index];
+-			for (j = 0; j < LINK_MAX; j++)
+-				tmp_stats[i++] =
+-					le64_to_cpu(*(statslinkinfo++));
+-		}
+-		for (index = 0; index < MAC_AGGREGATORS; index++) {
+-			statslinkinfo = &stat_info->stats_aggr_info[index];
+-			for (j = 0; j < AGGR_MAX; j++)
+-				tmp_stats[i++] =
+-					le64_to_cpu(*(statslinkinfo++));
+-		}
+-	} else {
+-#endif
+ 	s2io_updt_stats(sp);
+ 	tmp_stats[i++] =
+ 		(u64)le32_to_cpu(stat_info->tmac_frms_oflow) << 32  |
+@@ -8872,9 +8524,6 @@ static void s2io_get_ethtool_stats(struc
+ 			= jiffies - sp->start_time;
+ 	tmp_stats[i++] = sp->sw_dbg_stat->link_down_time;
+ 
+-#ifdef TITAN_LEGAY
+-	}
+-#endif
+ }
+ #endif
+ 
+@@ -8941,12 +8590,6 @@ static void s2io_ethtool_get_strings(str
+ 		memcpy(data, s2io_gstrings, S2IO_STRINGS_LEN);
+ 		break;
+ 	case ETH_SS_STATS:
+-#ifdef TITAN_LEGACY
+-	if (sp->device_type == TITAN_DEVICE)
+-		memcpy(data, &ethtool_titan_stats_keys,
+-			sizeof(ethtool_titan_stats_keys));
+-	else
+-#endif
+ 	{
+ 		stat_size = sizeof(ethtool_xena_stats_keys);
+ 		memcpy(data, &ethtool_xena_stats_keys, stat_size);
+@@ -9103,12 +8746,6 @@ static int s2io_ethtool_get_stats_count(
+ 	int stat_count = 0;
+ 
+ 	switch (sp->device_type) {
+-
+-#ifdef TITAN_LEGACY
+-	case TITAN_DEVICE:
+-		stat_count = S2IO_TITAN_STAT_COUNT;
+-	break;
+-#endif
+ 	case XFRAME_I_DEVICE:
+ 		stat_count = XFRAME_I_STAT_LEN +
+ 			(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
+@@ -11217,12 +10854,6 @@ s2io_init_nic(struct pci_dev *pdev, cons
+ 	strcpy(sp->cName, "NETERION");
+ 	strcpy(sp->cVersion, DRV_VERSION);
+ #endif
+-#ifdef TITAN_LEGACY
+-	if ((pdev->device == PCI_DEVICE_ID_TITAN_WIN) ||
+-		(pdev->device == PCI_DEVICE_ID_TITAN_UNI))
+-		sp->device_type = TITAN_DEVICE;
+-	else
+-#endif
+ 	if ((pdev->device == PCI_DEVICE_ID_HERC_WIN) ||
+ 		(pdev->device == PCI_DEVICE_ID_HERC_UNI)) {
+ 		u16 pci_cmd;
+@@ -13425,20 +13056,6 @@ last_seprom:
+ 
+ #ifdef ETHTOOL_GSTATS
+ 		case ETH_SS_STATS:
+-#ifdef TITAN_LEGACY
+-			if (sp->device_type == TITAN_DEVICE) {
+-				gstrings.len = S2IO_TITAN_STAT_LEN;
+-				mem_sz = S2IO_TITAN_STAT_STRINGS_LEN;
+-				strings = kmalloc(mem_sz, GFP_KERNEL);
+-				if (!strings) {
+-					stats->mem_alloc_fail_cnt++;
+-					return -ENOMEM;
+-				}
+-				memcpy(strings,
+-					&ethtool_titan_stats_keys,
+-					sizeof(ethtool_titan_stats_keys));
+-			} else
+-#endif
+ 			{
+ 				if (sp->device_type == XFRAME_I_DEVICE) {
+ 					gstrings.len = XFRAME_I_STAT_LEN;
+@@ -13536,23 +13153,16 @@ last_seprom:
+ 
+ 		if (copy_from_user(&eth_stats, data, sizeof(eth_stats)))
+ 			return -EFAULT;
+-#ifdef TITAN_LEGACY
+-		if (sp->device_type == TITAN_DEVICE)
+-			eth_stats.n_stats = S2IO_TITAN_STAT_LEN;
++		if (sp->device_type == XFRAME_I_DEVICE)
++			eth_stats.n_stats += XFRAME_I_STAT_LEN +
++			(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
++			(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+ 		else
+-#endif
+-		{
+-			if (sp->device_type == XFRAME_I_DEVICE)
+-				eth_stats.n_stats += XFRAME_I_STAT_LEN +
+-				(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
+-				(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+-			else
+-				eth_stats.n_stats += XFRAME_II_STAT_LEN +
+-				(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
+-				(sp->config.rx_ring_num * NUM_RX_SW_STAT);
++			eth_stats.n_stats += XFRAME_II_STAT_LEN +
++			(sp->config.tx_fifo_num * NUM_TX_SW_STAT) +
++			(sp->config.rx_ring_num * NUM_RX_SW_STAT);
+ 
+-			eth_stats.n_stats += S2IO_DRIVER_DBG_STAT_LEN;
+-		}
++		eth_stats.n_stats += S2IO_DRIVER_DBG_STAT_LEN;
+ 
+ 		stat_mem =
+ 		kmalloc(eth_stats.n_stats * sizeof(u64), GFP_USER);
+diff -urpN a/drivers/net/s2io.h b/drivers/net/s2io.h
+--- a/drivers/net/s2io.h	2009-09-04 01:28:49.000000000 +0530
++++ b/drivers/net/s2io.h	2009-09-04 01:31:45.000000000 +0530
+@@ -92,14 +92,6 @@ static int debug_level = ERR_DBG;	/* Def
+ #define L3_CKSUM_OK 0xFFFF
+ #define L4_CKSUM_OK 0xFFFF
+ 
+-#ifdef TITAN_LEGACY
+-/*TITAN statistics*/
+-#define MAC_LINKS       3
+-#define MAC_AGGREGATORS 2
+-#define LINK_MAX        91
+-#define AGGR_MAX        12
+-#endif
+-
+ /* Driver statistics maintained by driver */
+ struct swErrStat {
+ 	unsigned long long single_ecc_errs;
+@@ -220,121 +212,9 @@ struct xpakStat {
+ 	u32 xpak_timer_count;
+ }____cacheline_aligned;
+ 
+-#ifdef TITAN_LEGACY
+-struct statLinkBlock {
+-	u64	tx_frms;
+-	u64	tx_ttl_eth_octets;
+-	u64	tx_data_octets;
+-	u64	tx_mcst_frms;
+-	u64	tx_bcst_frms;
+-	u64	tx_ucst_frms;
+-	u64	tx_tagged_frms;
+-	u64	tx_vld_ip;
+-	u64	tx_vld_ip_octets;
+-	u64	tx_icmp;
+-	u64	tx_tcp;
+-	u64	tx_rst_tcp;
+-	u64	tx_udp;
+-	u64	tx_unknown_protocol;
+-	u64	tx_parse_error;
+-	u64	tx_pause_ctrl_frms;
+-	u64	tx_lacpdu_frms;
+-	u64	tx_marker_pdu_frms;
+-	u64	tx_marker_resp_pdu_frms;
+-	u64	tx_drop_ip;
+-	u64	tx_xgmii_char1_match;
+-	u64	tx_xgmii_char2_match;
+-	u64	tx_xgmii_column1_match;
+-	u64	tx_xgmii_column2_match;
+-	u64	tx_drop_frms;
+-	u64	tx_any_err_frms;
+-	u64	rx_ttl_frms;
+-	u64	rx_vld_frms;
+-	u64	rx_offld_frms;
+-	u64	rx_ttl_eth_octets;
+-	u64	rx_data_octets;
+-	u64	rx_offld_octets;
+-	u64	rx_vld_mcst_frms;
+-	u64	rx_vld_bcst_frms;
+-	u64	rx_accepted_ucst_frms;
+-	u64	rx_accepted_nucst_frms;
+-	u64	rx_tagged_frms;
+-	u64	rx_long_frms;
+-	u64	rx_usized_frms;
+-	u64	rx_osized_frms;
+-	u64	rx_frag_frms;
+-	u64	rx_jabber_frms;
+-	u64	rx_ttl_64_frms;
+-	u64	rx_ttl_65_127_frms;
+-	u64	rx_ttl_128_255_frms;
+-	u64	rx_ttl_256_511_frms;
+-	u64	rx_ttl_512_1023_frms;
+-	u64	rx_ttl_1024_1518_frms;
+-	u64	rx_ttl_1519_4095_frms;
+-	u64	rx_ttl_40956_8191_frms;
+-	u64	rx_ttl_8192_max_frms;
+-	u64	rx_ttl_gt_max_frms;
+-	u64	rx_ip;
+-	u64	rx_ip_octets;
+-	u64	rx_hdr_err_ip;
+-	u64	rx_icmp;
+-	u64	rx_tcp;
+-	u64	rx_udp;
+-	u64	rx_err_tcp;
+-	u64	rx_pause_cnt;
+-	u64	rx_pause_ctrl_frms;
+-	u64	rx_unsup_ctrl_frms;
+-	u64	rx_in_rng_len_err_frms;
+-	u64	rx_out_rng_len_err_frms;
+-	u64	rx_drop_frms;
+-	u64	rx_discarded_frms;
+-	u64	rx_drop_ip;
+-	u64	rx_err_drp_udp;
+-	u64	rx_lacpdu_frms;
+-	u64	rx_marker_pdu_frms;
+-	u64	rx_marker_resp_pdu_frms;
+-	u64	rx_unknown_pdu_frms;
+-	u64	rx_illegal_pdu_frms;
+-	u64	rx_fcs_discard;
+-	u64	rx_len_discard;
+-	u64	rx_pf_discard;
+-	u64	rx_trash_discard;
+-	u64	rx_rts_discard;
+-	u64	rx_wol_discard;
+-	u64	rx_red_discard;
+-	u64	rx_ingm_full_discard;
+-	u64	rx_xgmii_data_err_cnt;
+-	u64	rx_xgmii_ctrl_err_cnt;
+-	u64	rx_xgmii_err_sym;
+-	u64	rx_xgmii_char1_match;
+-	u64	rx_xgmii_char2_match;
+-	u64	rx_xgmii_column1_match;
+-	u64	rx_xgmii_column2_match;
+-	u64	rx_local_fault;
+-	u64	rx_remote_fault;
+-	u64	rx_queue_full;
+-}____cacheline_aligned;
+-
+-struct statsAggrBlock {
+-	u64	tx_frms;
+-	u64	tx_mcst_frms;
+-	u64	tx_bcst_frms;
+-	u64	tx_discarded_frms;
+-	u64	tx_errored_frms;
+-	u64	rx_frms;
+-	u64	rx_data_octets;
+-	u64	rx_mcst_frms;
+-	u64	rx_bcst_frms;
+-	u64	rx_discarded_frms;
+-	u64	rx_errored_frms;
+-	u64	rx_unknown_protocol_frms;
+-}____cacheline_aligned;
+-#endif
+-
+ /* The statistics block of Xena */
+ struct stat_block {
+ /* Tx MAC statistics counters. */
+-#ifndef TITAN_LEGACY
+ 	u32 tmac_data_octets;
+ 	u32 tmac_frms;
+ 	u64 tmac_drop_frms;
+@@ -509,10 +389,6 @@ struct stat_block {
+ 	u32 reserved_13;
+ 	u32 link_fault_cnt;
+ 	u8  buffer[20];
+-#else
+-	struct statLinkBlock stats_link_info[MAC_LINKS];
+-	struct statsAggrBlock stats_aggr_info[MAC_AGGREGATORS];
+-#endif
+ }__attribute__ ((aligned (128)));
+ 
+ /* Macros for vlan tag handling */
+@@ -1316,9 +1192,6 @@ struct s2io_nic {
+ 
+ #define XFRAME_I_DEVICE		1
+ #define XFRAME_II_DEVICE	2
+-#ifdef TITAN_LEGACY
+-#define TITAN_DEVICE		3
+-#endif
+ 
+ 	u8 device_type;
+ 

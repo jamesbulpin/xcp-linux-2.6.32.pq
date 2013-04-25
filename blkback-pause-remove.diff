@@ -1,0 +1,210 @@
+blkback: Remove the queue-state based pause mode.
+
+diff -r d0eeeaaf5fd1 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Tue Jun 29 02:00:06 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Tue Jun 29 02:04:38 2010 -0700
+@@ -364,55 +364,15 @@
+ 
+ static inline int blkif_activate(blkif_t *blkif)
+ {
+-	mutex_lock(&blkif->queue_mutex);
+-
+-	if (atomic_read(&blkif->requests_pending) == 0 &&
+-	    blkif->queue_state == QUEUE_PAUSE_REQUESTED) {
+-		blkif->queue_state = QUEUE_PAUSED;
+-		blkback_signal_paused(blkif);
+-	}
+-
+-	mutex_unlock(&blkif->queue_mutex);
+-
+ 	if (blkif->remove_requested)
+ 		return 1;
+ 
+ 	if (blkif->waiting_reqs)
+-		return (!list_empty(&pending_free) &&
+-			blkif->queue_state == QUEUE_RUNNING);
++		return !list_empty(&pending_free);
+ 
+ 	return 0;
+ }
+ 
+-void blkback_pause(blkif_t *blkif)
+-{
+-	mutex_lock(&blkif->queue_mutex);
+-
+-	if (atomic_read(&blkif->requests_pending) == 0) {
+-		blkif->queue_state = QUEUE_PAUSED;
+-		blkback_signal_paused(blkif);
+-	} else
+-		blkif->queue_state = QUEUE_PAUSE_REQUESTED;
+-
+-	mutex_unlock(&blkif->queue_mutex);
+-}
+-
+-void blkback_resume(blkif_t *blkif)
+-{
+-	mutex_lock(&blkif->queue_mutex);
+-
+-	if (blkif->queue_state == QUEUE_PAUSED ||
+-	    blkif->queue_state == QUEUE_PAUSE_REQUESTED) {
+-		blkif->queue_state = QUEUE_RUNNING;
+-		if (blkif->xenblkd)
+-			wake_up_process(blkif->xenblkd);
+-	}
+-
+-	blkback_signal_resumed(blkif);
+-
+-	mutex_unlock(&blkif->queue_mutex);
+-}
+-
+ /******************************************************************
+  * SCHEDULER FUNCTIONS
+  */
+@@ -443,13 +403,6 @@
+ 		wait_event_interruptible(pending_free_wq,
+ 					 blkif_activate(blkif));
+ 
+-		mutex_lock(&blkif->queue_mutex);
+-
+-		if (blkif->queue_state != QUEUE_RUNNING) {
+-			mutex_unlock(&blkif->queue_mutex);
+-			continue;
+-		}
+-
+ 		blkif->waiting_reqs = 0;
+ 		smp_mb(); /* clear flag *before* checking for work */
+ 
+@@ -457,8 +410,6 @@
+ 			blkif->waiting_reqs = 1;
+ 		unplug_queue(blkif);
+ 
+-		mutex_unlock(&blkif->queue_mutex);
+-
+ 		if (log_stats && time_after(jiffies, blkif->st_print))
+ 			print_stats(blkif);
+ 	}
+diff -r d0eeeaaf5fd1 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Tue Jun 29 02:00:06 2010 -0700
++++ b/drivers/xen/blkback/common.h	Tue Jun 29 02:04:38 2010 -0700
+@@ -56,10 +56,6 @@
+ 		printk(KERN_WARNING "blk_back: " fmt, ##args);	\
+ } while(0)
+ 
+-#define QUEUE_RUNNING           1
+-#define QUEUE_PAUSE_REQUESTED   2
+-#define QUEUE_PAUSED            3
+-
+ struct backend_info;
+ 
+ #define	BLKIF_MAX_RING_PAGE_ORDER 2
+@@ -94,8 +90,6 @@
+ 	struct request_queue *plug;
+ 
+ 	/* queue management */
+-	int                 queue_state;
+-	struct mutex        queue_mutex;
+ 	atomic_t            requests_pending;
+ 
+ 	/* statistics */
+@@ -151,11 +145,6 @@
+ int blkback_barrier(struct xenbus_transaction xbt,
+ 		    struct backend_info *be, int state);
+ 
+-void blkback_pause(blkif_t *blkif);
+-void blkback_signal_paused(blkif_t *blkif);
+-void blkback_resume(blkif_t *blkif);
+-void blkback_signal_resumed(blkif_t *blkif);
+-
+ void blkback_close(struct backend_info *be);
+ 
+ #endif /* __BLKIF__BACKEND__COMMON_H__ */
+diff -r d0eeeaaf5fd1 drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Tue Jun 29 02:00:06 2010 -0700
++++ b/drivers/xen/blkback/interface.c	Tue Jun 29 02:04:38 2010 -0700
+@@ -45,8 +45,6 @@
+ 	blkif->domid = domid;
+ 	spin_lock_init(&blkif->blk_ring_lock);
+ 	blkif->st_print = jiffies;
+-	blkif->queue_state = QUEUE_RUNNING;
+-	mutex_init(&blkif->queue_mutex);
+ 	atomic_set(&blkif->requests_pending, 0);
+ 	spin_lock_init(&blkif->xenblkd_lock);
+ 
+diff -r d0eeeaaf5fd1 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Tue Jun 29 02:00:06 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Tue Jun 29 02:04:38 2010 -0700
+@@ -434,62 +434,6 @@
+ 	blkback_queue_stop(be, force);
+ }
+ 
+-void blkback_signal_paused(blkif_t *blkif)
+-{
+-	int err;
+-	struct backend_info *be = blkif->be;
+-
+-	mutex_lock(&be->mutex);
+-	if (be->dev) {
+-		err = xenbus_write(XBT_NIL,
+-				   be->dev->nodename, "pause-done", "");
+-		if (err)
+-			xenbus_dev_error(be->dev, err, "writing pause-done");
+-	}
+-	mutex_unlock(&be->mutex);
+-}
+-
+-void blkback_signal_resumed(blkif_t *blkif)
+-{
+-	int err;
+-	struct backend_info *be = blkif->be;
+-
+-	mutex_lock(&be->mutex);
+-	if (be->dev) {
+-		if (blkif->bdev &&
+-		    be->dev->state == XenbusStateConnected)
+-			connect(be);
+-
+-		err = xenbus_rm(XBT_NIL, be->dev->nodename, "pause-done");
+-		if (err)
+-			xenbus_dev_error(be->dev, err, "removing pause-done");
+-	}
+-	mutex_unlock(&be->mutex);
+-}
+-
+-static void backend_pause(struct xenbus_watch *watch,
+-			  const char **vec, unsigned int length)
+-{
+-	struct backend_info *be
+-		= container_of(watch, struct backend_info, pause_watch);
+-	struct xenbus_device *dev = be->dev;
+-
+-	if (xenbus_exists(XBT_NIL, dev->nodename, "pause")) {
+-		if (xenbus_exists(XBT_NIL, dev->nodename, "pause-done")) {
+-			WPRINTK("got pause request for paused vbd %s\n",
+-				dev->nodename);
+-			return;
+-		}
+-
+-		WPRINTK("pausing %s\n", dev->nodename);
+-		blkback_pause(be->blkif);
+-
+-	} else if (xenbus_exists(XBT_NIL, dev->nodename, "pause-done")) {
+-		WPRINTK("resuming %s\n", dev->nodename);
+-		blkback_resume(be->blkif);
+-	}
+-}
+-
+ int blkback_barrier(struct xenbus_transaction xbt,
+ 		    struct backend_info *be, int state)
+ {
+@@ -559,11 +503,6 @@
+ 	if (err)
+ 		goto fail;
+ 
+-	err = xenbus_watch_path2(dev, dev->nodename, "pause",
+-				 &be->pause_watch, backend_pause);
+-	if (err)
+-		goto fail;
+-
+ 	err = xenbus_printf(XBT_NIL, dev->nodename, "max-ring-page-order",
+ 			    "%u", blkif_max_ring_page_order);
+ 	if (err)

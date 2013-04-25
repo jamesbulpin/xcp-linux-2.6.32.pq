@@ -1,0 +1,95 @@
+Added as part of debug for CA-46489.
+---
+ arch/x86/include/asm/checksum_32.h |    3 ++-
+ net/core/datagram.c                |   13 ++++++++++---
+ net/openvswitch/datapath.c         |   12 +++++++++---
+ 3 files changed, 21 insertions(+), 7 deletions(-)
+
+diff -r 324ab02985e8 arch/x86/include/asm/checksum_32.h
+--- a/arch/x86/include/asm/checksum_32.h	Mon Feb 27 10:28:46 2012 +0000
++++ b/arch/x86/include/asm/checksum_32.h	Mon Feb 27 12:36:05 2012 +0000
+@@ -174,12 +174,13 @@ static inline __sum16 csum_ipv6_magic(co
+ static inline __wsum csum_and_copy_to_user(const void *src,
+ 					   void __user *dst,
+ 					   int len, __wsum sum,
++					   int *src_err,
+ 					   int *err_ptr)
+ {
+ 	might_sleep();
+ 	if (access_ok(VERIFY_WRITE, dst, len))
+ 		return csum_partial_copy_generic(src, (__force void *)dst,
+-						 len, sum, NULL, err_ptr);
++						 len, sum, src_err, err_ptr);
+ 
+ 	if (len)
+ 		*err_ptr = -EFAULT;
+diff -r 324ab02985e8 arch/x86/include/asm/checksum_64.h
+--- a/arch/x86/include/asm/checksum_64.h	Mon Feb 27 10:28:46 2012 +0000
++++ b/arch/x86/include/asm/checksum_64.h	Mon Feb 27 12:36:05 2012 +0000
+@@ -141,7 +141,7 @@ extern __wsum csum_partial_copy_generic(
+ extern __wsum csum_partial_copy_from_user(const void __user *src, void *dst,
+ 					  int len, __wsum isum, int *errp);
+ extern __wsum csum_partial_copy_to_user(const void *src, void __user *dst,
+-					int len, __wsum isum, int *errp);
++					int len, __wsum isum, int *src_err, int *errp);
+ extern __wsum csum_partial_copy_nocheck(const void *src, void *dst,
+ 					int len, __wsum sum);
+ 
+diff -r 324ab02985e8 arch/x86/lib/csum-wrappers_64.c
+--- a/arch/x86/lib/csum-wrappers_64.c	Mon Feb 27 10:28:46 2012 +0000
++++ b/arch/x86/lib/csum-wrappers_64.c	Mon Feb 27 12:36:05 2012 +0000
+@@ -80,7 +80,7 @@ EXPORT_SYMBOL(csum_partial_copy_from_use
+  */
+ __wsum
+ csum_partial_copy_to_user(const void *src, void __user *dst,
+-			  int len, __wsum isum, int *errp)
++			  int len, __wsum isum, int *src_err, int *errp)
+ {
+ 	might_sleep();
+ 
+@@ -106,7 +106,7 @@ csum_partial_copy_to_user(const void *sr
+ 
+ 	*errp = 0;
+ 	return csum_partial_copy_generic(src, (void __force *)dst,
+-					 len, isum, NULL, errp);
++					 len, isum, src_err, errp);
+ }
+ EXPORT_SYMBOL(csum_partial_copy_to_user);
+ 
+diff -r 324ab02985e8 net/core/datagram.c
+--- a/net/core/datagram.c	Mon Feb 27 10:28:46 2012 +0000
++++ b/net/core/datagram.c	Mon Feb 27 12:36:05 2012 +0000
+@@ -558,7 +558,7 @@ static int skb_copy_and_csum_datagram(co
+ 		if (copy > len)
+ 			copy = len;
+ 		*csump = csum_and_copy_to_user(skb->data + offset, to, copy,
+-					       *csump, &err);
++					       *csump, NULL, &err);
+ 		if (err)
+ 			goto fault;
+ 		if ((len -= copy) == 0)
+@@ -576,7 +576,7 @@ static int skb_copy_and_csum_datagram(co
+ 		end = start + skb_shinfo(skb)->frags[i].size;
+ 		if ((copy = end - offset) > 0) {
+ 			__wsum csum2;
+-			int err = 0;
++			int err = 0, src_err = 0;
+ 			u8  *vaddr;
+ 			skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+ 			struct page *page = frag->page;
+@@ -587,7 +587,14 @@ static int skb_copy_and_csum_datagram(co
+ 			csum2 = csum_and_copy_to_user(vaddr +
+ 							frag->page_offset +
+ 							offset - start,
+-						      to, copy, 0, &err);
++						      to, copy, 0, &src_err, &err);
++			if (src_err) {
++				skb_dump_info(skb);
++				printk(KERN_CRIT "ERROR: CA-46489 bad skb, "
++					"error %d\n", src_err);
++				BUG();
++			}
++
+ 			kunmap(page);
+ 			if (err)
+ 				goto fault;

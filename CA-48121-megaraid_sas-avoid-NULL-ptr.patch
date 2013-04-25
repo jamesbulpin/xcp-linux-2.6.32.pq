@@ -1,0 +1,22 @@
+# HG changeset patch
+# Parent d15574c810dcf8df8e94ac51ef2d4cff26f386cb
+
+diff -r d15574c810dc drivers/scsi/megaraid/megaraid_sas_base.c
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c	Wed Jul 27 13:04:36 2011 +0100
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c	Wed Aug 10 15:52:02 2011 +0100
+@@ -3336,6 +3336,15 @@ megasas_complete_cmd(struct megasas_inst
+ 			break;
+ 		}
+ 
++#ifdef CONFIG_CRASH_DUMP
++        /* CA-48121: avoid an inexplicable NULL pointer dereference */
++        if (!cmd->scmd) {
++            printk("***** cmd->scmd == NULL, abandoning command\n");
++            atomic_dec(&instance->fw_outstanding);
++            break;
++        }
++#endif
++
+ 		switch (hdr->cmd_status) {
+ 
+ 		case MFI_STAT_OK:

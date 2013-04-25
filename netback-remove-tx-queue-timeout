@@ -1,0 +1,103 @@
+Remove the timer that unconditionally wakes the netback netif queue after
+500ms. It's not unlikely that a guest may not service its shared ring for
+that time and, if this happens, all packets on the netif queue will be
+binned. This amounts to a significant tail drop which is exteremely bad
+for network throughput.
+Removing the timeout lets the configured queuing discipline do its job.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+
+diff -r aaf1c02c4726 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Thu Feb 10 15:40:21 2011 +0000
++++ b/drivers/xen/netback/interface.c	Wed Feb 16 10:14:00 2011 +0000
+@@ -45,8 +45,7 @@
+  * guest for which it is queued (e.g., packet received on vif1.0, destined for
+  * vif1.1 which is not activated in the guest): in this situation the guest
+  * will never be destroyed, unless vif1.1 is taken down. To avoid this, we
+- * run a timer (tx_queue_timeout) to drain the queue when the interface is
+- * blocked.
++ * grant copy skb pages after a timeout and release the foreign resources.
+  */
+ static unsigned long netbk_queue_length = 32;
+ module_param_named(queue_length, netbk_queue_length, ulong, 0644);
+@@ -291,8 +290,6 @@ struct xen_netif *netif_alloc(struct dev
+ 	/* Initialize 'expires' now: it's used to track the credit window. */
+ 	netif->credit_timeout.expires = jiffies;
+ 
+-	init_timer(&netif->tx_queue_timeout);
+-
+ 	dev->netdev_ops = &netif_be_netdev_ops;
+ 	netif_set_features(netif);
+ 
+@@ -456,7 +453,6 @@ void netif_disconnect(struct xen_netif *
+ 	wait_event(netif->waiting_to_free, atomic_read(&netif->refcnt) == 0);
+ 
+ 	del_timer_sync(&netif->credit_timeout);
+-	del_timer_sync(&netif->tx_queue_timeout);
+ 
+ 	if (netif->irq)
+ 		unbind_from_irqhandler(netif->irq, netif);
+diff -r aaf1c02c4726 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu Feb 10 15:40:21 2011 +0000
++++ b/drivers/xen/netback/netback.c	Wed Feb 16 10:14:00 2011 +0000
+@@ -267,13 +267,6 @@ static inline int netbk_queue_full(struc
+ 	       ((netif->rx.rsp_prod_pvt + NET_RX_RING_SIZE - peek) < needed);
+ }
+ 
+-static void tx_queue_callback(unsigned long data)
+-{
+-	struct xen_netif *netif = (struct xen_netif *)data;
+-	if (netif_schedulable(netif))
+-		netif_wake_queue(netif->dev);
+-}
+-
+ /* Figure out how many ring slots we're going to need to send @skb to
+    the guest. */
+ static unsigned count_skb_slots(struct sk_buff *skb, struct xen_netif *netif)
+@@ -333,8 +326,11 @@ int netif_be_start_xmit(struct sk_buff *
+ 		goto drop;
+ 
+ 	/* Drop the packet if the target domain has no receive buffers. */
+-	if (unlikely(netbk_queue_full(netif)))
++	if (unlikely(netbk_queue_full(netif))) {
++		printk(KERN_WARNING "%s dropping packet (shared ring full)\n",
++			   __func__);
+ 		goto drop;
++	}
+ 
+ 	/*
+ 	 * XXX For now we also copy skbuffs whose head crosses a page
+@@ -342,8 +338,11 @@ int netif_be_start_xmit(struct sk_buff *
+ 	 */
+ 	if ((skb_headlen(skb) + offset_in_page(skb->data)) >= PAGE_SIZE) {
+ 		struct sk_buff *nskb = netbk_copy_skb(skb);
+-		if ( unlikely(nskb == NULL) )
++		if (unlikely(nskb == NULL)) {
++			printk(KERN_WARNING "%s dropping packet (failed to copy header)\n",
++				   __func__);
+ 			goto drop;
++		}
+ 		/* Copy only the header fields we use in this driver. */
+ 		nskb->dev = skb->dev;
+ 		nskb->ip_summed = skb->ip_summed;
+@@ -360,19 +359,8 @@ int netif_be_start_xmit(struct sk_buff *
+ 		netif->rx.sring->req_event = netif->rx_req_cons_peek +
+ 			netbk_max_required_rx_slots(netif);
+ 		mb(); /* request notification /then/ check & stop the queue */
+-		if (netbk_queue_full(netif)) {
++		if (netbk_queue_full(netif))
+ 			netif_stop_queue(dev);
+-			/*
+-			 * Schedule 500ms timeout to restart the queue, thus
+-			 * ensuring that an inactive queue will be drained.
+-			 * Packets will be immediately be dropped until more
+-			 * receive buffers become available (see
+-			 * netbk_queue_full() check above).
+-			 */
+-			netif->tx_queue_timeout.data = (unsigned long)netif;
+-			netif->tx_queue_timeout.function = tx_queue_callback;
+-			mod_timer(&netif->tx_queue_timeout, jiffies + HZ/2);
+-		}
+ 	}
+ 	skb_queue_tail(&netbk->rx_queue, skb);
+ 

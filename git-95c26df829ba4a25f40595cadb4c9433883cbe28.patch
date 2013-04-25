@@ -1,0 +1,59 @@
+From 95c26df829ba4a25f40595cadb4c9433883cbe28 Mon Sep 17 00:00:00 2001
+From: Williams, Mitch A <mitch.a.williams@intel.com>
+Date: Wed, 10 Feb 2010 01:43:46 +0000
+Subject: [PATCH] net: Add netdev ops for SR-IOV configuration
+
+Add netdev ops for configuring SR-IOV VF devices through the PF driver.
+
+Signed-off-by: Mitch Williams <mitch.a.williams@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ include/linux/netdevice.h |   17 +++++++++++++++++
+ 1 files changed, 17 insertions(+), 0 deletions(-)
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index 1412dde..682d025 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -28,6 +28,7 @@
+ #include <linux/if.h>
+ #include <linux/if_ether.h>
+ #include <linux/if_packet.h>
++#include <linux/if_link.h>
+ 
+ #ifdef __KERNEL__
+ #include <linux/timer.h>
+@@ -621,6 +622,13 @@ struct netdev_queue {
+  *	this function is called when a VLAN id is unregistered.
+  *
+  * void (*ndo_poll_controller)(struct net_device *dev);
++ *
++ *	SR-IOV management functions.
++ * int (*ndo_set_vf_mac)(struct net_device *dev, int vf, u8* mac);
++ * int (*ndo_set_vf_vlan)(struct net_device *dev, int vf, u16 vlan, u8 qos);
++ * int (*ndo_set_vf_tx_rate)(struct net_device *dev, int vf, int rate);
++ * int (*ndo_get_vf_config)(struct net_device *dev,
++ *			    int vf, struct ifla_vf_info *ivf);
+  */
+ #define HAVE_NET_DEVICE_OPS
+ struct net_device_ops {
+@@ -660,6 +668,15 @@ struct net_device_ops {
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+ 	void                    (*ndo_poll_controller)(struct net_device *dev);
+ #endif
++	int			(*ndo_set_vf_mac)(struct net_device *dev,
++						  int queue, u8 *mac);
++	int			(*ndo_set_vf_vlan)(struct net_device *dev,
++						   int queue, u16 vlan, u8 qos);
++	int			(*ndo_set_vf_tx_rate)(struct net_device *dev,
++						      int vf, int rate);
++	int			(*ndo_get_vf_config)(struct net_device *dev,
++						     int vf,
++						     struct ifla_vf_info *ivf);
+ #if defined(CONFIG_FCOE) || defined(CONFIG_FCOE_MODULE)
+ 	int			(*ndo_fcoe_enable)(struct net_device *dev);
+ 	int			(*ndo_fcoe_disable)(struct net_device *dev);
+-- 
+1.5.6.5
+

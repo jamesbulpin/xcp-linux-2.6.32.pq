@@ -1,0 +1,277 @@
+blkback:
+
+diff -r 29dcb13e81ab drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 19:59:20 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 21:33:31 2010 -0700
+@@ -415,7 +415,8 @@
+ 	blkif->st_oo_req = 0;
+ }
+ 
+-int blkif_schedule(void *arg)
++static int
++blkif_queue_run(void *arg)
+ {
+ 	blkif_t *blkif = arg;
+ 
+@@ -456,11 +457,50 @@
+ 	if (debug_lvl)
+ 		printk(KERN_DEBUG "%s: exiting\n", current->comm);
+ 
++	blkif->remove_requested = 0;
++	blkif->xenblkd = NULL;
+ 	blkback_close(blkif->be);
+ 
+ 	return 0;
+ }
+ 
++pid_t
++blkif_queue_start(blkif_t *blkif, const char *devname)
++{
++	struct task_struct *tsk;
++	const char *p;
++
++	BUG_ON(!blkif->bdev);
++	BUG_ON(!blkif->blk_rings.common.sring);
++	BUG_ON(blkif->xenblkd);
++
++	p = strrchr(devname, '/');
++	devname = p ? p + 1 : devname;
++
++	tsk = kthread_run(blkif_queue_run, blkif,
++			  "xb.%05d.%s", blkif->domid, devname);
++	if (IS_ERR(tsk))
++		return PTR_ERR(tsk);
++
++	blkif->xenblkd = tsk;
++
++	return tsk->pid;
++}
++
++int
++blkif_queue_stop(blkif_t *blkif)
++{
++	int err = 0;
++
++	if (blkif->xenblkd) {
++		blkif->remove_requested = 1;
++		wake_up_process(blkif->xenblkd);
++		err = -EBUSY;
++	}
++
++	return err;
++}
++
+ /******************************************************************
+  * COMPLETION CALLBACK -- Called as bh->b_end_io()
+  */
+diff -r 29dcb13e81ab drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 19:59:20 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 21:33:31 2010 -0700
+@@ -127,6 +127,9 @@
+ int blkif_sector_size(blkif_t *blkif);
+ unsigned int blkif_info(blkif_t *blkif);
+ 
++pid_t blkif_queue_start(blkif_t *blkif, const char *name);
++int blkif_queue_stop(blkif_t *blkif);
++
+ struct phys_req {
+ 	unsigned short       dev;
+ 	unsigned short       nr_sects;
+@@ -139,7 +142,6 @@
+ void blkif_xenbus_init(void);
+ 
+ irqreturn_t blkif_be_int(int irq, void *dev_id);
+-int blkif_schedule(void *arg);
+ 
+ void blkif_notify_work(blkif_t *blkif);
+ 
+diff -r 29dcb13e81ab drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 19:59:20 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 21:33:31 2010 -0700
+@@ -31,6 +31,7 @@
+ {
+ 	struct mutex mutex;
+ 	struct xenbus_device *dev;
++	char *devname;
+ 	blkif_t *blkif;
+ 	struct xenbus_watch backend_watch;
+ 	struct xenbus_watch shutdown_watch;
+@@ -53,67 +54,56 @@
+ module_param_named(max_ring_page_order, blkif_max_ring_page_order, int, 0);
+ MODULE_PARM_DESC(max_ring_page_order, "Order of maximum VM shared ring size");
+ 
+-static int blkback_name(blkif_t *blkif, char *buf)
++static void
++blkback_queue_start(struct backend_info *be)
+ {
+-	char *devpath, *devname;
+-	struct xenbus_device *dev = blkif->be->dev;
++	struct xenbus_device *xbdev = be->dev;
++	blkif_t *blkif = be->blkif;
++	pid_t pid;
++	int err;
+ 
+-	devpath = xenbus_read(XBT_NIL, dev->nodename, "dev", NULL);
+-	if (IS_ERR(devpath)) 
+-		return PTR_ERR(devpath);
+-	
+-	if ((devname = strstr(devpath, "/dev/")) != NULL)
+-		devname += strlen("/dev/");
+-	else
+-		devname  = devpath;
++	pid = blkif_queue_start(blkif, be->devname);
++	if (pid < 0) {
++		xenbus_dev_fatal(xbdev, pid, "starting xenblkd");
++		blkif_bdev_close(blkif);
++		return;
++	}
+ 
+-	snprintf(buf, TASK_COMM_LEN, "xb.%05d.%s", blkif->domid, devname);
+-	kfree(devpath);
+-	
+-	return 0;
++	be->kthread_pid = pid;
++	atomic_inc(&be->refcnt);
++
++	err = xenbus_printf(XBT_NIL, xbdev->nodename, "kthread-pid",
++			    "%d", be->kthread_pid);
++	if (err) {
++		xenbus_dev_fatal(xbdev, err, "write kthread-pid");
++		blkif_queue_stop(blkif);
++		return;
++	}
+ }
+ 
+ static void update_blkif_status(blkif_t *blkif)
+-{ 
+-	int err;
+-	char name[TASK_COMM_LEN];
++{
++	struct backend_info *be = blkif->be;
++	struct xenbus_device *xbdev = be->dev;
++
++	printk(KERN_DEBUG
++	       "update_blkif_status: irq=%d, bdev=%p, state=%d\n",
++	       blkif->irq, blkif->bdev, xbdev->state);
+ 
+ 	/* Not ready to connect? */
+ 	if (!blkif->irq || !blkif->bdev)
+ 		return;
+ 
+ 	/* Already connected? */
+-	if (blkif->be->dev->state == XenbusStateConnected)
++	if (xbdev->state == XenbusStateConnected)
+ 		return;
+ 
+ 	/* Attempt to connect: exit if we fail to. */
+-	connect(blkif->be);
+-	if (blkif->be->dev->state != XenbusStateConnected)
++	connect(be);
++	if (xbdev->state != XenbusStateConnected)
+ 		return;
+ 
+-	err = blkback_name(blkif, name);
+-	if (err) {
+-		xenbus_dev_error(blkif->be->dev, err, "get blkback dev name");
+-		return;
+-	}
+-
+-	blkif->xenblkd = kthread_run(blkif_schedule, blkif, name);
+-	if (IS_ERR(blkif->xenblkd)) {
+-		err = PTR_ERR(blkif->xenblkd);
+-		blkif->xenblkd = NULL;
+-		xenbus_dev_error(blkif->be->dev, err, "start xenblkd");
+-		return;
+-	}
+-	
+-	blkif->be->kthread_pid = blkif->xenblkd->pid;
+-	atomic_inc(&blkif->be->refcnt);
+-
+-	err = xenbus_printf(XBT_NIL, blkif->be->dev->nodename, "kthread-pid",
+-			    "%d", blkif->xenblkd->pid);
+-	if (err) {
+-		xenbus_dev_error(blkif->be->dev, err, "write kthread-pid");
+-		return;
+-	}
++	blkback_queue_start(be);
+ }
+ 
+ 
+@@ -258,19 +248,6 @@
+ 	be->group_added = 0;
+ }
+ 
+-static int kthread_remove(struct backend_info *be)
+-{
+-	blkif_t *blkif = be->blkif;
+-
+-	if (!blkif || !blkif->xenblkd)
+-		return 0;
+-
+-	blkif->remove_requested = 1;
+-	wake_up_process(blkif->xenblkd);
+-
+-	return -EBUSY;
+-}
+-
+ static void signal_shutdown(struct backend_info *be)
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+@@ -343,10 +320,11 @@
+ 		be->pause_watch.node = NULL;
+ 	}
+ 
+-	if (kthread_remove(be))
++	if (blkif_queue_stop(be->blkif))
+ 		WPRINTK("BAD REMOVE REQUEST for %s\n", xbdev->nodename);
+ 
+ 	xenvbd_sysfs_delif(xbdev);
++	kfree(be->devname);
+ 	backend_release(be);
+ 
+ 	xbdev->dev.driver_data = NULL;
+@@ -368,11 +346,10 @@
+ 	blkif_bdev_close(blkif);
+ 	blkif->be->major = 0;
+ 	blkif->be->minor = 0;
+-	blkif->remove_requested = 0;
+ 
++	be->kthread_pid = 0;
+ 	mutex_unlock(&be->mutex);
+ 
+-	blkif->xenblkd = NULL;
+ 	backend_release(blkif->be);
+ }
+ 
+@@ -427,7 +404,7 @@
+ 	xenbus_write_state(dev, XenbusStateClosing);
+ 	
+ 	if (len == sizeof("force") - 1 && !memcmp(type, "force", len))
+-		if (!kthread_remove(be))
++		if (!blkif_queue_stop(be->blkif))
+ 			signal_shutdown(be); /* shutdown immediately */
+ 
+ 	kfree(type);
+@@ -535,6 +512,13 @@
+ 	/* setup back pointer */
+ 	be->blkif->be = be;
+ 
++	be->devname = xenbus_read(XBT_NIL, dev->nodename, "dev", NULL);
++	if (IS_ERR(be->devname)) {
++		err = PTR_ERR(be->devname);
++		xenbus_dev_fatal(dev, err, "reading dev");
++		goto fail;
++	}
++
+ 	err = xenvbd_sysfs_addif(dev);
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err, "creating sysfs entries");
+@@ -725,7 +709,7 @@
+ 		break;
+ 
+ 	case XenbusStateClosed:
+-		if (!kthread_remove(be))
++		if (!blkif_queue_stop(be->blkif))
+ 			signal_shutdown(be);
+ 		break;
+ 

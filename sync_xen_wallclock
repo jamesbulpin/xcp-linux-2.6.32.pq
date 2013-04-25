@@ -1,0 +1,244 @@
+diff -r c5d959471382 arch/arm/kernel/time.c
+--- a/arch/arm/kernel/time.c	Wed May 26 16:59:26 2010 +0100
++++ b/arch/arm/kernel/time.c	Fri May 28 11:04:17 2010 +0100
+@@ -288,7 +288,7 @@
+ 
+ 	ntp_clear();
+ 	write_sequnlock_irq(&xtime_lock);
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ 	return 0;
+ }
+ 
+diff -r c5d959471382 arch/cris/kernel/time.c
+--- a/arch/cris/kernel/time.c	Wed May 26 16:59:26 2010 +0100
++++ b/arch/cris/kernel/time.c	Fri May 28 11:04:17 2010 +0100
+@@ -104,7 +104,7 @@
+ 
+ 	ntp_clear();
+ 	write_sequnlock_irq(&xtime_lock);
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ 	return 0;
+ }
+ 
+diff -r c5d959471382 arch/sparc/kernel/time_32.c
+--- a/arch/sparc/kernel/time_32.c	Wed May 26 16:59:26 2010 +0100
++++ b/arch/sparc/kernel/time_32.c	Fri May 28 11:04:17 2010 +0100
+@@ -285,7 +285,7 @@
+ 	write_seqlock_irq(&xtime_lock);
+ 	ret = bus_do_settimeofday(tv);
+ 	write_sequnlock_irq(&xtime_lock);
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ 	return ret;
+ }
+ 
+diff -r c5d959471382 arch/x86/kernel/rtc.c
+--- a/arch/x86/kernel/rtc.c	Wed May 26 16:59:26 2010 +0100
++++ b/arch/x86/kernel/rtc.c	Fri May 28 11:04:17 2010 +0100
+@@ -166,17 +166,13 @@
+ }
+ EXPORT_SYMBOL(rtc_cmos_write);
+ 
++
+ int update_persistent_clock(struct timespec now)
+ {
+ 	unsigned long flags;
+ 	int retval;
+ 
+-#ifdef CONFIG_XEN
+-	if (xen_update_persistent_clock() < 0 || xen_independent_wallclock())
+-		return 0;
+-#endif
+-
+-	spin_lock_irqsave(&rtc_lock, flags);
++	spin_lock_irqsave(&rtc_lock, flags); 
+ 	retval = x86_platform.set_wallclock(now.tv_sec);
+ 	spin_unlock_irqrestore(&rtc_lock, flags);
+ 
+diff -r c5d959471382 arch/x86/kernel/time-xen.c
+--- a/arch/x86/kernel/time-xen.c	Wed May 26 16:59:26 2010 +0100
++++ b/arch/x86/kernel/time-xen.c	Fri May 28 11:04:17 2010 +0100
+@@ -79,7 +79,7 @@
+ 
+ static void __clock_was_set(struct work_struct *unused)
+ {
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ }
+ static DECLARE_WORK(clock_was_set_work, __clock_was_set);
+ 
+@@ -308,7 +308,7 @@
+ 	struct xen_platform_op op;
+ 
+ 	BUG_ON(!is_initial_xendomain());
+-	if (!ntp_synced() || independent_wallclock)
++	if (independent_wallclock)
+ 		return;
+ 
+ 	write_seqlock_irq(&xtime_lock);
+@@ -731,13 +731,19 @@
+ 	ts->tv_nsec = 0;
+ }
+ 
+-int xen_update_persistent_clock(void)
++int xen_update_persistent_clock(struct notifier_block *this,
++		unsigned long event, void *ptr)
+ {
+ 	if (!is_initial_xendomain())
+ 		return -1;
+ 	mod_timer(&sync_xen_wallclock_timer, jiffies + 1);
+ 	return 0;
+ }
++
++static struct notifier_block xen_clock_was_set = {
++	.notifier_call  = xen_update_persistent_clock,
++};
++
+ 
+ /* Dynamically-mapped IRQ. */
+ static int __read_mostly timer_irq = -1;
+@@ -785,6 +791,8 @@
+ 
+ 	/* Cannot request_irq() until kmem is initialised. */
+ 	late_time_init = setup_cpu0_timer_irq;
++	if (is_initial_xendomain())
++		atomic_notifier_chain_register(&clockset_notifier_list, &xen_clock_was_set);
+ 
+ 	if (!(duty_limit + 2))
+ 		duty_limit = __fls(nr_cpu_ids);
+diff -r c5d959471382 drivers/xen/manage.c
+--- a/drivers/xen/manage.c	Wed May 26 16:59:26 2010 +0100
++++ b/drivers/xen/manage.c	Fri May 28 11:04:17 2010 +0100
+@@ -130,7 +130,7 @@
+ 	dpm_resume_end(PMSG_RESUME);
+ 
+ 	/* Make sure timer events get retriggered on all CPUs */
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ 
+ out_thaw:
+ #ifdef CONFIG_PREEMPT
+diff -r c5d959471382 include/linux/hrtimer.h
+--- a/include/linux/hrtimer.h	Wed May 26 16:59:26 2010 +0100
++++ b/include/linux/hrtimer.h	Fri May 28 11:04:17 2010 +0100
+@@ -254,7 +254,6 @@
+ #ifdef CONFIG_HIGH_RES_TIMERS
+ struct clock_event_device;
+ 
+-extern void clock_was_set(void);
+ extern void hres_timers_resume(void);
+ extern void hrtimer_interrupt(struct clock_event_device *dev);
+ 
+@@ -289,12 +288,6 @@
+ # define MONOTONIC_RES_NSEC	LOW_RES_NSEC
+ # define KTIME_MONOTONIC_RES	KTIME_LOW_RES
+ 
+-/*
+- * clock_was_set() is a NOP for non- high-resolution systems. The
+- * time-sorted order guarantees that a timer does not expire early and
+- * is expired in the next softirq when the clock was advanced.
+- */
+-static inline void clock_was_set(void) { }
+ static inline void hrtimer_peek_ahead_timers(void) { }
+ 
+ static inline void hres_timers_resume(void) { }
+diff -r c5d959471382 include/linux/time.h
+--- a/include/linux/time.h	Wed May 26 16:59:26 2010 +0100
++++ b/include/linux/time.h	Fri May 28 11:04:17 2010 +0100
+@@ -7,6 +7,7 @@
+ # include <linux/cache.h>
+ # include <linux/seqlock.h>
+ # include <linux/math64.h>
++# include <linux/notifier.h>
+ #endif
+ 
+ #ifndef _STRUCT_TIMESPEC
+@@ -134,6 +135,7 @@
+ extern void do_gettimeofday(struct timeval *tv);
+ extern int do_settimeofday(struct timespec *tv);
+ extern int do_sys_settimeofday(struct timespec *tv, struct timezone *tz);
++extern struct atomic_notifier_head clockset_notifier_list;
+ #define do_posix_clock_monotonic_gettime(ts) ktime_get_ts(ts)
+ extern long do_utimes(int dfd, char __user *filename, struct timespec *times, int flags);
+ struct itimerval;
+diff -r c5d959471382 kernel/hrtimer.c
+--- a/kernel/hrtimer.c	Wed May 26 16:59:26 2010 +0100
++++ b/kernel/hrtimer.c	Fri May 28 11:04:17 2010 +0100
+@@ -647,11 +647,16 @@
+  * resolution timer interrupts. On UP we just disable interrupts and
+  * call the high resolution interrupt code.
+  */
+-void clock_was_set(void)
++static int clock_set_event(struct notifier_block *this, unsigned long event,
++		void *ptr)
+ {
+ 	/* Retrigger the CPU local events everywhere */
+ 	on_each_cpu(retrigger_next_event, NULL, 1);
+ }
++
++static struct notifier_block hrt_clock_was_set = {
++	.notifier_call  = clock_set_event,
++};
+ 
+ /*
+  * During resume we might have to reprogram the high resolution timer
+@@ -1728,6 +1733,7 @@
+ 			  (void *)(long)smp_processor_id());
+ 	register_cpu_notifier(&hrtimers_nb);
+ #ifdef CONFIG_HIGH_RES_TIMERS
++	atomic_notifier_chain_register(&clockset_notifier_list, &hrt_clock_was_set);
+ 	open_softirq(HRTIMER_SOFTIRQ, run_hrtimer_softirq);
+ #endif
+ }
+diff -r c5d959471382 kernel/time.c
+--- a/kernel/time.c	Wed May 26 16:59:26 2010 +0100
++++ b/kernel/time.c	Fri May 28 11:04:17 2010 +0100
+@@ -138,7 +138,7 @@
+ 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
+ 	update_xtime_cache(0);
+ 	write_sequnlock_irq(&xtime_lock);
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ }
+ 
+ /*
+diff -r c5d959471382 kernel/time/timekeeping.c
+--- a/kernel/time/timekeeping.c	Wed May 26 16:59:26 2010 +0100
++++ b/kernel/time/timekeeping.c	Fri May 28 11:04:17 2010 +0100
+@@ -20,6 +20,11 @@
+ #include <linux/time.h>
+ #include <linux/tick.h>
+ #include <linux/stop_machine.h>
++#include <linux/notifier.h>
++
++ATOMIC_NOTIFIER_HEAD(clockset_notifier_list);
++
++EXPORT_SYMBOL(clockset_notifier_list);
+ 
+ /* Structure holding internal timekeeping values. */
+ struct timekeeper {
+@@ -341,8 +346,7 @@
+ 
+ 	write_sequnlock_irqrestore(&xtime_lock, flags);
+ 
+-	/* signal hrtimers about time change */
+-	clock_was_set();
++	atomic_notifier_call_chain(&clockset_notifier_list, 0, NULL);
+ 
+ 	return 0;
+ }
+diff -r 524c78d20acc arch/x86/include/asm/time.h
+--- a/arch/x86/include/asm/time.h	Tue Jun 22 15:53:59 2010 +0100
++++ b/arch/x86/include/asm/time.h	Tue Jun 22 15:54:28 2010 +0100
+@@ -11,7 +11,8 @@
+ struct timespec;
+ extern int xen_independent_wallclock(void);
+ extern void xen_read_persistent_clock(struct timespec *);
+-extern int xen_update_persistent_clock(void);
++int xen_update_persistent_clock(struct notifier_block *this,
++		unsigned long event, void *ptr);
+ #endif
+ 
+ #endif /* _ASM_X86_TIME_H */

@@ -1,0 +1,303 @@
+From f03e74f3fa91bc3648e2e9784ca5946148174068 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:34 -0700
+Subject: [PATCH 12/18] xen/blktap: Clean up remaining sysfs code.
+
+Remove the refcounting, also in sysfs/driver core.
+
+Signed-off-by: Jake Wires <jake.wires@citrix.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    4 +-
+ drivers/xen/blktap2/control.c |    2 +-
+ drivers/xen/blktap2/sysfs.c   |  156 ++++++++++++------------------------------
+ 3 files changed, 46 insertions(+), 116 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 6254b58..209d5fe 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -117,8 +117,6 @@ struct blktap_ring {
+ 
+ 	dev_t                          devno;
+ 	struct device                 *dev;
+-	atomic_t                       sysfs_refcnt;
+-	struct mutex                   sysfs_mutex;
+ };
+ 
+ struct blktap_statistics {
+@@ -182,7 +180,7 @@ int blktap_ring_destroy(struct blktap *);
+ void blktap_ring_kick_user(struct blktap *);
+ 
+ int blktap_sysfs_init(void);
+-void blktap_sysfs_free(void);
++void blktap_sysfs_exit(void);
+ int blktap_sysfs_create(struct blktap *);
+ void blktap_sysfs_destroy(struct blktap *);
+ 
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 6d7ec35..aba4581 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -214,7 +214,7 @@ blktap_exit(void)
+ {
+ 	blktap_control_exit();
+ 	blktap_ring_exit();
+-	blktap_sysfs_free();
++	blktap_sysfs_exit();
+ 	blktap_device_exit();
+ 	blktap_request_pool_free();
+ }
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 051dbac..0d4495f 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -10,87 +10,46 @@
+ int blktap_debug_level = 1;
+ 
+ static struct class *class;
+-static DECLARE_WAIT_QUEUE_HEAD(sysfs_wq);
+ 
+-static inline void
+-blktap_sysfs_get(struct blktap *tap)
+-{
+-	atomic_inc(&tap->ring.sysfs_refcnt);
+-}
+-
+-static inline void
+-blktap_sysfs_put(struct blktap *tap)
+-{
+-	if (atomic_dec_and_test(&tap->ring.sysfs_refcnt))
+-		wake_up(&sysfs_wq);
+-}
+-
+-static inline void
+-blktap_sysfs_enter(struct blktap *tap)
+-{
+-	blktap_sysfs_get(tap);               /* pin sysfs device */
+-	mutex_lock(&tap->ring.sysfs_mutex);  /* serialize sysfs operations */
+-}
+-
+-static inline void
+-blktap_sysfs_exit(struct blktap *tap)
+-{
+-	mutex_unlock(&tap->ring.sysfs_mutex);
+-	blktap_sysfs_put(tap);
+-}
+-
+-#define CLASS_DEVICE_ATTR(a,b,c,d) DEVICE_ATTR(a,b,c,d)
+ static ssize_t
+ blktap_sysfs_set_name(struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
+ {
+-	int err;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
++	struct blktap *tap;
+ 
+-	blktap_sysfs_enter(tap);
++	tap = dev_get_drvdata(dev);
++	if (!tap)
++		return 0;
+ 
+-	if (!tap->ring.dev) {
+-		err = -ENODEV;
+-		goto out;
+-	}
+-	if (size > BLKTAP2_MAX_MESSAGE_LEN) {
+-		err = -ENAMETOOLONG;
+-		goto out;
+-	}
++	if (size >= BLKTAP2_MAX_MESSAGE_LEN)
++		return -ENAMETOOLONG;
+ 
+-	if (strnlen(buf, BLKTAP2_MAX_MESSAGE_LEN) >= BLKTAP2_MAX_MESSAGE_LEN) {
+-		err = -EINVAL;
+-		goto out;
+-	}
++	if (strnlen(buf, size) != size)
++		return -EINVAL;
+ 
+-	snprintf(tap->name, sizeof(tap->name) - 1, "%s", buf);
+-	err = size;
++	strcpy(tap->name, buf);
+ 
+-out:
+-	blktap_sysfs_exit(tap);	
+-	return err;
++	return size;
+ }
+ 
+ static ssize_t
+ blktap_sysfs_get_name(struct device *dev, struct device_attribute *attr, char *buf)
+ {
++	struct blktap *tap;
+ 	ssize_t size;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+-	blktap_sysfs_enter(tap);
++	tap = dev_get_drvdata(dev);
++	if (!tap)
++		return 0;
+ 
+-	if (!tap->ring.dev)
+-		size = -ENODEV;
+-	else if (tap->name[0])
++	if (tap->name[0])
+ 		size = sprintf(buf, "%s\n", tap->name);
+ 	else
+ 		size = sprintf(buf, "%d\n", tap->minor);
+ 
+-	blktap_sysfs_exit(tap);
+-
+ 	return size;
+ }
+-CLASS_DEVICE_ATTR(name, S_IRUSR | S_IWUSR,
+-		  blktap_sysfs_get_name, blktap_sysfs_set_name);
++static DEVICE_ATTR(name, S_IRUGO|S_IWUSR,
++		   blktap_sysfs_get_name, blktap_sysfs_set_name);
+ 
+ static void
+ blktap_sysfs_remove_work(struct work_struct *work)
+@@ -131,22 +90,18 @@ wait:
+ 
+ 	return size;
+ }
+-CLASS_DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
++static DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
+ 
+ static ssize_t
+ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-	char *tmp;
+-	int i, ret;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+-
+-	tmp = buf;
+-	blktap_sysfs_get(tap);
++	struct blktap *tap;
++	char *tmp = buf;
++	int i;
+ 
+-	if (!tap->ring.dev) {
+-		ret = sprintf(tmp, "no device\n");
+-		goto out;
+-	}
++	tap = dev_get_drvdata(dev);
++	if (!tap)
++		return 0;
+ 
+ 	tmp += sprintf(tmp, "%s (%u:%u), refcnt: %d, dev_inuse: 0x%08lx\n",
+ 		       tap->name, MAJOR(tap->ring.devno),
+@@ -178,15 +133,9 @@ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, cha
+ 			       req->time.tv_usec);
+ 	}
+ 
+-	ret = (tmp - buf) + 1;
+-
+-out:
+-	blktap_sysfs_put(tap);
+-	BTDBG("%s\n", buf);
+-
+-	return ret;
++	return (tmp - buf) + 1;
+ }
+-CLASS_DEVICE_ATTR(debug, S_IRUSR, blktap_sysfs_debug_device, NULL);
++static DEVICE_ATTR(debug, S_IRUGO, blktap_sysfs_debug_device, NULL);
+ 
+ static ssize_t
+ blktap_sysfs_show_task(struct device *dev, struct device_attribute *attr, char *buf)
+@@ -203,21 +152,15 @@ blktap_sysfs_show_task(struct device *dev, struct device_attribute *attr, char *
+ 
+ 	return rv;
+ }
+-DEVICE_ATTR(task, S_IRUSR, blktap_sysfs_show_task, NULL);
++static DEVICE_ATTR(task, S_IRUGO, blktap_sysfs_show_task, NULL);
+ 
+ int
+ blktap_sysfs_create(struct blktap *tap)
+ {
+-	struct blktap_ring *ring;
++	struct blktap_ring *ring = &tap->ring;
+ 	struct device *dev;
+ 	int err = 0;
+ 
+-	if (!class)
+-		return -ENODEV;
+-
+-	ring = &tap->ring;
+-	mutex_init(&ring->sysfs_mutex);
+-	atomic_set(&ring->sysfs_refcnt, 0);
+ 	init_waitqueue_head(&tap->remove_wait);
+ 
+ 	dev = device_create(class, NULL, ring->devno,
+@@ -276,8 +219,8 @@ blktap_sysfs_set_verbosity(struct class *class, const char *buf, size_t size)
+ 
+ 	return -EINVAL;
+ }
+-CLASS_ATTR(verbosity, S_IRUSR | S_IWUSR,
+-	   blktap_sysfs_show_verbosity, blktap_sysfs_set_verbosity);
++static CLASS_ATTR(verbosity, S_IRUGO|S_IWUSR,
++		  blktap_sysfs_show_verbosity, blktap_sysfs_set_verbosity);
+ 
+ static ssize_t
+ blktap_sysfs_show_devices(struct class *class, char *buf)
+@@ -303,43 +246,32 @@ blktap_sysfs_show_devices(struct class *class, char *buf)
+ 
+ 	return ret;
+ }
+-CLASS_ATTR(devices, S_IRUSR, blktap_sysfs_show_devices, NULL);
++static CLASS_ATTR(devices, S_IRUGO, blktap_sysfs_show_devices, NULL);
+ 
+ void
+-blktap_sysfs_free(void)
++blktap_sysfs_exit(void)
+ {
+-	if (!class)
+-		return;
+-
+-	class_remove_file(class, &class_attr_verbosity);
+-	class_remove_file(class, &class_attr_devices);
+-
+-	class_destroy(class);
++	if (class)
++		class_destroy(class);
+ }
+ 
+ int __init
+ blktap_sysfs_init(void)
+ {
+ 	struct class *cls;
+-	int err;
+-
+-	if (class)
+-		return -EEXIST;
++	int err = 0;
+ 
+ 	cls = class_create(THIS_MODULE, "blktap2");
+ 	if (IS_ERR(cls))
+-		return PTR_ERR(cls);
+-
+-	err = class_create_file(cls, &class_attr_verbosity);
+-	if (err)
+-		goto out_unregister;
+-	err = class_create_file(cls, &class_attr_devices);
+-	if (err)
+-		goto out_unregister;
++		err = PTR_ERR(cls);
++	if (!err)
++		err = class_create_file(cls, &class_attr_verbosity);
++	if (!err)
++		err = class_create_file(cls, &class_attr_devices);
++	if (!err)
++		class = cls;
++	else
++		class_destroy(cls);
+ 
+-	class = cls;
+-	return 0;
+-out_unregister:
+-	class_destroy(cls);
+ 	return err;
+ }
+-- 
+1.7.0.4
+

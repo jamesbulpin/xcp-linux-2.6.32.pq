@@ -1,0 +1,93 @@
+Add a new ioctl to /proc/xen/privcmd which allows domctls to be performed
+without using the generic hypercall interface, so that they are available
+on restricted fds.
+
+Causing xen_domctl_t to be defined in the kernel required an
+unfortunate amount of fiddling with the headers. Instead define a
+structure which shadows the common fields in xen_domctl_t structure
+and simply pads the domctl specific union.
+
+diff -r 12022758c3f7 drivers/xen/privcmd/privcmd.c
+--- a/drivers/xen/privcmd/privcmd.c	Fri Jan 15 13:12:03 2010 +0000
++++ b/drivers/xen/privcmd/privcmd.c	Fri Jan 15 14:59:48 2010 +0000
+@@ -284,6 +284,22 @@
+         }
+         break;
+ 
++        case IOCTL_PRIVCMD_DOMCTL: {
++                privcmd_domctl_t xd;
++
++                if (copy_from_user(&xd, udata, sizeof(xd)))
++                        return -EFAULT;
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID &&
++                    xd.domain != fdata->restrict_domid)
++                        return -EACCES;
++                ret = HYPERVISOR_domctl(&xd);
++                if (ret >= 0) {
++                        if (copy_to_user(udata, &xd, sizeof(xd)))
++                                ret = -EFAULT;
++                }
++        }
++        break;
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff -r 12022758c3f7 arch/x86/include/mach-xen/asm/hypercall_32.h
+--- a/arch/x86/include/mach-xen/asm/hypercall_32.h	Fri Jan 15 13:12:03 2010 +0000
++++ b/arch/x86/include/mach-xen/asm/hypercall_32.h	Fri Jan 15 14:59:48 2010 +0000
+@@ -60,3 +60,11 @@
+ 	return _hypercall5(int, update_va_mapping_otherdomain, va,
+ 			   new_val.pte_low, pte_hi, flags, domid);
+ }
++
++static inline int __must_check
++HYPERVISOR_domctl(
++        void *xd)
++{
++        return _hypercall1(int, domctl, xd);
++}
++
+diff -r 12022758c3f7 arch/x86/include/mach-xen/asm/hypercall_64.h
+--- a/arch/x86/include/mach-xen/asm/hypercall_64.h	Fri Jan 15 13:12:03 2010 +0000
++++ b/arch/x86/include/mach-xen/asm/hypercall_64.h	Fri Jan 15 14:59:48 2010 +0000
+@@ -52,3 +52,11 @@
+ {
+ 	return _hypercall2(int, set_segment_base, reg, value);
+ }
++
++static inline int __must_check
++HYPERVISOR_domctl(
++        void *xd)
++{
++	return _hypercall1(int, domctl, xd);
++}
++
+diff -r 12022758c3f7 include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Fri Jan 15 13:12:03 2010 +0000
++++ b/include/xen/public/privcmd.h	Fri Jan 15 14:59:48 2010 +0000
+@@ -68,6 +68,16 @@
+ 	domid_t domid;
+ } privcmd_restrict_domid_t;
+ 
++/* privcmd only needs to access the domain field. */
++typedef struct privcmd_domctl {
++	uint32_t cmd;
++	uint32_t interface_version; /* XEN_DOMCTL_INTERFACE_VERSION */
++	domid_t  domain;
++	union {
++		uint8_t                             pad[128];
++	} u  __attribute__((aligned(8)));
++} privcmd_domctl_t;
++
+ /*
+  * @cmd: IOCTL_PRIVCMD_HYPERCALL
+  * @arg: &privcmd_hypercall_t
+@@ -81,5 +91,7 @@
+ 	_IOC(_IOC_NONE, 'P', 4, sizeof(privcmd_mmapbatch_v2_t))
+ #define IOCTL_PRIVCMD_RESTRICT_DOMID				\
+ 	_IOC(_IOC_NONE, 'P', 100, sizeof(privcmd_restrict_domid_t))
++#define IOCTL_PRIVCMD_DOMCTL				\
++	_IOC(_IOC_NONE, 'P', 101, sizeof(privcmd_domctl_t))
+ 
+ #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

@@ -1,0 +1,18 @@
+# HG changeset patch
+# Parent 4aad12dfc3619af51bc6d95524f0ed55d049f63b
+
+diff -r 4aad12dfc361 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jul 04 13:31:09 2012 +0100
++++ b/drivers/xen/blkback/xenbus.c	Wed Jul 04 16:51:00 2012 +0100
+@@ -989,8 +989,9 @@ static void frontend_changed(struct xenb
+ 		blkback_signal_uevents(be);
+ 
+ 		mutex_unlock(&be->mutex);
+-		break;
+-
++		if (xenbus_dev_is_online(dev))
++			break;
++		/* fall through if not online */
+ 	case XenbusStateUnknown:
+ 		/* implies blkif_disconnect() via blkback_remove() */
+ 		device_unregister(&dev->dev);

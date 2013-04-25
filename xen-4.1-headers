@@ -1,0 +1,2458 @@
+diff -r d276beabc4ca arch/x86/kernel/acpi/processor_extcntl_xen.c
+--- a/arch/x86/kernel/acpi/processor_extcntl_xen.c	Fri Jan 14 17:02:57 2011 +0000
++++ b/arch/x86/kernel/acpi/processor_extcntl_xen.c	Thu Jan 20 05:28:14 2011 +0000
+@@ -209,6 +209,7 @@ EXPORT_SYMBOL(arch_acpi_processor_init_e
+ 
+ unsigned int cpufreq_quick_get(unsigned int cpu)
+ {
++#if 0
+ 	xen_platform_op_t op = {
+ 		.cmd			= XENPF_get_cpu_freq,
+ 		.interface_version	= XENPF_INTERFACE_VERSION,
+@@ -216,4 +217,6 @@ unsigned int cpufreq_quick_get(unsigned 
+ 	};
+ 
+ 	return HYPERVISOR_platform_op(&op) == 0 ? op.u.get_cpu_freq.freq : 0;
++#endif
++    return 0;
+ }
+diff -r d276beabc4ca include/xen/interface/arch-x86/hvm/save.h
+--- a/include/xen/interface/arch-x86/hvm/save.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/arch-x86/hvm/save.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -431,9 +431,32 @@ struct hvm_viridian_context {
+ 
+ DECLARE_HVM_SAVE_TYPE(VIRIDIAN, 15, struct hvm_viridian_context);
+ 
++
++/*
++ * The save area of XSAVE/XRSTOR.
++ */
++
++struct hvm_hw_cpu_xsave {
++    uint64_t xfeature_mask;
++    uint64_t xcr0;                 /* Updated by XSETBV */
++    uint64_t xcr0_accum;           /* Updated by XSETBV */
++    struct {
++        struct { char x[512]; } fpu_sse;
++
++        struct {
++            uint64_t xstate_bv;         /* Updated by XRSTOR */
++            uint64_t reserved[7];
++        } xsave_hdr;                    /* The 64-byte header */
++
++        struct { char x[0]; } ymm;    /* YMM */
++    } save_area;
++} __attribute__((packed));
++
++#define CPU_XSAVE_CODE  16
++
+ /* 
+  * Largest type-code in use
+  */
+-#define HVM_SAVE_CODE_MAX 15
++#define HVM_SAVE_CODE_MAX 16
+ 
+ #endif /* __XEN_PUBLIC_HVM_SAVE_X86_H__ */
+diff -r d276beabc4ca include/xen/interface/arch-x86/xen-mca.h
+--- a/include/xen/interface/arch-x86/xen-mca.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/arch-x86/xen-mca.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -233,10 +233,11 @@ struct mcinfo_recovery
+ #define MCINFO_HYPERCALLSIZE	1024
+ #define MCINFO_MAXSIZE		768
+ 
++#define MCINFO_FLAGS_UNCOMPLETE 0x1
+ struct mc_info {
+     /* Number of mcinfo_* entries in mi_data */
+     uint32_t mi_nentries;
+-    uint32_t _pad0;
++    uint32_t flags;
+     uint64_t mi_data[(MCINFO_MAXSIZE - 1) / 8];
+ };
+ typedef struct mc_info mc_info_t;
+@@ -403,6 +404,20 @@ struct xen_mc_mceinject {
+ 	unsigned int mceinj_cpunr;      /* target processor id */
+ };
+ 
++#if defined(__XEN__) || defined(__XEN_TOOLS__)
++#define XEN_MC_inject_v2        6
++#define XEN_MC_INJECT_TYPE_MASK     0x7
++#define XEN_MC_INJECT_TYPE_MCE      0x0
++#define XEN_MC_INJECT_TYPE_CMCI     0x1
++
++#define XEN_MC_INJECT_CPU_BROADCAST 0x8
++
++struct xen_mc_inject_v2 {
++	uint32_t flags;
++	struct xenctl_cpumap cpumap;
++};
++#endif
++
+ struct xen_mc {
+     uint32_t cmd;
+     uint32_t interface_version; /* XEN_MCA_INTERFACE_VERSION */
+@@ -412,6 +427,9 @@ struct xen_mc {
+         struct xen_mc_physcpuinfo  mc_physcpuinfo;
+         struct xen_mc_msrinject    mc_msrinject;
+         struct xen_mc_mceinject    mc_mceinject;
++#if defined(__XEN__) || defined(__XEN_TOOLS__)
++        struct xen_mc_inject_v2    mc_inject_v2;
++#endif
+     } u;
+ };
+ typedef struct xen_mc xen_mc_t;
+diff -r d276beabc4ca include/xen/interface/arch-x86/xen-x86_32.h
+--- a/include/xen/interface/arch-x86/xen-x86_32.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/arch-x86/xen-x86_32.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -108,8 +108,8 @@
+         __guest_handle_ ## name;                                \
+     typedef struct { union { type *p; uint64_aligned_t q; }; }  \
+         __guest_handle_64_ ## name
+-#undef set_xen_guest_handle
+-#define set_xen_guest_handle(hnd, val)                      \
++#undef set_xen_guest_handle_raw
++#define set_xen_guest_handle_raw(hnd, val)                  \
+     do { if ( sizeof(hnd) == 8 ) *(uint64_t *)&(hnd) = 0;   \
+          (hnd).p = val;                                     \
+     } while ( 0 )
+diff -r d276beabc4ca include/xen/interface/arch-x86/xen.h
+--- a/include/xen/interface/arch-x86/xen.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/arch-x86/xen.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -44,13 +44,11 @@
+ #define DEFINE_XEN_GUEST_HANDLE(name)   __DEFINE_XEN_GUEST_HANDLE(name, name)
+ #define __XEN_GUEST_HANDLE(name)        __guest_handle_ ## name
+ #define XEN_GUEST_HANDLE(name)          __XEN_GUEST_HANDLE(name)
+-#define set_xen_guest_handle(hnd, val)  do { (hnd).p = val; } while (0)
++#define set_xen_guest_handle_raw(hnd, val)  do { (hnd).p = val; } while (0)
+ #ifdef __XEN_TOOLS__
+ #define get_xen_guest_handle(val, hnd)  do { val = (hnd).p; } while (0)
+ #endif
+-
+-/* Allow co-existing Linux 2.6.23+ Xen interface definitions. */
+-#define DEFINE_GUEST_HANDLE_STRUCT(name) struct name
++#define set_xen_guest_handle(hnd, val) set_xen_guest_handle_raw(hnd, val)
+ 
+ #if defined(__i386__)
+ #include "xen-x86_32.h"
+diff -r d276beabc4ca include/xen/interface/callback.h
+--- a/include/xen/interface/callback.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/callback.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -82,9 +82,9 @@
+  */
+ #define CALLBACKOP_register                0
+ struct callback_register {
+-	uint16_t type;
+-	uint16_t flags;
+-	xen_callback_t address;
++    uint16_t type;
++    uint16_t flags;
++    xen_callback_t address;
+ };
+ typedef struct callback_register callback_register_t;
+ DEFINE_XEN_GUEST_HANDLE(callback_register_t);
+@@ -109,3 +109,13 @@ DEFINE_XEN_GUEST_HANDLE(callback_unregis
+ #endif
+ 
+ #endif /* __XEN_PUBLIC_CALLBACK_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/domctl.h
+--- a/include/xen/interface/domctl.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/domctl.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -35,12 +35,7 @@
+ #include "xen.h"
+ #include "grant_table.h"
+ 
+-#define XEN_DOMCTL_INTERFACE_VERSION 0x00000006
+-
+-struct xenctl_cpumap {
+-    XEN_GUEST_HANDLE_64(uint8) bitmap;
+-    uint32_t nr_cpus;
+-};
++#define XEN_DOMCTL_INTERFACE_VERSION 0x00000007
+ 
+ /*
+  * NB. xen_domctl.domain is an IN/OUT parameter for this operation.
+@@ -60,10 +55,10 @@ struct xen_domctl_createdomain {
+  /* Should domain memory integrity be verifed by tboot during Sx? */
+ #define _XEN_DOMCTL_CDF_s3_integrity  2
+ #define XEN_DOMCTL_CDF_s3_integrity   (1U<<_XEN_DOMCTL_CDF_s3_integrity)
+-    uint32_t flags;
+  /* Disable out-of-sync shadow page tables? */
+ #define _XEN_DOMCTL_CDF_oos_off       3
+ #define XEN_DOMCTL_CDF_oos_off        (1U<<_XEN_DOMCTL_CDF_oos_off)
++    uint32_t flags;
+ };
+ typedef struct xen_domctl_createdomain xen_domctl_createdomain_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_domctl_createdomain_t);
+@@ -106,6 +101,7 @@ struct xen_domctl_getdomaininfo {
+     uint32_t max_vcpu_id;        /* Maximum VCPUID in use by this domain. */
+     uint32_t ssidref;
+     xen_domain_handle_t handle;
++    uint32_t cpupool;
+ };
+ typedef struct xen_domctl_getdomaininfo xen_domctl_getdomaininfo_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_domctl_getdomaininfo_t);
+@@ -161,6 +157,14 @@ struct xen_domctl_getpageframeinfo2 {
+ typedef struct xen_domctl_getpageframeinfo2 xen_domctl_getpageframeinfo2_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_domctl_getpageframeinfo2_t);
+ 
++/* XEN_DOMCTL_getpageframeinfo3 */
++struct xen_domctl_getpageframeinfo3 {
++    /* IN variables. */
++    uint64_aligned_t num;
++    /* IN/OUT variables. */
++    XEN_GUEST_HANDLE_64(xen_pfn_t) array;
++};
++
+ 
+ /*
+  * Control shadow pagetables operation
+@@ -295,6 +299,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_max_v
+ /* Scheduler types. */
+ #define XEN_SCHEDULER_SEDF     4
+ #define XEN_SCHEDULER_CREDIT   5
++#define XEN_SCHEDULER_CREDIT2  6
++#define XEN_SCHEDULER_ARINC653 7
+ /* Set or get info? */
+ #define XEN_DOMCTL_SCHEDOP_putinfo 0
+ #define XEN_DOMCTL_SCHEDOP_getinfo 1
+@@ -313,6 +319,9 @@ struct xen_domctl_scheduler_op {
+             uint16_t weight;
+             uint16_t cap;
+         } credit;
++        struct xen_domctl_sched_credit2 {
++            uint16_t weight;
++        } credit2;
+     } u;
+ };
+ typedef struct xen_domctl_scheduler_op xen_domctl_scheduler_op_t;
+@@ -431,6 +440,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_real_
+ #define XEN_DOMCTL_SENDTRIGGER_RESET  1
+ #define XEN_DOMCTL_SENDTRIGGER_INIT   2
+ #define XEN_DOMCTL_SENDTRIGGER_POWER  3
++#define XEN_DOMCTL_SENDTRIGGER_SLEEP  4
+ struct xen_domctl_sendtrigger {
+     uint32_t  trigger;  /* IN */
+     uint32_t  vcpu;     /* IN */
+@@ -772,6 +782,30 @@ struct xen_domctl_mem_sharing_op {
+ typedef struct xen_domctl_mem_sharing_op xen_domctl_mem_sharing_op_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_domctl_mem_sharing_op_t);
+ 
++#if defined(__i386__) || defined(__x86_64__)
++/* XEN_DOMCTL_setvcpuextstate */
++/* XEN_DOMCTL_getvcpuextstate */
++struct xen_domctl_vcpuextstate {
++    /* IN: VCPU that this call applies to. */
++    uint32_t         vcpu;
++    /*
++     * SET: xfeature support mask of struct (IN)
++     * GET: xfeature support mask of struct (IN/OUT)
++     * xfeature mask is served as identifications of the saving format
++     * so that compatible CPUs can have a check on format to decide
++     * whether it can restore.
++     */
++    uint64_aligned_t         xfeature_mask;
++    /*
++     * SET: Size of struct (IN)
++     * GET: Size of struct (IN/OUT)
++     */
++    uint64_aligned_t         size;
++    XEN_GUEST_HANDLE_64(uint64) buffer;
++};
++typedef struct xen_domctl_vcpuextstate xen_domctl_vcpuextstate_t;
++DEFINE_XEN_GUEST_HANDLE(xen_domctl_vcpuextstate_t);
++#endif
+ 
+ struct xen_domctl {
+     uint32_t cmd;
+@@ -832,6 +866,9 @@ struct xen_domctl {
+ #define XEN_DOMCTL_disable_migrate               58
+ #define XEN_DOMCTL_gettscinfo                    59
+ #define XEN_DOMCTL_settscinfo                    60
++#define XEN_DOMCTL_getpageframeinfo3             61
++#define XEN_DOMCTL_setvcpuextstate               62
++#define XEN_DOMCTL_getvcpuextstate               63
+ #define XEN_DOMCTL_gdbsx_guestmemio            1000
+ #define XEN_DOMCTL_gdbsx_pausevcpu             1001
+ #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
+@@ -844,6 +881,7 @@ struct xen_domctl {
+         struct xen_domctl_getmemlist        getmemlist;
+         struct xen_domctl_getpageframeinfo  getpageframeinfo;
+         struct xen_domctl_getpageframeinfo2 getpageframeinfo2;
++        struct xen_domctl_getpageframeinfo3 getpageframeinfo3;
+         struct xen_domctl_vcpuaffinity      vcpuaffinity;
+         struct xen_domctl_shadow_op         shadow_op;
+         struct xen_domctl_max_mem           max_mem;
+@@ -881,6 +919,7 @@ struct xen_domctl {
+         struct xen_domctl_mem_sharing_op    mem_sharing_op;
+ #if defined(__i386__) || defined(__x86_64__)
+         struct xen_domctl_cpuid             cpuid;
++        struct xen_domctl_vcpuextstate      vcpuextstate;
+ #endif
+         struct xen_domctl_gdbsx_memio       gdbsx_guest_memio;
+         struct xen_domctl_gdbsx_pauseunp_vcpu gdbsx_pauseunp_vcpu;
+diff -r d276beabc4ca include/xen/interface/elfnote.h
+--- a/include/xen/interface/elfnote.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/elfnote.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -173,14 +173,20 @@
+ #define XEN_ELFNOTE_INIT_P2M      15
+ 
+ /*
++ * Whether or not the guest can deal with being passed an initrd not
++ * mapped through its initial page tables.
++ */
++#define XEN_ELFNOTE_MOD_START_PFN 16
++
++/*
+  * The number of the highest elfnote defined.
+  */
+-#define XEN_ELFNOTE_MAX XEN_ELFNOTE_INIT_P2M
++#define XEN_ELFNOTE_MAX XEN_ELFNOTE_MOD_START_PFN
+ 
+ /*
+  * System information exported through crash notes.
+  *
+- * The kexec / kdump code will create one XEN_ELFNOTE_CRASH_INFO
++ * The kexec / kdump code will create one XEN_ELFNOTE_CRASH_INFO 
+  * note in case of a system crash. This note will contain various
+  * information about the system, see xen/include/xen/elfcore.h.
+  */
+@@ -189,7 +195,7 @@
+ /*
+  * System registers exported through crash notes.
+  *
+- * The kexec / kdump code will create one XEN_ELFNOTE_CRASH_REGS
++ * The kexec / kdump code will create one XEN_ELFNOTE_CRASH_REGS 
+  * note per cpu in case of a system crash. This note is architecture
+  * specific and will contain registers not saved in the "CORE" note.
+  * See xen/include/xen/elfcore.h for more information.
+diff -r d276beabc4ca include/xen/interface/event_channel.h
+--- a/include/xen/interface/event_channel.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/event_channel.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * event_channel.h
+- *
++ * 
+  * Event channels between domains.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -27,7 +27,7 @@
+ #ifndef __XEN_PUBLIC_EVENT_CHANNEL_H__
+ #define __XEN_PUBLIC_EVENT_CHANNEL_H__
+ 
+-#include <xen/interface/xen.h>
++#include "xen.h"
+ 
+ /*
+  * Prototype for this hypercall is:
+@@ -250,8 +250,17 @@ struct evtchn_op {
+         struct evtchn_unmask           unmask;
+     } u;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(evtchn_op);
+ typedef struct evtchn_op evtchn_op_t;
+ DEFINE_XEN_GUEST_HANDLE(evtchn_op_t);
+ 
+ #endif /* __XEN_PUBLIC_EVENT_CHANNEL_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/features.h
+--- a/include/xen/interface/features.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/features.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * features.h
+- *
++ * 
+  * Feature flags, reported by XENVER_get_features.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -68,6 +68,25 @@
+  */
+ #define XENFEAT_gnttab_map_avail_bits      7
+ 
++/* x86: Does this Xen host support the HVM callback vector type? */
++#define XENFEAT_hvm_callback_vector        8
++
++/* x86: pvclock algorithm is safe to use on HVM */
++#define XENFEAT_hvm_safe_pvclock           9
++
++/* x86: pirq can be used by HVM guests */
++#define XENFEAT_hvm_pirqs           10
++
+ #define XENFEAT_NR_SUBMAPS 1
+ 
+ #endif /* __XEN_PUBLIC_FEATURES_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/grant_table.h
+--- a/include/xen/interface/grant_table.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/grant_table.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,9 +1,9 @@
+ /******************************************************************************
+  * grant_table.h
+- *
++ * 
+  * Interface for granting foreign access to page frames, and receiving
+  * page-ownership transfers.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -37,10 +37,10 @@
+ /* Some rough guidelines on accessing and updating grant-table entries
+  * in a concurrency-safe manner. For more information, Linux contains a
+  * reference implementation for guest OSes (arch/xen/kernel/grant_table.c).
+- *
++ * 
+  * NB. WMB is a no-op on current-generation x86 processors. However, a
+  *     compiler barrier will still be required.
+- *
++ * 
+  * Introducing a valid entry into the grant table:
+  *  1. Write ent->domid.
+  *  2. Write ent->frame:
+@@ -49,7 +49,7 @@
+  *                           frame, or zero if none.
+  *  3. Write memory barrier (WMB).
+  *  4. Write ent->flags, inc. valid type.
+- *
++ * 
+  * Invalidating an unused GTF_permit_access entry:
+  *  1. flags = ent->flags.
+  *  2. Observe that !(flags & (GTF_reading|GTF_writing)).
+@@ -61,7 +61,7 @@
+  *  This cannot be done directly. Request assistance from the domain controller
+  *  which can set a timeout on the use of a grant entry and take necessary
+  *  action. (NB. This is not yet implemented!).
+- *
++ * 
+  * Invalidating an unused GTF_accept_transfer entry:
+  *  1. flags = ent->flags.
+  *  2. Observe that !(flags & GTF_transfer_committed). [*]
+@@ -79,7 +79,7 @@
+  *
+  * Changing a GTF_permit_access from writable to read-only:
+  *  Use SMP-safe CMPXCHG to set GTF_readonly, while checking !GTF_writing.
+- *
++ * 
+  * Changing a GTF_permit_access from read-only to writable:
+  *  Use SMP-safe bit-setting instruction.
+  */
+@@ -270,7 +270,7 @@ typedef uint32_t grant_handle_t;
+  *  2. If GNTMAP_host_map is specified then a mapping will be added at
+  *     either a host virtual address in the current address space, or at
+  *     a PTE at the specified machine address.  The type of mapping to
+- *     perform is selected through the GNTMAP_contains_pte flag, and the
++ *     perform is selected through the GNTMAP_contains_pte flag, and the 
+  *     address is specified in <host_addr>.
+  *  3. Mappings should only be destroyed via GNTTABOP_unmap_grant_ref. If a
+  *     host mapping is destroyed by other means then it is *NOT* guaranteed
+@@ -288,7 +288,6 @@ struct gnttab_map_grant_ref {
+     grant_handle_t handle;
+     uint64_t dev_bus_addr;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_map_grant_ref);
+ typedef struct gnttab_map_grant_ref gnttab_map_grant_ref_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_map_grant_ref_t);
+ 
+@@ -312,7 +311,6 @@ struct gnttab_unmap_grant_ref {
+     /* OUT parameters. */
+     int16_t  status;              /* GNTST_* */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_unmap_grant_ref);
+ typedef struct gnttab_unmap_grant_ref gnttab_unmap_grant_ref_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_unmap_grant_ref_t);
+ 
+@@ -334,7 +332,6 @@ struct gnttab_setup_table {
+     int16_t  status;              /* GNTST_* */
+     XEN_GUEST_HANDLE(ulong) frame_list;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_setup_table);
+ typedef struct gnttab_setup_table gnttab_setup_table_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_setup_table_t);
+ 
+@@ -349,7 +346,6 @@ struct gnttab_dump_table {
+     /* OUT parameters. */
+     int16_t status;               /* GNTST_* */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_dump_table);
+ typedef struct gnttab_dump_table gnttab_dump_table_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_dump_table_t);
+ 
+@@ -357,7 +353,7 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_dump_tabl
+  * GNTTABOP_transfer_grant_ref: Transfer <frame> to a foreign domain. The
+  * foreign domain has previously registered its interest in the transfer via
+  * <domid, ref>.
+- *
++ * 
+  * Note that, even if the transfer fails, the specified page no longer belongs
+  * to the calling domain *unless* the error is GNTST_bad_page.
+  */
+@@ -370,7 +366,6 @@ struct gnttab_transfer {
+     /* OUT parameters. */
+     int16_t       status;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_transfer);
+ typedef struct gnttab_transfer gnttab_transfer_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_transfer_t);
+ 
+@@ -398,7 +393,7 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_transfer_
+ #define _GNTCOPY_dest_gref        (1)
+ #define GNTCOPY_dest_gref         (1<<_GNTCOPY_dest_gref)
+ #define _GNTCOPY_can_fail         (2)
+-#define GNTCOPY_can_fail          (1<<_GNTCOPY_can_fail)
++#define GNTCOPY_can_fail          (1<<_GNTCOPY_can_fail) 
+ 
+ #define GNTTABOP_copy                 5
+ typedef struct gnttab_copy {
+@@ -416,7 +411,6 @@ typedef struct gnttab_copy {
+     /* OUT parameters. */
+     int16_t       status;
+ } gnttab_copy_t;
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_copy);
+ DEFINE_XEN_GUEST_HANDLE(gnttab_copy_t);
+ 
+ /*
+@@ -435,7 +429,6 @@ struct gnttab_query_size {
+     uint32_t max_nr_frames;
+     int16_t  status;              /* GNTST_* */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(gnttab_query_size);
+ typedef struct gnttab_query_size gnttab_query_size_t;
+ DEFINE_XEN_GUEST_HANDLE(gnttab_query_size_t);
+ 
+@@ -592,3 +585,13 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_get_versi
+ }
+ 
+ #endif /* __XEN_PUBLIC_GRANT_TABLE_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/hvm/hvm_info_table.h
+--- a/include/xen/interface/hvm/hvm_info_table.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/hvm/hvm_info_table.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -69,7 +69,7 @@ struct hvm_info_table {
+     uint32_t    high_mem_pgend;
+ 
+     /* Bitmap of which CPUs are online at boot time. */
+-    uint8_t     vcpu_online[HVM_MAX_VCPUS/8];
++    uint8_t     vcpu_online[(HVM_MAX_VCPUS + 7)/8];
+ };
+ 
+ #endif /* __XEN_PUBLIC_HVM_HVM_INFO_TABLE_H__ */
+diff -r d276beabc4ca include/xen/interface/hvm/hvm_op.h
+--- a/include/xen/interface/hvm/hvm_op.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/hvm/hvm_op.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -22,6 +22,7 @@
+ #define __XEN_PUBLIC_HVM_HVM_OP_H__
+ 
+ #include "../xen.h"
++#include "../trace.h"
+ 
+ /* Get/set subcommands: extra argument == pointer to xen_hvm_param struct. */
+ #define HVMOP_set_param           0
+@@ -75,21 +76,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_pci_
+ /* Flushes all VCPU TLBs: @arg must be NULL. */
+ #define HVMOP_flush_tlbs          5
+ 
+-/* Get the current Xen time, in nanoseconds since system boot. */
+-#define HVMOP_get_time_compat     6
+-#define HVMOP_get_time            0x101
+-struct xen_hvm_get_time {
+-    uint64_t now;      /* OUT */
+-};
+-typedef struct xen_hvm_get_time xen_hvm_get_time_t;
+-DEFINE_XEN_GUEST_HANDLE(xen_hvm_get_time_t);
+-
+-/* Hint from PV drivers for process destruction. */
+-#define HVMOP_process_dying_compat 7
+-#define HVMOP_process_dying        0x102
+-
+ /* Track dirty VRAM. */
+-#define HVMOP_track_dirty_vram    128
++#define HVMOP_track_dirty_vram    6
+ struct xen_hvm_track_dirty_vram {
+     /* Domain to be tracked. */
+     domid_t  domid;
+@@ -105,7 +93,7 @@ typedef struct xen_hvm_track_dirty_vram 
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_track_dirty_vram_t);
+ 
+ /* Notify that some pages got modified by the Device Model. */
+-#define HVMOP_modified_memory    129
++#define HVMOP_modified_memory    7
+ struct xen_hvm_modified_memory {
+     /* Domain to be updated. */
+     domid_t  domid;
+@@ -117,7 +105,7 @@ struct xen_hvm_modified_memory {
+ typedef struct xen_hvm_modified_memory xen_hvm_modified_memory_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_modified_memory_t);
+ 
+-#define HVMOP_set_mem_type    130
++#define HVMOP_set_mem_type    8
+ typedef enum {
+     HVMMEM_ram_rw,             /* Normal read/write guest RAM */
+     HVMMEM_ram_ro,             /* Read-only; writes are discarded */
+@@ -137,19 +125,32 @@ struct xen_hvm_set_mem_type {
+ typedef struct xen_hvm_set_mem_type xen_hvm_set_mem_type_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_mem_type_t);
+ 
+-#define HVMOP_xentrace        0x100
++/* Hint from PV drivers for pagetable destruction. */
++#define HVMOP_pagetable_dying        9
++struct xen_hvm_pagetable_dying {
++    /* Domain with a pagetable about to be destroyed. */
++    domid_t  domid;
++    uint16_t pad[3]; /* align next field on 8-byte boundary */
++    /* guest physical address of the toplevel pagetable dying */
++    uint64_t gpa;
++};
++typedef struct xen_hvm_pagetable_dying xen_hvm_pagetable_dying_t;
++DEFINE_XEN_GUEST_HANDLE(xen_hvm_pagetable_dying_t);
++
++/* Get the current Xen time, in nanoseconds since system boot. */
++#define HVMOP_get_time              10
++struct xen_hvm_get_time {
++    uint64_t now;      /* OUT */
++};
++typedef struct xen_hvm_get_time xen_hvm_get_time_t;
++DEFINE_XEN_GUEST_HANDLE(xen_hvm_get_time_t);
++
++#define HVMOP_xentrace              11
+ struct xen_hvm_xentrace {
+     uint16_t event, extra_bytes;
+-    uint8_t extra[28];
++    uint8_t extra[TRACE_EXTRA_MAX * sizeof(uint32_t)];
+ };
+ typedef struct xen_hvm_xentrace xen_hvm_xentrace_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_hvm_xentrace_t);
+ 
+-#define HVMOP_set_driver_version 0x103
+-struct xen_hvm_set_driver_version {
+-    uint32_t build;
+-};
+-typedef struct xen_hvm_set_driver_version xen_hvm_set_driver_version_t;
+-DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_driver_version_t);
+-
+ #endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */
+diff -r d276beabc4ca include/xen/interface/hvm/ioreq.h
+--- a/include/xen/interface/hvm/ioreq.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/hvm/ioreq.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -100,11 +100,32 @@ struct buffered_piopage {
+ };
+ #endif /* defined(__ia64__) */
+ 
+-#define ACPI_PM1A_EVT_BLK_ADDRESS           0x0000000000001f40
+-#define ACPI_PM1A_CNT_BLK_ADDRESS           (ACPI_PM1A_EVT_BLK_ADDRESS + 0x04)
+-#define ACPI_PM_TMR_BLK_ADDRESS             (ACPI_PM1A_EVT_BLK_ADDRESS + 0x08)
+-#define ACPI_GPE0_BLK_ADDRESS               (ACPI_PM_TMR_BLK_ADDRESS + 0x20)
+-#define ACPI_GPE0_BLK_LEN                   0x08
++/*
++ * ACPI Control/Event register locations. Location is controlled by a 
++ * version number in HVM_PARAM_ACPI_IOPORTS_LOCATION.
++ */
++
++/* Version 0 (default): Traditional Xen locations. */
++#define ACPI_PM1A_EVT_BLK_ADDRESS_V0 0x1f40
++#define ACPI_PM1A_CNT_BLK_ADDRESS_V0 (ACPI_PM1A_EVT_BLK_ADDRESS_V0 + 0x04)
++#define ACPI_PM_TMR_BLK_ADDRESS_V0   (ACPI_PM1A_EVT_BLK_ADDRESS_V0 + 0x08)
++#define ACPI_GPE0_BLK_ADDRESS_V0     (ACPI_PM_TMR_BLK_ADDRESS_V0 + 0x20)
++#define ACPI_GPE0_BLK_LEN_V0         0x08
++
++/* Version 1: Locations preferred by modern Qemu. */
++#define ACPI_PM1A_EVT_BLK_ADDRESS_V1 0xb000
++#define ACPI_PM1A_CNT_BLK_ADDRESS_V1 (ACPI_PM1A_EVT_BLK_ADDRESS_V1 + 0x04)
++#define ACPI_PM_TMR_BLK_ADDRESS_V1   (ACPI_PM1A_EVT_BLK_ADDRESS_V1 + 0x08)
++#define ACPI_GPE0_BLK_ADDRESS_V1     0xafe0
++#define ACPI_GPE0_BLK_LEN_V1         0x04
++
++/* Compatibility definitions for the default location (version 0). */
++#define ACPI_PM1A_EVT_BLK_ADDRESS    ACPI_PM1A_EVT_BLK_ADDRESS_V0
++#define ACPI_PM1A_CNT_BLK_ADDRESS    ACPI_PM1A_CNT_BLK_ADDRESS_V0
++#define ACPI_PM_TMR_BLK_ADDRESS      ACPI_PM_TMR_BLK_ADDRESS_V0
++#define ACPI_GPE0_BLK_ADDRESS        ACPI_GPE0_BLK_ADDRESS_V0
++#define ACPI_GPE0_BLK_LEN            ACPI_GPE0_BLK_LEN_V0
++
+ 
+ #endif /* _IOREQ_H_ */
+ 
+diff -r d276beabc4ca include/xen/interface/hvm/params.h
+--- a/include/xen/interface/hvm/params.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/hvm/params.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -33,6 +33,9 @@
+  * val[63:56] == 1: val[55:0] is a delivery PCI INTx line, as follows:
+  *                  Domain = val[47:32], Bus  = val[31:16],
+  *                  DevFn  = val[15: 8], IntX = val[ 1: 0]
++ * val[63:56] == 2: val[7:0] is a vector number, check for
++ *                  XENFEAT_hvm_callback_vector to know if this delivery
++ *                  method is available.
+  * If val == 0 then CPU0 event-channel notifications are not delivered.
+  */
+ #define HVM_PARAM_CALLBACK_IRQ 0
+@@ -106,6 +109,21 @@
+ /* Boolean: Enable aligning all periodic vpts to reduce interrupts */
+ #define HVM_PARAM_VPT_ALIGN    16
+ 
+-#define HVM_NR_PARAMS          17
++/* Console debug shared memory ring and event channel */
++#define HVM_PARAM_CONSOLE_PFN    17
++#define HVM_PARAM_CONSOLE_EVTCHN 18
++
++/*
++ * Select location of ACPI PM1a and TMR control blocks. Currently two locations
++ * are supported, specified by version 0 or 1 in this parameter:
++ *   - 0: default, use the old addresses
++ *        PM1A_EVT == 0x1f40; PM1A_CNT == 0x1f44; PM_TMR == 0x1f48
++ *   - 1: use the new default qemu addresses
++ *        PM1A_EVT == 0xb000; PM1A_CNT == 0xb004; PM_TMR == 0xb008
++ * You can find these address definitions in <hvm/ioreq.h>
++ */
++#define HVM_PARAM_ACPI_IOPORTS_LOCATION 19
++
++#define HVM_NR_PARAMS          20
+ 
+ #endif /* __XEN_PUBLIC_HVM_PARAMS_H__ */
+diff -r d276beabc4ca include/xen/interface/io/blkif.h
+--- a/include/xen/interface/io/blkif.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/blkif.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * blkif.h
+- *
++ * 
+  * Unified block-device I/O interface for Xen guest OSes.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -35,7 +35,7 @@
+  * notification can be made conditional on req_event (i.e., the generic
+  * hold-off mechanism provided by the ring macros). Backends must set
+  * req_event appropriately (e.g., using RING_FINAL_CHECK_FOR_REQUESTS()).
+- *
++ * 
+  * Back->front notifications: When enqueuing a new response, sending a
+  * notification can be made conditional on rsp_event (i.e., the generic
+  * hold-off mechanism provided by the ring macros). Frontends must set
+@@ -84,7 +84,7 @@
+  */
+ #define BLKIF_MAX_SEGMENTS_PER_REQUEST 11
+ 
+-/*
++/* 
+  * NB. first_sect and last_sect in blkif_request_segment, as well as
+  * sector_number in blkif_request, are always expressed in 512-byte units.
+  * However they must be properly aligned to the real sector size of the
+@@ -136,3 +136,13 @@ DEFINE_RING_TYPES(blkif, struct blkif_re
+ #define VDISK_READONLY     0x4
+ 
+ #endif /* __XEN_PUBLIC_IO_BLKIF_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/console.h
+--- a/include/xen/interface/io/console.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/console.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * console.h
+- *
++ * 
+  * Console I/O interface for Xen guest OSes.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -39,3 +39,13 @@ struct xencons_interface {
+ };
+ 
+ #endif /* __XEN_PUBLIC_IO_CONSOLE_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/fbif.h
+--- a/include/xen/interface/io/fbif.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/fbif.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -150,12 +150,7 @@ struct xenfb_page
+      * framebuffer with a max resolution of 12,800x10,240.  Should
+      * be enough for a while with room leftover for expansion.
+      */
+-#ifndef CONFIG_PARAVIRT_XEN
+     unsigned long pd[256];
+-#else
+-	/* Two directory pages should be enough for a while. */
+-	unsigned long pd[2];
+-#endif
+ };
+ 
+ /*
+@@ -169,3 +164,13 @@ struct xenfb_page
+ #endif
+ 
+ #endif
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/kbdif.h
+--- a/include/xen/interface/io/kbdif.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/kbdif.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -120,3 +120,13 @@ struct xenkbd_page
+ };
+ 
+ #endif
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/protocols.h
+--- a/include/xen/interface/io/protocols.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/protocols.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  * protocols.h
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+diff -r d276beabc4ca include/xen/interface/io/ring.h
+--- a/include/xen/interface/io/ring.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/ring.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  * ring.h
+- *
++ * 
+  * Shared producer-consumer ring macros.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+@@ -47,7 +47,7 @@ typedef unsigned int RING_IDX;
+ /*
+  * Calculate size of a shared ring, given the total available space for the
+  * ring and indexes (_sz), and the name tag of the request/response structure.
+- * A ring contains as many entries as will fit, rounded down to the nearest
++ * A ring contains as many entries as will fit, rounded down to the nearest 
+  * power of two (so we can mask with (size-1) to loop around).
+  */
+ #define __CONST_RING_SIZE(_s, _sz) \
+@@ -61,7 +61,7 @@ typedef unsigned int RING_IDX;
+ 
+ /*
+  * Macros to make the correct C datatypes for a new kind of ring.
+- *
++ * 
+  * To make a new ring datatype, you need to have two message structures,
+  * let's say request_t, and response_t already defined.
+  *
+@@ -71,7 +71,7 @@ typedef unsigned int RING_IDX;
+  *
+  * These expand out to give you a set of types, as you can see below.
+  * The most important of these are:
+- *
++ * 
+  *     mytag_sring_t      - The shared ring.
+  *     mytag_front_ring_t - The 'front' half of the ring.
+  *     mytag_back_ring_t  - The 'back' half of the ring.
+@@ -112,7 +112,7 @@ struct __name##_sring {                 
+         } tapif_user;                                                   \
+         uint8_t pvt_pad[4];                                             \
+     } private;                                                          \
+-    uint8_t pad[44];                                                    \
++    uint8_t __pad[44];                                                  \
+     union __name##_sring_entry ring[1]; /* variable-length */           \
+ };                                                                      \
+                                                                         \
+@@ -139,15 +139,15 @@ typedef struct __name##_back_ring __name
+ 
+ /*
+  * Macros for manipulating rings.
+- *
+- * FRONT_RING_whatever works on the "front end" of a ring: here
++ * 
++ * FRONT_RING_whatever works on the "front end" of a ring: here 
+  * requests are pushed on to the ring and responses taken off it.
+- *
+- * BACK_RING_whatever works on the "back end" of a ring: here
++ * 
++ * BACK_RING_whatever works on the "back end" of a ring: here 
+  * requests are taken off the ring and responses put on.
+- *
+- * N.B. these macros do NO INTERLOCKS OR FLOW CONTROL.
+- * This is OK in 1-for-1 request-response situations where the
++ * 
++ * N.B. these macros do NO INTERLOCKS OR FLOW CONTROL. 
++ * This is OK in 1-for-1 request-response situations where the 
+  * requestor (front end) never has more than RING_SIZE()-1
+  * outstanding requests.
+  */
+@@ -156,7 +156,8 @@ typedef struct __name##_back_ring __name
+ #define SHARED_RING_INIT(_s) do {                                       \
+     (_s)->req_prod  = (_s)->rsp_prod  = 0;                              \
+     (_s)->req_event = (_s)->rsp_event = 1;                              \
+-    (void)memset((_s)->pad, 0, sizeof((_s)->pad));                      \
++    (void)memset((_s)->private.pvt_pad, 0, sizeof((_s)->private.pvt_pad)); \
++    (void)memset((_s)->__pad, 0, sizeof((_s)->__pad));                  \
+ } while(0)
+ 
+ #define FRONT_RING_INIT(_r, _s, __size) do {                            \
+@@ -245,26 +246,26 @@ typedef struct __name##_back_ring __name
+ 
+ /*
+  * Notification hold-off (req_event and rsp_event):
+- *
++ * 
+  * When queueing requests or responses on a shared ring, it may not always be
+  * necessary to notify the remote end. For example, if requests are in flight
+  * in a backend, the front may be able to queue further requests without
+  * notifying the back (if the back checks for new requests when it queues
+  * responses).
+- *
++ * 
+  * When enqueuing requests or responses:
+- *
++ * 
+  *  Use RING_PUSH_{REQUESTS,RESPONSES}_AND_CHECK_NOTIFY(). The second argument
+  *  is a boolean return value. True indicates that the receiver requires an
+  *  asynchronous notification.
+- *
++ * 
+  * After dequeuing requests or responses (before sleeping the connection):
+- *
++ * 
+  *  Use RING_FINAL_CHECK_FOR_REQUESTS() or RING_FINAL_CHECK_FOR_RESPONSES().
+  *  The second argument is a boolean return value. True indicates that there
+  *  are pending messages on the ring (i.e., the connection should not be put
+  *  to sleep).
+- *
++ * 
+  *  These macros will set the req_event/rsp_event field to trigger a
+  *  notification on the very next message that is enqueued. If you want to
+  *  create batches of work (i.e., only receive a notification after several
+@@ -310,3 +311,13 @@ typedef struct __name##_back_ring __name
+ } while (0)
+ 
+ #endif /* __XEN_PUBLIC_IO_RING_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/xenbus.h
+--- a/include/xen/interface/io/xenbus.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/xenbus.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -68,3 +68,13 @@ enum xenbus_state {
+ typedef enum xenbus_state XenbusState;
+ 
+ #endif /* _XEN_PUBLIC_IO_XENBUS_H */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/io/xs_wire.h
+--- a/include/xen/interface/io/xs_wire.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/io/xs_wire.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -47,7 +47,8 @@ enum xsd_sockmsg_type
+     XS_ERROR,
+     XS_IS_DOMAIN_INTRODUCED,
+     XS_RESUME,
+-    XS_SET_TARGET
++    XS_SET_TARGET,
++    XS_RESTRICT
+ };
+ 
+ #define XS_WRITE_NONE "NONE"
+@@ -120,3 +121,13 @@ struct xenstore_domain_interface {
+ #define XENSTORE_REL_PATH_MAX 2048
+ 
+ #endif /* _XS_WIRE_H */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/mem_event.h
+--- a/include/xen/interface/mem_event.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/mem_event.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -40,14 +40,14 @@
+ 
+ 
+ typedef struct mem_event_shared_page {
+-    int port;
++    uint32_t port;
+ } mem_event_shared_page_t;
+ 
+ typedef struct mem_event_st {
+-    unsigned long gfn;
+-    unsigned long offset;
+-    unsigned long p2mt;
+-    int vcpu_id;
++    uint64_t gfn;
++    uint64_t offset;
++    uint32_t p2mt;
++    int32_t vcpu_id;
+     uint64_t flags;
+ } mem_event_request_t, mem_event_response_t;
+ 
+diff -r d276beabc4ca include/xen/interface/memory.h
+--- a/include/xen/interface/memory.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/memory.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * memory.h
+- *
++ * 
+  * Memory reservation and information.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -40,9 +40,9 @@
+ 
+ #if __XEN_INTERFACE_VERSION__ >= 0x00030209
+ /*
+- * Maximum # bits addressable by the user of the allocated region (e.g., I/O
+- * devices often have a 32-bit limitation even in 64-bit systems). If zero
+- * then the user has no addressing restriction. This field is not used by
++ * Maximum # bits addressable by the user of the allocated region (e.g., I/O 
++ * devices often have a 32-bit limitation even in 64-bit systems). If zero 
++ * then the user has no addressing restriction. This field is not used by 
+  * XENMEM_decrease_reservation.
+  */
+ #define XENMEMF_address_bits(x)     (x)
+@@ -52,6 +52,9 @@
+ #define XENMEMF_get_node(x) ((((x) >> 8) - 1) & 0xffu)
+ /* Flag to populate physmap with populate-on-demand entries */
+ #define XENMEMF_populate_on_demand (1<<16)
++/* Flag to request allocation only from the node specified */
++#define XENMEMF_exact_node_request  (1<<17)
++#define XENMEMF_exact_node(n) (XENMEMF_node(n) | XENMEMF_exact_node_request)
+ #endif
+ 
+ struct xen_memory_reservation {
+@@ -85,7 +88,6 @@ struct xen_memory_reservation {
+      */
+     domid_t        domid;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(xen_memory_reservation);
+ typedef struct xen_memory_reservation xen_memory_reservation_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_memory_reservation_t);
+ 
+@@ -108,7 +110,7 @@ struct xen_memory_exchange {
+      * [IN/OUT] Details of new memory extents.
+      * We require that:
+      *  1. @in.domid == @out.domid
+-     *  2. @in.nr_extents  << @in.extent_order ==
++     *  2. @in.nr_extents  << @in.extent_order == 
+      *     @out.nr_extents << @out.extent_order
+      *  3. @in.extent_start and @out.extent_start lists must not overlap
+      *  4. @out.extent_start lists GPFN bases to be populated
+@@ -179,7 +181,6 @@ struct xen_machphys_mfn_list {
+      */
+     unsigned int nr_extents;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(xen_machphys_mfn_list);
+ typedef struct xen_machphys_mfn_list xen_machphys_mfn_list_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_machphys_mfn_list_t);
+ 
+@@ -221,7 +222,6 @@ struct xen_add_to_physmap {
+     /* GPFN where the source mapping page should appear. */
+     xen_pfn_t     gpfn;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(xen_add_to_physmap);
+ typedef struct xen_add_to_physmap xen_add_to_physmap_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_add_to_physmap_t);
+ 
+@@ -287,8 +287,18 @@ typedef struct xen_pod_target xen_pod_ta
+ 
+ /*
+  * Get the number of MFNs saved through memory sharing.
+- * The call never fails.
++ * The call never fails. 
+  */
+ #define XENMEM_get_sharing_freed_pages    18
+ 
+ #endif /* __XEN_PUBLIC_MEMORY_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/physdev.h
+--- a/include/xen/interface/physdev.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/physdev.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -138,7 +138,7 @@ struct physdev_irq {
+ };
+ typedef struct physdev_irq physdev_irq_t;
+ DEFINE_XEN_GUEST_HANDLE(physdev_irq_t);
+-
++ 
+ #define MAP_PIRQ_TYPE_MSI               0x0
+ #define MAP_PIRQ_TYPE_GSI               0x1
+ #define MAP_PIRQ_TYPE_UNKNOWN           0x2
+@@ -180,7 +180,7 @@ struct physdev_manage_pci {
+     /* IN */
+     uint8_t bus;
+     uint8_t devfn;
+-};
++}; 
+ 
+ typedef struct physdev_manage_pci physdev_manage_pci_t;
+ DEFINE_XEN_GUEST_HANDLE(physdev_manage_pci_t);
+@@ -240,6 +240,21 @@ struct physdev_setup_gsi {
+ typedef struct physdev_setup_gsi physdev_setup_gsi_t;
+ DEFINE_XEN_GUEST_HANDLE(physdev_setup_gsi_t);
+ 
++/* leave PHYSDEVOP 22 free */
++
++/* type is MAP_PIRQ_TYPE_GSI or MAP_PIRQ_TYPE_MSI
++ * the hypercall returns a free pirq */
++#define PHYSDEVOP_get_free_pirq    23
++struct physdev_get_free_pirq {
++    /* IN */ 
++    int type;
++    /* OUT */
++    uint32_t pirq;
++};
++
++typedef struct physdev_get_free_pirq physdev_get_free_pirq_t;
++DEFINE_XEN_GUEST_HANDLE(physdev_get_free_pirq_t);
++
+ /*
+  * Notify that some PIRQ-bound event channels have been unmasked.
+  * ** This command is obsolete since interface version 0x00030202 and is **
+@@ -262,3 +277,13 @@ DEFINE_XEN_GUEST_HANDLE(physdev_setup_gs
+ #define PHYSDEVOP_IRQ_SHARED             XENIRQSTAT_shared
+ 
+ #endif /* __XEN_PUBLIC_PHYSDEV_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/platform.h
+--- a/include/xen/interface/platform.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/platform.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -355,14 +355,6 @@ struct xenpf_mem_hotadd
+     uint32_t flags;
+ };
+ 
+-#define XENPF_get_cpu_freq        ('N' << 24)
+-struct xenpf_get_cpu_freq {
+-    /* IN variables */
+-    uint32_t vcpu;
+-    /* OUT variables */
+-    uint32_t freq; /* in kHz */
+-};
+-
+ struct xen_platform_op {
+     uint32_t cmd;
+     uint32_t interface_version; /* XENPF_INTERFACE_VERSION */
+@@ -382,7 +374,6 @@ struct xen_platform_op {
+         struct xenpf_cpu_ol            cpu_ol;
+         struct xenpf_cpu_hotadd        cpu_add;
+         struct xenpf_mem_hotadd        mem_add;
+-        struct xenpf_get_cpu_freq      get_cpu_freq;
+         uint8_t                        pad[128];
+     } u;
+ };
+diff -r d276beabc4ca include/xen/interface/sched.h
+--- a/include/xen/interface/sched.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/sched.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * sched.h
+- *
++ * 
+  * Scheduler state interactions
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -34,7 +34,7 @@
+  *  long sched_op(int cmd, void *arg)
+  * @cmd == SCHEDOP_??? (scheduler operation).
+  * @arg == Operation-specific extra argument(s), as described below.
+- *
++ * 
+  * Versions of Xen prior to 3.0.2 provided only the following legacy version
+  * of this hypercall, supporting only the commands yield, block and shutdown:
+  *  long sched_op(int cmd, unsigned long arg)
+@@ -67,7 +67,6 @@
+ struct sched_shutdown {
+     unsigned int reason; /* SHUTDOWN_* */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(sched_shutdown);
+ typedef struct sched_shutdown sched_shutdown_t;
+ DEFINE_XEN_GUEST_HANDLE(sched_shutdown_t);
+ 
+@@ -82,7 +81,6 @@ struct sched_poll {
+     unsigned int nr_ports;
+     uint64_t timeout;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(sched_poll);
+ typedef struct sched_poll sched_poll_t;
+ DEFINE_XEN_GUEST_HANDLE(sched_poll_t);
+ 
+@@ -101,6 +99,29 @@ typedef struct sched_remote_shutdown sch
+ DEFINE_XEN_GUEST_HANDLE(sched_remote_shutdown_t);
+ 
+ /*
++ * Latch a shutdown code, so that when the domain later shuts down it
++ * reports this code to the control tools.
++ * @arg == as for SCHEDOP_shutdown.
++ */
++#define SCHEDOP_shutdown_code 5
++
++/*
++ * Setup, poke and destroy a domain watchdog timer.
++ * @arg == pointer to sched_watchdog structure.
++ * With id == 0, setup a domain watchdog timer to cause domain shutdown
++ *               after timeout, returns watchdog id.
++ * With id != 0 and timeout == 0, destroy domain watchdog timer.
++ * With id != 0 and timeout != 0, poke watchdog timer and set new timeout.
++ */
++#define SCHEDOP_watchdog    6
++struct sched_watchdog {
++    uint32_t id;                /* watchdog ID */
++    uint32_t timeout;           /* timeout */
++};
++typedef struct sched_watchdog sched_watchdog_t;
++DEFINE_XEN_GUEST_HANDLE(sched_watchdog_t);
++
++/*
+  * Reason codes for SCHEDOP_shutdown. These may be interpreted by control
+  * software to determine the appropriate action. For the most part, Xen does
+  * not care about the shutdown code.
+@@ -109,5 +130,16 @@ DEFINE_XEN_GUEST_HANDLE(sched_remote_shu
+ #define SHUTDOWN_reboot     1  /* Clean up, kill, and then restart.          */
+ #define SHUTDOWN_suspend    2  /* Clean up, save suspend info, kill.         */
+ #define SHUTDOWN_crash      3  /* Tell controller we've crashed.             */
++#define SHUTDOWN_watchdog   4  /* Restart because watchdog time expired.     */
+ 
+ #endif /* __XEN_PUBLIC_SCHED_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/sysctl.h
+--- a/include/xen/interface/sysctl.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/sysctl.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -34,12 +34,12 @@
+ #include "xen.h"
+ #include "domctl.h"
+ 
+-#define XEN_SYSCTL_INTERFACE_VERSION 0x00000007
++#define XEN_SYSCTL_INTERFACE_VERSION 0x00000008
+ 
+ /*
+  * Read console content from Xen buffer ring.
+  */
+-#define XEN_SYSCTL_readconsole       1
++/* XEN_SYSCTL_readconsole */
+ struct xen_sysctl_readconsole {
+     /* IN: Non-zero -> clear after reading. */
+     uint8_t clear;
+@@ -60,7 +60,7 @@ typedef struct xen_sysctl_readconsole xe
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_readconsole_t);
+ 
+ /* Get trace buffers machine base address */
+-#define XEN_SYSCTL_tbuf_op           2
++/* XEN_SYSCTL_tbuf_op */
+ struct xen_sysctl_tbuf_op {
+     /* IN variables */
+ #define XEN_SYSCTL_TBUFOP_get_info     0
+@@ -75,7 +75,7 @@ struct xen_sysctl_tbuf_op {
+     uint32_t             evt_mask;
+     /* OUT variables */
+     uint64_aligned_t buffer_mfn;
+-    uint32_t size;
++    uint32_t size;  /* Also an IN variable! */
+ };
+ typedef struct xen_sysctl_tbuf_op xen_sysctl_tbuf_op_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_tbuf_op_t);
+@@ -83,7 +83,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_tbuf_
+ /*
+  * Get physical information about the host machine
+  */
+-#define XEN_SYSCTL_physinfo          3
++/* XEN_SYSCTL_physinfo */
+  /* (x86) The platform supports HVM guests. */
+ #define _XEN_SYSCTL_PHYSCAP_hvm          0
+ #define XEN_SYSCTL_PHYSCAP_hvm           (1u<<_XEN_SYSCTL_PHYSCAP_hvm)
+@@ -93,30 +93,16 @@ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_tbuf_
+ struct xen_sysctl_physinfo {
+     uint32_t threads_per_core;
+     uint32_t cores_per_socket;
+-    uint32_t nr_cpus;
+-    uint32_t max_node_id;
++    uint32_t nr_cpus;     /* # CPUs currently online */
++    uint32_t max_cpu_id;  /* Largest possible CPU ID on this host */
++    uint32_t nr_nodes;    /* # nodes currently online */
++    uint32_t max_node_id; /* Largest possible node ID on this host */
+     uint32_t cpu_khz;
+     uint64_aligned_t total_pages;
+     uint64_aligned_t free_pages;
+     uint64_aligned_t scrub_pages;
+     uint32_t hw_cap[8];
+ 
+-    /*
+-     * IN: maximum addressable entry in the caller-provided cpu_to_node array.
+-     * OUT: largest cpu identifier in the system.
+-     * If OUT is greater than IN then the cpu_to_node array is truncated!
+-     */
+-    uint32_t max_cpu_id;
+-    /*
+-     * If not NULL, this array is filled with node identifier for each cpu.
+-     * If a cpu has no node information (e.g., cpu not present) then the
+-     * sentinel value ~0u is written.
+-     * The size of this array is specified by the caller in @max_cpu_id.
+-     * If the actual @max_cpu_id is smaller than the array then the trailing
+-     * elements of the array will not be written by the sysctl.
+-     */
+-    XEN_GUEST_HANDLE_64(uint32) cpu_to_node;
+-
+     /* XEN_SYSCTL_PHYSCAP_??? */
+     uint32_t capabilities;
+ };
+@@ -126,7 +112,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_physi
+ /*
+  * Get the ID of the current scheduler.
+  */
+-#define XEN_SYSCTL_sched_id          4
++/* XEN_SYSCTL_sched_id */
+ struct xen_sysctl_sched_id {
+     /* OUT variable */
+     uint32_t sched_id;
+@@ -135,7 +121,7 @@ typedef struct xen_sysctl_sched_id xen_s
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_sched_id_t);
+ 
+ /* Interface for controlling Xen software performance counters. */
+-#define XEN_SYSCTL_perfc_op          5
++/* XEN_SYSCTL_perfc_op */
+ /* Sub-operations: */
+ #define XEN_SYSCTL_PERFCOP_reset 1   /* Reset all counters to zero. */
+ #define XEN_SYSCTL_PERFCOP_query 2   /* Get perfctr information. */
+@@ -162,7 +148,7 @@ struct xen_sysctl_perfc_op {
+ typedef struct xen_sysctl_perfc_op xen_sysctl_perfc_op_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_perfc_op_t);
+ 
+-#define XEN_SYSCTL_getdomaininfolist 6
++/* XEN_SYSCTL_getdomaininfolist */
+ struct xen_sysctl_getdomaininfolist {
+     /* IN variables. */
+     domid_t               first_domain;
+@@ -175,7 +161,7 @@ typedef struct xen_sysctl_getdomaininfol
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_getdomaininfolist_t);
+ 
+ /* Inject debug keys into Xen. */
+-#define XEN_SYSCTL_debug_keys        7
++/* XEN_SYSCTL_debug_keys */
+ struct xen_sysctl_debug_keys {
+     /* IN variables. */
+     XEN_GUEST_HANDLE_64(char) keys;
+@@ -185,7 +171,7 @@ typedef struct xen_sysctl_debug_keys xen
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_debug_keys_t);
+ 
+ /* Get physical CPU information. */
+-#define XEN_SYSCTL_getcpuinfo        8
++/* XEN_SYSCTL_getcpuinfo */
+ struct xen_sysctl_cpuinfo {
+     uint64_aligned_t idletime;
+ };
+@@ -201,7 +187,7 @@ struct xen_sysctl_getcpuinfo {
+ typedef struct xen_sysctl_getcpuinfo xen_sysctl_getcpuinfo_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_getcpuinfo_t); 
+ 
+-#define XEN_SYSCTL_availheap         9
++/* XEN_SYSCTL_availheap */
+ struct xen_sysctl_availheap {
+     /* IN variables. */
+     uint32_t min_bitwidth;  /* Smallest address width (zero if don't care). */
+@@ -213,7 +199,7 @@ struct xen_sysctl_availheap {
+ typedef struct xen_sysctl_availheap xen_sysctl_availheap_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_availheap_t);
+ 
+-#define XEN_SYSCTL_get_pmstat        10
++/* XEN_SYSCTL_get_pmstat */
+ struct pm_px_val {
+     uint64_aligned_t freq;        /* Px core frequency */
+     uint64_aligned_t residency;   /* Px residency time */
+@@ -239,6 +225,11 @@ struct pm_cx_stat {
+     uint64_aligned_t idle_time;                 /* idle time from boot */
+     XEN_GUEST_HANDLE_64(uint64) triggers;    /* Cx trigger counts */
+     XEN_GUEST_HANDLE_64(uint64) residencies; /* Cx residencies */
++    uint64_aligned_t pc3;
++    uint64_aligned_t pc6;
++    uint64_aligned_t pc7;
++    uint64_aligned_t cc3;
++    uint64_aligned_t cc6;
+ };
+ 
+ struct xen_sysctl_get_pmstat {
+@@ -270,7 +261,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_get_p
+ #define XEN_CPU_HOTPLUG_STATUS_ONLINE  2
+ #define XEN_CPU_HOTPLUG_STATUS_NEW     3
+ 
+-#define XEN_SYSCTL_cpu_hotplug       11
++/* XEN_SYSCTL_cpu_hotplug */
+ struct xen_sysctl_cpu_hotplug {
+     /* IN variables */
+     uint32_t cpu;   /* Physical cpu. */
+@@ -286,7 +277,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpu_h
+  * Get/set xen power management, include 
+  * 1. cpufreq governors and related parameters
+  */
+-#define XEN_SYSCTL_pm_op        12
++/* XEN_SYSCTL_pm_op */
+ struct xen_userspace {
+     uint32_t scaling_setspeed;
+ };
+@@ -333,6 +324,8 @@ struct xen_get_cpufreq_para {
+         struct  xen_userspace userspace;
+         struct  xen_ondemand ondemand;
+     } u;
++
++    int32_t turbo_enabled;
+ };
+ 
+ struct xen_set_cpufreq_gov {
+@@ -350,22 +343,6 @@ struct xen_set_cpufreq_para {
+     uint32_t ctrl_value;
+ };
+ 
+-/* Get physical CPU topology information. */
+-#define INVALID_TOPOLOGY_ID  (~0U)
+-struct xen_get_cputopo {
+-     /* IN: maximum addressable entry in
+-      * the caller-provided cpu_to_core/socket.
+-      */
+-    uint32_t max_cpus;
+-    XEN_GUEST_HANDLE_64(uint32) cpu_to_core;
+-    XEN_GUEST_HANDLE_64(uint32) cpu_to_socket;
+-
+-    /* OUT: number of cpus returned
+-     * If OUT is greater than IN then the cpu_to_core/socket is truncated!
+-     */
+-    uint32_t nr_cpus;
+-};
+-
+ struct xen_sysctl_pm_op {
+     #define PM_PARA_CATEGORY_MASK      0xf0
+     #define CPUFREQ_PARA               0x10
+@@ -376,9 +353,6 @@ struct xen_sysctl_pm_op {
+     #define SET_CPUFREQ_PARA           (CPUFREQ_PARA | 0x03)
+     #define GET_CPUFREQ_AVGFREQ        (CPUFREQ_PARA | 0x04)
+ 
+-    /* get CPU topology */
+-    #define XEN_SYSCTL_pm_op_get_cputopo  0x20
+-
+     /* set/reset scheduler power saving option */
+     #define XEN_SYSCTL_pm_op_set_sched_opt_smt    0x21
+ 
+@@ -390,6 +364,10 @@ struct xen_sysctl_pm_op {
+     #define XEN_SYSCTL_pm_op_set_vcpu_migration_delay   0x24
+     #define XEN_SYSCTL_pm_op_get_vcpu_migration_delay   0x25
+ 
++    /* enable/disable turbo mode when in dbs governor */
++    #define XEN_SYSCTL_pm_op_enable_turbo               0x26
++    #define XEN_SYSCTL_pm_op_disable_turbo              0x27
++
+     uint32_t cmd;
+     uint32_t cpuid;
+     union {
+@@ -397,7 +375,6 @@ struct xen_sysctl_pm_op {
+         struct xen_set_cpufreq_gov  set_gov;
+         struct xen_set_cpufreq_para set_para;
+         uint64_aligned_t get_avgfreq;
+-        struct xen_get_cputopo      get_topo;
+         uint32_t                    set_sched_opt_smt;
+         uint32_t                    get_max_cstate;
+         uint32_t                    set_max_cstate;
+@@ -406,7 +383,7 @@ struct xen_sysctl_pm_op {
+     } u;
+ };
+ 
+-#define XEN_SYSCTL_page_offline_op        14
++/* XEN_SYSCTL_page_offline_op */
+ struct xen_sysctl_page_offline_op {
+     /* IN: range of page to be offlined */
+ #define sysctl_page_offline     1
+@@ -454,7 +431,7 @@ struct xen_sysctl_page_offline_op {
+ 
+ #define PG_OFFLINE_OWNER_SHIFT 16
+ 
+-#define XEN_SYSCTL_lockprof_op       15
++/* XEN_SYSCTL_lockprof_op */
+ /* Sub-operations: */
+ #define XEN_SYSCTL_LOCKPROF_reset 1   /* Reset all profile data to zero. */
+ #define XEN_SYSCTL_LOCKPROF_query 2   /* Get lock profile information. */
+@@ -486,13 +463,157 @@ struct xen_sysctl_lockprof_op {
+ typedef struct xen_sysctl_lockprof_op xen_sysctl_lockprof_op_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_sysctl_lockprof_op_t);
+ 
++/* XEN_SYSCTL_topologyinfo */
++#define INVALID_TOPOLOGY_ID  (~0U)
++struct xen_sysctl_topologyinfo {
++    /*
++     * IN: maximum addressable entry in the caller-provided arrays.
++     * OUT: largest cpu identifier in the system.
++     * If OUT is greater than IN then the arrays are truncated!
++     * If OUT is leass than IN then the array tails are not written by sysctl.
++     */
++    uint32_t max_cpu_index;
++
++    /*
++     * If not NULL, these arrays are filled with core/socket/node identifier
++     * for each cpu.
++     * If a cpu has no core/socket/node information (e.g., cpu not present) 
++     * then the sentinel value ~0u is written to each array.
++     * The number of array elements written by the sysctl is:
++     *   min(@max_cpu_index_IN,@max_cpu_index_OUT)+1
++     */
++    XEN_GUEST_HANDLE_64(uint32) cpu_to_core;
++    XEN_GUEST_HANDLE_64(uint32) cpu_to_socket;
++    XEN_GUEST_HANDLE_64(uint32) cpu_to_node;
++};
++typedef struct xen_sysctl_topologyinfo xen_sysctl_topologyinfo_t;
++DEFINE_XEN_GUEST_HANDLE(xen_sysctl_topologyinfo_t);
++
++/* XEN_SYSCTL_numainfo */
++struct xen_sysctl_numainfo {
++    /*
++     * IN: maximum addressable entry in the caller-provided arrays.
++     * OUT: largest node identifier in the system.
++     * If OUT is greater than IN then the arrays are truncated!
++     */
++    uint32_t max_node_index;
++
++    /* NB. Entries are 0 if node is not present. */
++    XEN_GUEST_HANDLE_64(uint64) node_to_memsize;
++    XEN_GUEST_HANDLE_64(uint64) node_to_memfree;
++
++    /*
++     * Array, of size (max_node_index+1)^2, listing memory access distances
++     * between nodes. If an entry has no node distance information (e.g., node 
++     * not present) then the value ~0u is written.
++     * 
++     * Note that the array rows must be indexed by multiplying by the minimum 
++     * of the caller-provided max_node_index and the returned value of
++     * max_node_index. That is, if the largest node index in the system is
++     * smaller than the caller can handle, a smaller 2-d array is constructed
++     * within the space provided by the caller. When this occurs, trailing
++     * space provided by the caller is not modified. If the largest node index
++     * in the system is larger than the caller can handle, then a 2-d array of
++     * the maximum size handleable by the caller is constructed.
++     */
++    XEN_GUEST_HANDLE_64(uint32) node_to_node_distance;
++};
++typedef struct xen_sysctl_numainfo xen_sysctl_numainfo_t;
++DEFINE_XEN_GUEST_HANDLE(xen_sysctl_numainfo_t);
++
++/* XEN_SYSCTL_cpupool_op */
++#define XEN_SYSCTL_CPUPOOL_OP_CREATE                1  /* C */
++#define XEN_SYSCTL_CPUPOOL_OP_DESTROY               2  /* D */
++#define XEN_SYSCTL_CPUPOOL_OP_INFO                  3  /* I */
++#define XEN_SYSCTL_CPUPOOL_OP_ADDCPU                4  /* A */
++#define XEN_SYSCTL_CPUPOOL_OP_RMCPU                 5  /* R */
++#define XEN_SYSCTL_CPUPOOL_OP_MOVEDOMAIN            6  /* M */
++#define XEN_SYSCTL_CPUPOOL_OP_FREEINFO              7  /* F */
++#define XEN_SYSCTL_CPUPOOL_PAR_ANY     0xFFFFFFFF
++struct xen_sysctl_cpupool_op {
++    uint32_t op;          /* IN */
++    uint32_t cpupool_id;  /* IN: CDIARM OUT: CI */
++    uint32_t sched_id;    /* IN: C      OUT: I  */
++    uint32_t domid;       /* IN: M              */
++    uint32_t cpu;         /* IN: AR             */
++    uint32_t n_dom;       /*            OUT: I  */
++    struct xenctl_cpumap cpumap; /*     OUT: IF */
++};
++typedef struct xen_sysctl_cpupool_op xen_sysctl_cpupool_op_t;
++DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpupool_op_t);
++
++#define ARINC653_MAX_DOMAINS_PER_SCHEDULE   64
++/*
++ * This structure is used to pass a new ARINC653 schedule from a
++ * privileged domain (ie dom0) to Xen.
++ */
++struct xen_sysctl_arinc653_schedule {
++    /* major_frame holds the time for the new schedule's major frame
++     * in nanoseconds. */
++    uint64_aligned_t     major_frame;
++    /* num_sched_entries holds how many of the entries in the
++     * sched_entries[] array are valid. */
++    uint8_t     num_sched_entries;
++    /* The sched_entries array holds the actual schedule entries. */
++    struct {
++        /* dom_handle must match a domain's UUID */
++        xen_domain_handle_t dom_handle;
++        /* If a domain has multiple VCPUs, vcpu_id specifies which one
++         * this schedule entry applies to. It should be set to 0 if
++         * there is only one VCPU for the domain. */
++        unsigned int vcpu_id;
++        /* runtime specifies the amount of time that should be allocated
++         * to this VCPU per major frame. It is specified in nanoseconds */
++        uint64_aligned_t runtime;
++    } sched_entries[ARINC653_MAX_DOMAINS_PER_SCHEDULE];
++};
++typedef struct xen_sysctl_arinc653_schedule xen_sysctl_arinc653_schedule_t;
++DEFINE_XEN_GUEST_HANDLE(xen_sysctl_arinc653_schedule_t);
++
++/* XEN_SYSCTL_scheduler_op */
++/* Set or get info? */
++#define XEN_SYSCTL_SCHEDOP_putinfo 0
++#define XEN_SYSCTL_SCHEDOP_getinfo 1
++struct xen_sysctl_scheduler_op {
++    uint32_t cpupool_id; /* Cpupool whose scheduler is to be targetted. */
++    uint32_t sched_id;   /* XEN_SCHEDULER_* (domctl.h) */
++    uint32_t cmd;        /* XEN_SYSCTL_SCHEDOP_* */
++    union {
++        struct xen_sysctl_sched_arinc653 {
++            XEN_GUEST_HANDLE_64(xen_sysctl_arinc653_schedule_t) schedule;
++        } sched_arinc653;
++    } u;
++};
++typedef struct xen_sysctl_scheduler_op xen_sysctl_scheduler_op_t;
++DEFINE_XEN_GUEST_HANDLE(xen_sysctl_scheduler_op_t);
++
+ struct xen_sysctl {
+     uint32_t cmd;
++#define XEN_SYSCTL_readconsole                    1
++#define XEN_SYSCTL_tbuf_op                        2
++#define XEN_SYSCTL_physinfo                       3
++#define XEN_SYSCTL_sched_id                       4
++#define XEN_SYSCTL_perfc_op                       5
++#define XEN_SYSCTL_getdomaininfolist              6
++#define XEN_SYSCTL_debug_keys                     7
++#define XEN_SYSCTL_getcpuinfo                     8
++#define XEN_SYSCTL_availheap                      9
++#define XEN_SYSCTL_get_pmstat                    10
++#define XEN_SYSCTL_cpu_hotplug                   11
++#define XEN_SYSCTL_pm_op                         12
++#define XEN_SYSCTL_page_offline_op               14
++#define XEN_SYSCTL_lockprof_op                   15
++#define XEN_SYSCTL_topologyinfo                  16 
++#define XEN_SYSCTL_numainfo                      17
++#define XEN_SYSCTL_cpupool_op                    18
++#define XEN_SYSCTL_scheduler_op                  19
+     uint32_t interface_version; /* XEN_SYSCTL_INTERFACE_VERSION */
+     union {
+         struct xen_sysctl_readconsole       readconsole;
+         struct xen_sysctl_tbuf_op           tbuf_op;
+         struct xen_sysctl_physinfo          physinfo;
++        struct xen_sysctl_topologyinfo      topologyinfo;
++        struct xen_sysctl_numainfo          numainfo;
+         struct xen_sysctl_sched_id          sched_id;
+         struct xen_sysctl_perfc_op          perfc_op;
+         struct xen_sysctl_getdomaininfolist getdomaininfolist;
+@@ -504,6 +625,8 @@ struct xen_sysctl {
+         struct xen_sysctl_pm_op             pm_op;
+         struct xen_sysctl_page_offline_op   page_offline;
+         struct xen_sysctl_lockprof_op       lockprof_op;
++        struct xen_sysctl_cpupool_op        cpupool_op;
++        struct xen_sysctl_scheduler_op      scheduler_op;
+         uint8_t                             pad[128];
+     } u;
+ };
+diff -r d276beabc4ca include/xen/interface/tmem.h
+--- a/include/xen/interface/tmem.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/tmem.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -29,6 +29,9 @@
+ 
+ #include "xen.h"
+ 
++/* version of ABI */
++#define TMEM_SPEC_VERSION          1
++
+ /* Commands to HYPERVISOR_tmem_op() */
+ #define TMEM_CONTROL               0
+ #define TMEM_NEW_POOL              1
+@@ -75,10 +78,12 @@
+ /* Bits for HYPERVISOR_tmem_op(TMEM_NEW_POOL) */
+ #define TMEM_POOL_PERSIST          1
+ #define TMEM_POOL_SHARED           2
++#define TMEM_POOL_PRECOMPRESSED    4
+ #define TMEM_POOL_PAGESIZE_SHIFT   4
+ #define TMEM_POOL_PAGESIZE_MASK  0xf
+ #define TMEM_POOL_VERSION_SHIFT   24
+ #define TMEM_POOL_VERSION_MASK  0xff
++#define TMEM_POOL_RESERVED_BITS  0x00ffff00
+ 
+ /* Bits for client flags (save/restore) */
+ #define TMEM_CLIENT_COMPRESS       1
+@@ -106,12 +111,12 @@ struct tmem_op {
+             uint32_t cli_id;
+             uint32_t arg1;
+             uint32_t arg2;
+-            uint64_t arg3;
++            uint64_t oid[3];
+             tmem_cli_va_t buf;
+         } ctrl; /* for cmd == TMEM_CONTROL */
+         struct {
+             
+-            uint64_t object;
++            uint64_t oid[3];
+             uint32_t index;
+             uint32_t tmem_offset;
+             uint32_t pfn_offset;
+@@ -126,9 +131,8 @@ DEFINE_XEN_GUEST_HANDLE(tmem_op_t);
+ struct tmem_handle {
+     uint32_t pool_id;
+     uint32_t index;
+-    uint64_t oid;
++    uint64_t oid[3];
+ };
+-
+ #endif
+ 
+ #endif /* __XEN_PUBLIC_TMEM_H__ */
+diff -r d276beabc4ca include/xen/interface/trace.h
+--- a/include/xen/interface/trace.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/trace.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -39,6 +39,7 @@
+ #define TRC_PV       0x0020f000    /* Xen PV traces            */
+ #define TRC_SHADOW   0x0040f000    /* Xen shadow tracing       */
+ #define TRC_PM       0x0080f000    /* Xen power management trace */
++#define TRC_GUEST    0x0800f000    /* Guest-generated traces   */
+ #define TRC_ALL      0x0ffff000
+ #define TRC_HD_TO_EVENT(x) ((x)&0x0fffffff)
+ #define TRC_HD_CYCLE_FLAG (1UL<<31)
+@@ -53,6 +54,7 @@
+ #define TRC_HVM_HANDLER   0x00082000   /* various HVM handlers      */
+ 
+ #define TRC_SCHED_MIN       0x00021000   /* Just runstate changes */
++#define TRC_SCHED_CLASS     0x00022000   /* Scheduler-specific    */
+ #define TRC_SCHED_VERBOSE   0x00028000   /* More inclusive scheduling */
+ 
+ /* Trace events per class */
+@@ -78,10 +80,17 @@
+ #define TRC_SCHED_DOM_TIMER_FN   (TRC_SCHED_VERBOSE + 13)
+ #define TRC_SCHED_SWITCH_INFPREV (TRC_SCHED_VERBOSE + 14)
+ #define TRC_SCHED_SWITCH_INFNEXT (TRC_SCHED_VERBOSE + 15)
++#define TRC_SCHED_SHUTDOWN_CODE  (TRC_SCHED_VERBOSE + 16)
+ 
+ #define TRC_MEM_PAGE_GRANT_MAP      (TRC_MEM + 1)
+ #define TRC_MEM_PAGE_GRANT_UNMAP    (TRC_MEM + 2)
+ #define TRC_MEM_PAGE_GRANT_TRANSFER (TRC_MEM + 3)
++#define TRC_MEM_SET_P2M_ENTRY       (TRC_MEM + 4)
++#define TRC_MEM_DECREASE_RESERVATION (TRC_MEM + 5)
++#define TRC_MEM_POD_POPULATE        (TRC_MEM + 16)
++#define TRC_MEM_POD_ZERO_RECLAIM    (TRC_MEM + 17)
++#define TRC_MEM_POD_SUPERPAGE_SPLINTER (TRC_MEM + 18)
++
+ 
+ #define TRC_PV_HYPERCALL             (TRC_PV +  1)
+ #define TRC_PV_TRAP                  (TRC_PV +  3)
+@@ -148,7 +157,10 @@
+ #define TRC_HVM_CLTS            (TRC_HVM_HANDLER + 0x18)
+ #define TRC_HVM_LMSW            (TRC_HVM_HANDLER + 0x19)
+ #define TRC_HVM_LMSW64          (TRC_HVM_HANDLER + TRC_64_FLAG + 0x19)
++#define TRC_HVM_RDTSC           (TRC_HVM_HANDLER + 0x1a)
+ #define TRC_HVM_INTR_WINDOW     (TRC_HVM_HANDLER + 0x20)
++#define TRC_HVM_NPF             (TRC_HVM_HANDLER + 0x21)
++
+ #define TRC_HVM_IOPORT_WRITE    (TRC_HVM_HANDLER + 0x216)
+ #define TRC_HVM_IOMEM_WRITE     (TRC_HVM_HANDLER + 0x217)
+ 
+@@ -195,6 +207,16 @@ struct t_buf {
+     /*  Records follow immediately after the meta-data header.    */
+ };
+ 
++/* Structure used to pass MFNs to the trace buffers back to trace consumers.
++ * Offset is an offset into the mapped structure where the mfn list will be held.
++ * MFNs will be at ((unsigned long *)(t_info))+(t_info->cpu_offset[cpu]).
++ */
++struct t_info {
++    uint16_t tbuf_size; /* Size in pages of each trace buffer */
++    uint16_t mfn_offset[];  /* Offset within t_info structure of the page list per cpu */
++    /* MFN lists immediately after the header */
++};
++
+ #endif /* __XEN_PUBLIC_TRACE_H__ */
+ 
+ /*
+diff -r d276beabc4ca include/xen/interface/vcpu.h
+--- a/include/xen/interface/vcpu.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/vcpu.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * vcpu.h
+- *
++ * 
+  * VCPU initialisation, query, and hotplug.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -38,9 +38,9 @@
+  */
+ 
+ /*
+- * Initialise a VCPU. Each VCPU can be initialised only once. A
++ * Initialise a VCPU. Each VCPU can be initialised only once. A 
+  * newly-initialised VCPU will not run until it is brought up by VCPUOP_up.
+- *
++ * 
+  * @extra_arg == pointer to vcpu_guest_context structure containing initial
+  *               state for the VCPU.
+  */
+@@ -87,7 +87,6 @@ struct vcpu_runstate_info {
+      */
+     uint64_t time[4];
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(vcpu_runstate_info);
+ typedef struct vcpu_runstate_info vcpu_runstate_info_t;
+ DEFINE_XEN_GUEST_HANDLE(vcpu_runstate_info_t);
+ 
+@@ -143,7 +142,6 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_register_ru
+ struct vcpu_set_periodic_timer {
+     uint64_t period_ns;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(vcpu_set_periodic_timer);
+ typedef struct vcpu_set_periodic_timer vcpu_set_periodic_timer_t;
+ DEFINE_XEN_GUEST_HANDLE(vcpu_set_periodic_timer_t);
+ 
+@@ -157,7 +155,6 @@ struct vcpu_set_singleshot_timer {
+     uint64_t timeout_abs_ns;   /* Absolute system time value in nanoseconds. */
+     uint32_t flags;            /* VCPU_SSHOTTMR_??? */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(vcpu_set_singleshot_timer);
+ typedef struct vcpu_set_singleshot_timer vcpu_set_singleshot_timer_t;
+ DEFINE_XEN_GUEST_HANDLE(vcpu_set_singleshot_timer_t);
+ 
+@@ -166,7 +163,7 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_set_singles
+ #define _VCPU_SSHOTTMR_future (0)
+ #define VCPU_SSHOTTMR_future  (1U << _VCPU_SSHOTTMR_future)
+ 
+-/*
++/* 
+  * Register a memory location in the guest address space for the
+  * vcpu_info structure.  This allows the guest to place the vcpu_info
+  * structure in a convenient place, such as in a per-cpu data area.
+@@ -181,14 +178,13 @@ struct vcpu_register_vcpu_info {
+     uint32_t offset; /* offset within page */
+     uint32_t rsvd;   /* unused */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(vcpu_register_vcpu_info);
+ typedef struct vcpu_register_vcpu_info vcpu_register_vcpu_info_t;
+ DEFINE_XEN_GUEST_HANDLE(vcpu_register_vcpu_info_t);
+ 
+ /* Send an NMI to the specified VCPU. @extra_arg == NULL. */
+ #define VCPUOP_send_nmi             11
+ 
+-/*
++/* 
+  * Get the physical ID information for a pinned vcpu's underlying physical
+  * processor.  The physical ID informmation is architecture-specific.
+  * On x86: id[31:0]=apic_id, id[63:32]=acpi_id, and all values 0xff and
+@@ -206,7 +202,7 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_get_physid_
+ #define xen_vcpu_physid_to_x86_acpiid(physid) \
+     ((((uint32_t)((physid)>>32)) >= 0xff) ? 0xff : ((uint8_t)((physid)>>32)))
+ 
+-/*
++/* 
+  * Register a memory location to get a secondary copy of the vcpu time
+  * parameters.  The master copy still exists as part of the vcpu shared
+  * memory area, and this secondary copy is updated whenever the master copy
+@@ -235,3 +231,13 @@ typedef struct vcpu_register_time_memory
+ DEFINE_XEN_GUEST_HANDLE(vcpu_register_time_memory_area_t);
+ 
+ #endif /* __XEN_PUBLIC_VCPU_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/version.h
+--- a/include/xen/interface/version.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/version.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,7 +1,25 @@
+ /******************************************************************************
+  * version.h
++ * 
++ * Xen version, type, and compile information.
++ * 
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
+  *
+- * Xen version, type, and compile information.
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
+  *
+  * Copyright (c) 2005, Nguyen Anh Quynh <aquynh@gmail.com>
+  * Copyright (c) 2005, Keir Fraser <keir@xensource.com>
+@@ -10,17 +28,15 @@
+ #ifndef __XEN_PUBLIC_VERSION_H__
+ #define __XEN_PUBLIC_VERSION_H__
+ 
+-/* NB. All ops return zero on success, except XENVER_version. */
++/* NB. All ops return zero on success, except XENVER_{version,pagesize} */
+ 
+ /* arg == NULL; returns major:minor (16:16). */
+ #define XENVER_version      0
+ 
+ /* arg == xen_extraversion_t. */
+ #define XENVER_extraversion 1
+-struct xen_extraversion {
+-    char extraversion[16];
+-};
+-#define XEN_EXTRAVERSION_LEN (sizeof(struct xen_extraversion))
++typedef char xen_extraversion_t[16];
++#define XEN_EXTRAVERSION_LEN (sizeof(xen_extraversion_t))
+ 
+ /* arg == xen_compile_info_t. */
+ #define XENVER_compile_info 2
+@@ -30,29 +46,28 @@ struct xen_compile_info {
+     char compile_domain[32];
+     char compile_date[32];
+ };
++typedef struct xen_compile_info xen_compile_info_t;
+ 
+ #define XENVER_capabilities 3
+-struct xen_capabilities_info {
+-    char info[1024];
+-};
+-#define XEN_CAPABILITIES_INFO_LEN (sizeof(struct xen_capabilities_info))
++typedef char xen_capabilities_info_t[1024];
++#define XEN_CAPABILITIES_INFO_LEN (sizeof(xen_capabilities_info_t))
+ 
+ #define XENVER_changeset 4
+-struct xen_changeset_info {
+-    char info[64];
+-};
+-#define XEN_CHANGESET_INFO_LEN (sizeof(struct xen_changeset_info))
++typedef char xen_changeset_info_t[64];
++#define XEN_CHANGESET_INFO_LEN (sizeof(xen_changeset_info_t))
+ 
+ #define XENVER_platform_parameters 5
+ struct xen_platform_parameters {
+     unsigned long virt_start;
+ };
++typedef struct xen_platform_parameters xen_platform_parameters_t;
+ 
+ #define XENVER_get_features 6
+ struct xen_feature_info {
+     unsigned int submap_idx;    /* IN: which 32-bit submap to return */
+     uint32_t     submap;        /* OUT: 32-bit submap */
+ };
++typedef struct xen_feature_info xen_feature_info_t;
+ 
+ /* Declares the features reported by XENVER_get_features. */
+ #include "features.h"
+@@ -60,4 +75,20 @@ struct xen_feature_info {
+ /* arg == NULL; returns host memory page size. */
+ #define XENVER_pagesize 7
+ 
++/* arg == xen_domain_handle_t. */
++#define XENVER_guest_handle 8
++
++#define XENVER_commandline 9
++typedef char xen_commandline_t[1024];
++
+ #endif /* __XEN_PUBLIC_VERSION_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/xen.h
+--- a/include/xen/interface/xen.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/xen.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -1,8 +1,8 @@
+ /******************************************************************************
+  * xen.h
+- *
++ * 
+  * Guest OS interface to Xen.
+- *
++ * 
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+@@ -28,13 +28,8 @@
+ #define __XEN_PUBLIC_XEN_H__
+ 
+ #include "xen-compat.h"
+-#ifdef CONFIG_PARAVIRT_XEN
+-#include <asm/pvclock-abi.h>
+-#endif
+ 
+-#if defined(CONFIG_PARAVIRT_XEN) && !defined(HAVE_XEN_PLATFORM_COMPAT_H)
+-#include <asm/xen/interface.h>
+-#elif defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || defined(__x86_64__)
+ #include "arch-x86/xen.h"
+ #elif defined(__ia64__)
+ #include "arch-ia64.h"
+@@ -88,7 +83,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+ #define __HYPERVISOR_mmuext_op            26
+ #define __HYPERVISOR_xsm_op               27
+ #define __HYPERVISOR_nmi_op               28
+-#define __HYPERVISOR_sched_op_new         29
++#define __HYPERVISOR_sched_op             29
+ #define __HYPERVISOR_callback_op          30
+ #define __HYPERVISOR_xenoprof_op          31
+ #define __HYPERVISOR_event_channel_op     32
+@@ -114,11 +109,9 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+  */
+ 
+ /* New sched_op hypercall introduced in 0x00030101. */
+-#if __XEN_INTERFACE_VERSION__ < 0x00030101 || (defined(CONFIG_PARAVIRT_XEN) && !defined(HAVE_XEN_PLATFORM_COMPAT_H))
++#if __XEN_INTERFACE_VERSION__ < 0x00030101
+ #undef __HYPERVISOR_sched_op
+ #define __HYPERVISOR_sched_op __HYPERVISOR_sched_op_compat
+-#else
+-#define __HYPERVISOR_sched_op __HYPERVISOR_sched_op_new
+ #endif
+ 
+ /* New event-channel and physdev hypercalls introduced in 0x00030202. */
+@@ -130,15 +123,15 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+ #endif
+ 
+ /* New platform_op hypercall introduced in 0x00030204. */
+-#if __XEN_INTERFACE_VERSION__ < 0x00030204 || (defined(CONFIG_PARAVIRT_XEN) && !defined(HAVE_XEN_PLATFORM_COMPAT_H))
++#if __XEN_INTERFACE_VERSION__ < 0x00030204
+ #define __HYPERVISOR_dom0_op __HYPERVISOR_platform_op
+ #endif
+ 
+-/*
++/* 
+  * VIRTUAL INTERRUPTS
+- *
++ * 
+  * Virtual interrupts that a guest OS may receive from Xen.
+- *
++ * 
+  * In the side comments, 'V.' denotes a per-VCPU VIRQ while 'G.' denotes a
+  * global VIRQ. The former can be bound once per VCPU and cannot be re-bound.
+  * The latter can be allocated only once per guest: they must initially be
+@@ -169,7 +162,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+ 
+ /*
+  * HYPERVISOR_mmu_update(reqs, count, pdone, foreigndom)
+- *
++ * 
+  * @reqs is an array of mmu_update_t structures ((ptr, val) pairs).
+  * @count is the length of the above array.
+  * @pdone is an output parameter indicating number of completed operations
+@@ -180,7 +173,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+  *                     (x) encodes the PFD as follows:
+  *                     x == 0 => PFD == DOMID_SELF
+  *                     x != 0 => PFD == x - 1
+- *
++ * 
+  * Sub-commands: ptr[1:0] specifies the appropriate MMU_* command.
+  * -------------
+  * ptr[1:0] == MMU_NORMAL_PT_UPDATE:
+@@ -192,13 +185,13 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+  * FD == DOMID_XEN: Map restricted areas of Xen's heap space.
+  * ptr[:2]  -- Machine address of the page-table entry to modify.
+  * val      -- Value to write.
+- *
++ * 
+  * ptr[1:0] == MMU_MACHPHYS_UPDATE:
+  * Updates an entry in the machine->pseudo-physical mapping table.
+  * ptr[:2]  -- Machine address within the frame whose mapping to modify.
+  *             The frame must belong to the FD, if one is specified.
+  * val      -- Value to write into the mapping entry.
+- *
++ * 
+  * ptr[1:0] == MMU_PT_UPDATE_PRESERVE_AD:
+  * As MMU_NORMAL_PT_UPDATE above, but A/D bits currently in the PTE are ORed
+  * with those in @val.
+@@ -209,44 +202,48 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+ 
+ /*
+  * MMU EXTENDED OPERATIONS
+- *
++ * 
+  * HYPERVISOR_mmuext_op() accepts a list of mmuext_op structures.
+  * A foreigndom (FD) can be specified (or DOMID_SELF for none).
+  * Where the FD has some effect, it is described below.
+- *
++ * 
+  * cmd: MMUEXT_(UN)PIN_*_TABLE
+  * mfn: Machine frame number to be (un)pinned as a p.t. page.
+  *      The frame must belong to the FD, if one is specified.
+- *
++ * 
+  * cmd: MMUEXT_NEW_BASEPTR
+  * mfn: Machine frame number of new page-table base to install in MMU.
+- *
++ * 
+  * cmd: MMUEXT_NEW_USER_BASEPTR [x86/64 only]
+  * mfn: Machine frame number of new page-table base to install in MMU
+  *      when in user space.
+- *
++ * 
+  * cmd: MMUEXT_TLB_FLUSH_LOCAL
+  * No additional arguments. Flushes local TLB.
+- *
++ * 
+  * cmd: MMUEXT_INVLPG_LOCAL
+  * linear_addr: Linear address to be flushed from the local TLB.
+- *
++ * 
+  * cmd: MMUEXT_TLB_FLUSH_MULTI
+  * vcpumask: Pointer to bitmap of VCPUs to be flushed.
+- *
++ * 
+  * cmd: MMUEXT_INVLPG_MULTI
+  * linear_addr: Linear address to be flushed.
+  * vcpumask: Pointer to bitmap of VCPUs to be flushed.
+- *
++ * 
+  * cmd: MMUEXT_TLB_FLUSH_ALL
+  * No additional arguments. Flushes all VCPUs' TLBs.
+- *
++ * 
+  * cmd: MMUEXT_INVLPG_ALL
+  * linear_addr: Linear address to be flushed from all VCPUs' TLBs.
+- *
++ * 
+  * cmd: MMUEXT_FLUSH_CACHE
+  * No additional arguments. Writes back and flushes cache contents.
+  *
++ * cmd: MMUEXT_FLUSH_CACHE_GLOBAL
++ * No additional arguments. Writes back and flushes cache contents
++ * on all CPUs in the system.
++ * 
+  * cmd: MMUEXT_SET_LDT
+  * linear_addr: Linear address of LDT base (NB. must be page-aligned).
+  * nr_ents: Number of entries in LDT.
+@@ -257,6 +254,9 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+  * cmd: MMUEXT_COPY_PAGE
+  * mfn: Machine frame number of the destination page.
+  * src_mfn: Machine frame number of the source page.
++ *
++ * cmd: MMUEXT_[UN]MARK_SUPER
++ * mfn: Machine frame number of head of superpage to be [un]marked.
+  */
+ #define MMUEXT_PIN_L1_TABLE      0
+ #define MMUEXT_PIN_L2_TABLE      1
+@@ -275,13 +275,16 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
+ #define MMUEXT_NEW_USER_BASEPTR 15
+ #define MMUEXT_CLEAR_PAGE       16
+ #define MMUEXT_COPY_PAGE        17
++#define MMUEXT_FLUSH_CACHE_GLOBAL 18
++#define MMUEXT_MARK_SUPER       19
++#define MMUEXT_UNMARK_SUPER     20
+ 
+ #ifndef __ASSEMBLY__
+ struct mmuext_op {
+     unsigned int cmd;
+     union {
+         /* [UN]PIN_TABLE, NEW_BASEPTR, NEW_USER_BASEPTR
+-         * CLEAR_PAGE, COPY_PAGE */
++         * CLEAR_PAGE, COPY_PAGE, [UN]MARK_SUPER */
+         xen_pfn_t     mfn;
+         /* INVLPG_LOCAL, INVLPG_ALL, SET_LDT */
+         unsigned long linear_addr;
+@@ -299,7 +302,6 @@ struct mmuext_op {
+         xen_pfn_t src_mfn;
+     } arg2;
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(mmuext_op);
+ typedef struct mmuext_op mmuext_op_t;
+ DEFINE_XEN_GUEST_HANDLE(mmuext_op_t);
+ #endif
+@@ -389,7 +391,6 @@ struct mmu_update {
+     uint64_t ptr;       /* Machine address of PTE. */
+     uint64_t val;       /* New contents of PTE.    */
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(mmu_update);
+ typedef struct mmu_update mmu_update_t;
+ DEFINE_XEN_GUEST_HANDLE(mmu_update_t);
+ 
+@@ -398,15 +399,9 @@ DEFINE_XEN_GUEST_HANDLE(mmu_update_t);
+  * NB. The fields are natural register size for this architecture.
+  */
+ struct multicall_entry {
+-    unsigned long op;
+-#if !defined(CONFIG_PARAVIRT_XEN) || defined(HAVE_XEN_PLATFORM_COMPAT_H)
+-    unsigned long result;
+-#else
+-    long result;
+-#endif
++    unsigned long op, result;
+     unsigned long args[6];
+ };
+-DEFINE_GUEST_HANDLE_STRUCT(multicall_entry);
+ typedef struct multicall_entry multicall_entry_t;
+ DEFINE_XEN_GUEST_HANDLE(multicall_entry_t);
+ 
+@@ -446,7 +441,7 @@ typedef struct vcpu_time_info vcpu_time_
+ struct vcpu_info {
+     /*
+      * 'evtchn_upcall_pending' is written non-zero by Xen to indicate
+-     * a pending notification for a particular VCPU. It is then cleared
++     * a pending notification for a particular VCPU. It is then cleared 
+      * by the guest OS /before/ checking for pending work, thus avoiding
+      * a set-and-check race. Note that the mask is only accessed by Xen
+      * on the CPU that is currently hosting the VCPU. This means that the
+@@ -473,11 +468,7 @@ struct vcpu_info {
+     uint8_t evtchn_upcall_mask;
+     unsigned long evtchn_pending_sel;
+     struct arch_vcpu_info arch;
+-#ifdef CONFIG_PARAVIRT_XEN
+-    struct pvclock_vcpu_time_info time;
+-#else
+     struct vcpu_time_info time;
+-#endif
+ }; /* 64 bytes (x86) */
+ #ifndef __XEN__
+ typedef struct vcpu_info vcpu_info_t;
+@@ -508,7 +499,7 @@ struct shared_info {
+      *  3. Virtual interrupts ('events'). A domain can bind an event-channel
+      *     port to a virtual interrupt source, such as the virtual-timer
+      *     device or the emergency console.
+-     *
++     * 
+      * Event channels are addressed by a "port index". Each channel is
+      * associated with two bits of information:
+      *  1. PENDING -- notifies the domain that there is a pending notification
+@@ -519,7 +510,7 @@ struct shared_info {
+      *     becomes pending while the channel is masked then the 'edge' is lost
+      *     (i.e., when the channel is unmasked, the guest must manually handle
+      *     pending notifications as no upcall will be scheduled by Xen).
+-     *
++     * 
+      * To expedite scanning of pending notifications, any 0->1 pending
+      * transition on an unmasked channel causes a corresponding bit in a
+      * per-vcpu selector word to be set. Each bit in the selector covers a
+@@ -532,13 +523,9 @@ struct shared_info {
+      * Wallclock time: updated only by control software. Guests should base
+      * their gettimeofday() syscall on this wallclock-base value.
+      */
+-#ifdef CONFIG_PARAVIRT_XEN
+-    struct pvclock_wall_clock wc;
+-#else
+     uint32_t wc_version;      /* Version counter: see vcpu_time_info_t. */
+     uint32_t wc_sec;          /* Secs  00:00:00 UTC, Jan 1, 1970.  */
+     uint32_t wc_nsec;         /* Nsecs 00:00:00 UTC, Jan 1, 1970.  */
+-#endif
+ 
+     struct arch_shared_info arch;
+ 
+@@ -594,7 +581,9 @@ struct start_info {
+     unsigned long pt_base;      /* VIRTUAL address of page directory.     */
+     unsigned long nr_pt_frames; /* Number of bootstrap p.t. frames.       */
+     unsigned long mfn_list;     /* VIRTUAL address of page-frame list.    */
+-    unsigned long mod_start;    /* VIRTUAL address of pre-loaded module.  */
++    unsigned long mod_start;    /* VIRTUAL address of pre-loaded module   */
++                                /* (PFN of pre-loaded module if           */
++                                /*  SIF_MOD_START_PFN set in flags).      */
+     unsigned long mod_len;      /* Size (bytes) of pre-loaded module.     */
+     int8_t cmd_line[MAX_GUEST_CMDLINE];
+     /* The pfn range here covers both page table and p->m table frames.   */
+@@ -613,6 +602,7 @@ typedef struct start_info start_info_t;
+ #define SIF_PRIVILEGED    (1<<0)  /* Is the domain privileged? */
+ #define SIF_INITDOMAIN    (1<<1)  /* Is this the initial control domain? */
+ #define SIF_MULTIBOOT_MOD (1<<2)  /* Is mod_start a multiboot module? */
++#define SIF_MOD_START_PFN (1<<3)  /* Is mod_start a PFN? */
+ #define SIF_PM_MASK       (0xFF<<8) /* reserve 1 byte for xen-pm options */
+ 
+ /*
+@@ -703,12 +693,31 @@ __DEFINE_XEN_GUEST_HANDLE(uint64, uint64
+ 
+ /* Default definitions for macros used by domctl/sysctl. */
+ #if defined(__XEN__) || defined(__XEN_TOOLS__)
++
+ #ifndef uint64_aligned_t
+ #define uint64_aligned_t uint64_t
+ #endif
+ #ifndef XEN_GUEST_HANDLE_64
+ #define XEN_GUEST_HANDLE_64(name) XEN_GUEST_HANDLE(name)
+ #endif
++
++#ifndef __ASSEMBLY__
++struct xenctl_cpumap {
++    XEN_GUEST_HANDLE_64(uint8) bitmap;
++    uint32_t nr_cpus;
++};
+ #endif
+ 
++#endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
++
+ #endif /* __XEN_PUBLIC_XEN_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff -r d276beabc4ca include/xen/interface/xenoprof.h
+--- a/include/xen/interface/xenoprof.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/interface/xenoprof.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -50,7 +50,11 @@
+ #define XENOPROF_shutdown           13
+ #define XENOPROF_get_buffer         14
+ #define XENOPROF_set_backtrace      15
+-#define XENOPROF_last_op            15
++
++/* AMD IBS support */
++#define XENOPROF_get_ibs_caps       16
++#define XENOPROF_ibs_counter        17
++#define XENOPROF_last_op            17
+ 
+ #define MAX_OPROF_EVENTS    32
+ #define MAX_OPROF_DOMAINS   25
+@@ -124,6 +128,16 @@ typedef struct xenoprof_passive {
+ } xenoprof_passive_t;
+ DEFINE_XEN_GUEST_HANDLE(xenoprof_passive_t);
+ 
++struct xenoprof_ibs_counter {
++    uint64_t op_enabled;
++    uint64_t fetch_enabled;
++    uint64_t max_cnt_fetch;
++    uint64_t max_cnt_op;
++    uint64_t rand_en;
++    uint64_t dispatched_ops;
++};
++typedef struct xenoprof_ibs_counter xenoprof_ibs_counter_t;
++DEFINE_XEN_GUEST_HANDLE(xenoprof_ibs_counter_t);
+ 
+ #endif /* __XEN_PUBLIC_XENOPROF_H__ */
+ 
+diff -r d276beabc4ca include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Fri Jan 14 17:02:57 2011 +0000
++++ b/include/xen/public/privcmd.h	Thu Jan 20 05:28:14 2011 +0000
+@@ -35,6 +35,10 @@
+ 
+ #include <linux/types.h>
+ 
++#ifndef __user
++#define __user
++#endif
++
+ typedef struct privcmd_hypercall
+ {
+ 	__u64 op;

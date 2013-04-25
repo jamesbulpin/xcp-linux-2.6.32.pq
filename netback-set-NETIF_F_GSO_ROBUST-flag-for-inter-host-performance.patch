@@ -1,0 +1,35 @@
+Subject: NIC-332: set NETIF_F_GSO_ROBUST flag in netback
+
+Set flag so that all pkts (including SKB_GSO_DODGY)
+are forwarded without doing GSO segmentation for netback.
+
+This means that if GSO packets are bound for physical NIC then
+they will be segmented just before they are passed to their
+NIC driver.
+
+If they are for internel network only (VM-to-VM on one haost)
+then they will be be segmented, and thus increase performance.
+
+Idea suggested by Jesse Gross <jesse@nicira.com>.
+
+Signed-off-by: Dominic Curran <dominic.curran@citrix.com>
+---
+ drivers/xen/netback/interface.c |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+Index: linux-2.6.32.hg/drivers/xen/netback/interface.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/xen/netback/interface.c	2011-02-07 14:13:27.515574638 +0000
++++ linux-2.6.32.hg/drivers/xen/netback/interface.c	2011-02-07 14:18:32.171127670 +0000
+@@ -141,6 +141,11 @@ void netif_set_features(struct xen_netif
+ 
+ 	features &= ~(netif->features_disabled);
+ 
++	/* Set flag so that all pkts (including SKB_GSO_DODGY)
++	 * are forwarded without doing GSO segmentation for netback.
++	 */
++	features |= NETIF_F_GSO_ROBUST;
++
+ 	if (!(features & NETIF_F_SG) && dev->mtu > ETH_DATA_LEN)
+ 		dev->mtu = ETH_DATA_LEN;
+ 

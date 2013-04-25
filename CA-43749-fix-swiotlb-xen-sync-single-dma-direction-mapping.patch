@@ -1,0 +1,23 @@
+diff -r 1820fe6119d0 lib/swiotlb-xen.c
+--- a/lib/swiotlb-xen.c	Thu Dec 30 14:53:01 2010 +0000
++++ b/lib/swiotlb-xen.c	Fri Feb 04 09:09:32 2011 +0000
+@@ -574,6 +574,9 @@
+ 
+ 	BUG_ON(dir == DMA_NONE);
+ 
++	if (dir == DMA_BIDIRECTIONAL)
++		dir = DMA_FROM_DEVICE;
++
+ 	if (is_swiotlb_buffer(dev_addr))
+ 		sync_single(hwdev, phys_to_virt(paddr), size, dir);
+ }
+@@ -586,6 +589,9 @@
+ 	phys_addr_t paddr = dma_to_phys(hwdev, dev_addr);
+ 
+ 	BUG_ON(dir == DMA_NONE);
++
++	if (dir == DMA_BIDIRECTIONAL)
++		dir = DMA_TO_DEVICE;
+ 
+ 	if (is_swiotlb_buffer(dev_addr))
+ 		sync_single(hwdev, phys_to_virt(paddr), size, dir);

@@ -1,0 +1,39 @@
+diff -r d609c4de0d60 drivers/xen/xenbus/xenbus_client.c
+--- a/drivers/xen/xenbus/xenbus_client.c	Fri Jan 15 11:18:41 2010 +0000
++++ b/drivers/xen/xenbus/xenbus_client.c	Fri Jan 22 15:03:42 2010 +0000
+@@ -123,7 +123,8 @@
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(xenbus_watch_path2);
+-#else
++#endif
++
+ /**
+  * xenbus_watch_pathfmt - register a watch on a sprintf-formatted path
+  * @dev: xenbus device
+@@ -164,7 +165,6 @@
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(xenbus_watch_pathfmt);
+-#endif
+ 
+ 
+ /**
+diff -r d609c4de0d60 include/xen/xenbus.h
+--- a/include/xen/xenbus.h	Fri Jan 15 11:18:41 2010 +0000
++++ b/include/xen/xenbus.h	Fri Jan 22 15:03:42 2010 +0000
+@@ -232,13 +232,12 @@
+ 		       const char *path2, struct xenbus_watch *watch,
+ 		       void (*callback)(struct xenbus_watch *,
+ 					const char **, unsigned int));
+-#else
++#endif
+ int xenbus_watch_pathfmt(struct xenbus_device *dev, struct xenbus_watch *watch,
+ 			 void (*callback)(struct xenbus_watch *,
+ 					  const char **, unsigned int),
+ 			 const char *pathfmt, ...)
+ 	__attribute__ ((format (printf, 4, 5)));
+-#endif
+ 
+ /**
+  * Advertise in the store a change of the given driver to the given new_state.

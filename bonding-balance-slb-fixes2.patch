@@ -1,0 +1,137 @@
+diff -r 3f85cf2bdc9f drivers/net/bonding/bond_alb.c
+--- a/drivers/net/bonding/bond_alb.c	Thu Aug 28 13:42:04 2008 +0100
++++ b/drivers/net/bonding/bond_alb.c	Thu Aug 28 16:05:09 2008 +0100
+@@ -1035,9 +1035,6 @@ static void alb_swap_mac_addr(struct bon
+ 		disabled_slave = slave2;
+ 	}
+ 
+-	if (bond->alb_info.slb_enabled)
+-		slb_send_learning_packets(bond);
+-
+ 	if (bond->alb_info.rlb_enabled && slaves_state_differ) {
+ 		/* A disabled slave was assigned an active mac addr */
+ 		rlb_teach_disabled_mac_on_primary(bond,
+@@ -1225,7 +1222,7 @@ static int alb_set_mac_address(struct bo
+ 	int res;
+ 	int i;
+ 
+-	if (bond->alb_info.rlb_enabled) {
++	if (bond->alb_info.rlb_enabled || bond->alb_info.slb_enabled) {
+ 		return 0;
+ 	}
+ 
+@@ -1481,9 +1478,6 @@ void bond_alb_monitor(struct bonding *bo
+ 				bond_info->unbalanced_load = 0;
+ 			}
+ 		}
+-
+-		if (bond->alb_info.slb_enabled)
+-			slb_send_learning_packets(bond);
+ 
+ 		read_unlock(&bond->curr_slave_lock);
+ 
+@@ -1547,23 +1541,25 @@ int bond_alb_init_slave(struct bonding *
+ {
+ 	int res;
+ 
+-	res = alb_set_slave_mac_addr(slave, slave->perm_hwaddr,
+-				     bond->alb_info.rlb_enabled);
+-	if (res) {
+-		return res;
+-	}
+-
+-	/* caller must hold the bond lock for write since the mac addresses
+-	 * are compared and may be swapped.
+-	 */
+-	read_lock(&bond->lock);
+-
+-	res = alb_handle_addr_collision_on_attach(bond, slave);
+-
+-	read_unlock(&bond->lock);
+-
+-	if (res) {
+-		return res;
++	if (!bond->alb_info.slb_enabled) {
++		res = alb_set_slave_mac_addr(slave, slave->perm_hwaddr,
++					     bond->alb_info.rlb_enabled);
++		if (res) {
++			return res;
++		}
++
++		/* caller must hold the bond lock for write since the mac addresses
++		 * are compared and may be swapped.
++		 */
++		read_lock(&bond->lock);
++
++		res = alb_handle_addr_collision_on_attach(bond, slave);
++
++		read_unlock(&bond->lock);
++
++		if (res) {
++			return res;
++		}
+ 	}
+ 
+ 	tlb_init_slave(slave);
+@@ -1581,7 +1577,7 @@ int bond_alb_init_slave(struct bonding *
+ /* Caller must hold bond lock for write */
+ void bond_alb_deinit_slave(struct bonding *bond, struct slave *slave)
+ {
+-	if (bond->slave_cnt > 1) {
++	if (bond->alb_info.slb_enabled && bond->slave_cnt > 1) {
+ 		alb_change_hw_addr_on_detach(bond, slave);
+ 	}
+ 
+@@ -1654,7 +1650,7 @@ void bond_alb_handle_active_change(struc
+ 	swap_slave = bond->curr_active_slave;
+ 	bond->curr_active_slave = new_slave;
+ 
+-	if (!new_slave || (bond->slave_cnt == 0)) {
++	if (!new_slave || (bond->slave_cnt == 0) || bond->alb_info.slb_enabled) {
+ 		return;
+ 	}
+ 
+@@ -1712,7 +1708,7 @@ int bond_alb_set_mac_address(struct net_
+ 	 * Otherwise we'll need to pass the new address to it and handle
+ 	 * duplications.
+ 	 */
+-	if (!bond->curr_active_slave) {
++	if (!bond->curr_active_slave || bond->alb_info.slb_enabled) {
+ 		return 0;
+ 	}
+ 
+diff -r 3f85cf2bdc9f net/bridge/br_fdb.c
+--- a/net/bridge/br_fdb.c	Thu Aug 28 13:42:04 2008 +0100
++++ b/net/bridge/br_fdb.c	Thu Aug 28 14:39:07 2008 +0100
+@@ -391,10 +391,6 @@ int br_fdb_update(struct net_bridge *br,
+ 		/* attempt to update an entry for a local interface */
+ 		if (unlikely(fdb->is_local)) {
+ 			return 0;
+-			if (net_ratelimit())
+-				printk(KERN_WARNING "%s: received packet with "
+-				       "own address as source address\n",
+-				       source->dev->name);
+ 		} else {
+ 			/* fastpath: update of existing entry */
+ 			fdb->dst = source;
+diff -r 3f85cf2bdc9f net/bridge/br_if.c
+--- a/net/bridge/br_if.c	Thu Aug 28 13:42:04 2008 +0100
++++ b/net/bridge/br_if.c	Thu Aug 28 16:03:49 2008 +0100
+@@ -345,12 +345,17 @@ static struct sk_buff *create_switch_lea
+ 	struct learning_pkt pkt;
+ 	int size = sizeof(struct learning_pkt);
+ 	char *data;
++	int len;
+ 	const unsigned char dest_hw[ETH_ALEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+ 
+ 	memset(&pkt, 0, size);
+ 	memcpy(pkt.mac_dst, dest_hw, ETH_ALEN);
+ 	memcpy(pkt.mac_src, src_hw, ETH_ALEN);
+ 	pkt.type = __constant_htons(ETH_P_LOOP);
++	len = sprintf(&pkt.padding[0], "Citrix XenServer Failover");
++	len++; /* NULL */
++	memcpy(&pkt.padding[len], src_hw, ETH_ALEN); len += ETH_ALEN;
++	memcpy(&pkt.padding[len], dev->dev_addr, ETH_ALEN); len += ETH_ALEN;
+ 
+ 	skb = dev_alloc_skb(size);
+ 	if (!skb)

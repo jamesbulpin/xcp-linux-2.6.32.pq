@@ -1,0 +1,6 @@
+Duplicating this symbol causes:
+     WARNING: net/openvswitch/openvswitch_mod: 'br_should_route_hook' exported twice. Previous export was in net/bridge/bridge.ko
+     WARNING: modpost: Found 2 section mismatch(es).
+
+And confuses the check-kabi script.
+

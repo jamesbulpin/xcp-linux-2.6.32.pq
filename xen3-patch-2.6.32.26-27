@@ -1,0 +1,32 @@
+From: Jiri Slaby <jslaby@suse.cz>
+Subject: Linux 2.6.32.27
+Patch-mainline: 2.6.32.27
+
+Signed-off-by: Jiri Slaby <jslaby@suse.cz>
+Automatically created from "patches.kernel.org/patch-2.6.32.26-27" by xen-port-patches.py
+
+--- sle11sp1-2010-12-14.orig/arch/x86/kernel/quirks-xen.c	2010-02-09 17:12:56.000000000 +0100
++++ sle11sp1-2010-12-14/arch/x86/kernel/quirks-xen.c	2010-12-13 13:36:09.000000000 +0100
+@@ -513,6 +513,7 @@ static void __init quirk_amd_nb_node(str
+ {
+ 	struct pci_dev *nb_ht;
+ 	unsigned int devfn;
++	u32 node;
+ 	u32 val;
+ 
+ 	devfn = PCI_DEVFN(PCI_SLOT(dev->devfn), 0);
+@@ -521,7 +522,13 @@ static void __init quirk_amd_nb_node(str
+ 		return;
+ 
+ 	pci_read_config_dword(nb_ht, 0x60, &val);
+-	set_dev_node(&dev->dev, val & 7);
++	node = val & 7;
++	/*
++	 * Some hardware may return an invalid node ID,
++	 * so check it first:
++	 */
++	if (node_online(node))
++		set_dev_node(&dev->dev, node);
+ 	pci_dev_put(nb_ht);
+ }
+ 

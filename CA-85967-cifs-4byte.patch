@@ -1,0 +1,46 @@
+# HG changeset patch
+# Parent 8185b46898991ad6d3357a54ca53b1d6b747fe96
+
+diff -r 8185b4689899 fs/cifs/cifs_unicode.c
+--- a/fs/cifs/cifs_unicode.c	Mon Jul 30 09:34:05 2012 +0100
++++ b/fs/cifs/cifs_unicode.c	Mon Jul 30 09:35:10 2012 +0100
+@@ -192,24 +192,33 @@ cifs_strtoUCS(__le16 *to, const char *fr
+ {
+ 	int charlen;
+ 	int i;
+-	wchar_t *wchar_to = (wchar_t *)to; /* needed to quiet sparse */
++	wchar_t wchar_to; /* needed to quiet sparse */
++
++#if defined(__LITTLE_ENDIAN)
++	if (!strcmp(codepage->charset, "utf8")) {
++		i = utf8s_to_utf16s((const u8 *) from, len, (wchar_t *) to);
++		if (i >= 0)
++			goto success;
++	}
++#endif
+ 
+ 	for (i = 0; len && *from; i++, from += charlen, len -= charlen) {
+ 
+ 		/* works for 2.4.0 kernel or later */
+-		charlen = codepage->char2uni(from, len, &wchar_to[i]);
++		charlen = codepage->char2uni(from, len, &wchar_to);
++
+ 		if (charlen < 1) {
+ 			cERROR(1,
+ 			       ("strtoUCS: char2uni of %d returned %d",
+ 				(int)*from, charlen));
+ 			/* A question mark */
+-			to[i] = cpu_to_le16(0x003f);
++			wchar_to = 0x003f;
+ 			charlen = 1;
+-		} else
+-			to[i] = cpu_to_le16(wchar_to[i]);
+-
++		}
++		to[i] = cpu_to_le16(wchar_to);
+ 	}
+ 
++success:
+ 	to[i] = 0;
+ 	return i;
+ }

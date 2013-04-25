@@ -1,0 +1,69 @@
+blkfront: Fix blkfront backend switch race (bdev release)
+
+We cannot read backend state within bdev operations, because it risks
+grabbing the state change before xenbus gets to do it.
+
+Fixed by tracking deferral with a frontend switch to Closing. State
+exposure isn't strictly necessary, but the backends won't mind.
+
+For a 'clean' deferral this seems actually a more decent protocol than
+raising errors.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+diff --git a/drivers/xen/blkfront/blkfront.c b/drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c
++++ b/drivers/xen/blkfront/blkfront.c
+@@ -453,23 +453,36 @@
+ 
+ int blkif_release(struct inode *inode, struct file *filep)
+ {
+-	struct blkfront_info *info = inode->i_bdev->bd_disk->private_data;
+-	info->users--;
+-	if (info->users == 0) {
+-		/* Check whether we have been instructed to close.  We will
+-		   have ignored this request initially, as the device was
+-		   still mounted. */
+-		struct xenbus_device * dev = info->xbdev;
++	struct gendisk *disk = inode->i_bdev->bd_disk;
++	struct blkfront_info *info = disk->private_data;
++	struct xenbus_device *xbdev;
+ 
+-		if (!dev) {
+-			xlvbd_release_gendisk(info);
+-			kfree(info);
+-		} else if (xenbus_read_driver_state(dev->otherend)
+-			   == XenbusStateClosing && info->is_ready) {
+-			xlvbd_release_gendisk(info);
+-			xenbus_frontend_closed(dev);
+-		}
++	if (--info->users)
++		return 0;
++
++	/*
++	 * Check if we have been instructed to close. We will have
++	 * deferred this request, because the bdev was still open.
++	 */
++
++	mutex_lock(&info->mutex);
++	xbdev = info->xbdev;
++
++	if (xbdev && xbdev->state == XenbusStateClosing) {
++		/* pending switch to state closed */
++		xlvbd_release_gendisk(info);
++		xenbus_frontend_closed(info->xbdev);
+ 	}
++
++	mutex_unlock(&info->mutex);
++
++	if (!xbdev) {
++		/* sudden device removal */
++		xlvbd_release_gendisk(info);
++		disk->private_data = NULL;
++		kfree(info);
++	}
++
+ 	return 0;
+ }
+ 

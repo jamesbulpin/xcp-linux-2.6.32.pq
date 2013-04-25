@@ -1,0 +1,15 @@
+diff -r 3d8bdb2a97f7 arch/x86/mm/gup.c
+--- a/arch/x86/mm/gup.c	Thu Mar 05 12:45:23 2009 +0000
++++ b/arch/x86/mm/gup.c	Thu Mar 05 12:47:42 2009 +0000
+@@ -318,6 +313,11 @@
+ 		goto slow_irqon;
+ #endif
+ 
++#ifdef CONFIG_XEN
++	if (unlikely(mm->context.has_foreign_mappings))
++		goto slow_irqon;
++#endif
++
+ 	/*
+ 	 * XXX: batch / limit 'nr', to avoid large irq off latency
+ 	 * needs some instrumenting to determine the common sizes used by

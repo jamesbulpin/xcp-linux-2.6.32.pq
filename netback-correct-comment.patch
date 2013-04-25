@@ -1,0 +1,17 @@
+diff -r 5419d3ab42d1 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Mar 18 16:07:08 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Mar 18 16:08:44 2011 +0000
+@@ -328,8 +328,12 @@ int netif_be_start_xmit(struct sk_buff *
+ 
+ 	netbk = &xen_netbk[netif->group];
+ 
++	/* Drop the packet if the netif is not up or there is no carrier. */
++	if (unlikely(!netif_schedulable(netif)))
++		goto drop;
++
+ 	/* Drop the packet if the target domain has no receive buffers. */
+-	if (unlikely(!netif_schedulable(netif) || netbk_queue_full(netif)))
++	if (unlikely(netbk_queue_full(netif)))
+ 		goto drop;
+ 
+ 	/*

@@ -1,0 +1,128 @@
+Add a new ioctl to /proc/xen/privcmd which allows you to do certain
+XENMEM operations on restricted fds.
+
+diff -r e06af18fc4f4 drivers/xen/privcmd/privcmd.c
+--- a/drivers/xen/privcmd/privcmd.c	Tue Jun 22 16:35:53 2010 +0100
++++ b/drivers/xen/privcmd/privcmd.c	Tue Jun 22 16:36:46 2010 +0100
+@@ -25,6 +25,7 @@
+ #include <asm/uaccess.h>
+ #include <asm/tlb.h>
+ #include <asm/hypervisor.h>
++#include <xen/interface/memory.h>
+ #include <xen/interface/hvm/hvm_op.h>
+ #include <xen/public/privcmd.h>
+ #include <xen/interface/xen.h>
+@@ -450,6 +451,68 @@
+         }
+         break;
+ 
++        case IOCTL_PRIVCMD_MEMOP: {
++                privcmd_memop_t pmt;
++
++                if (copy_from_user(&pmt, udata, sizeof(pmt)))
++                        return -EFAULT;
++
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID) {
++                        switch (pmt.cmd) {
++                        case XENMEM_increase_reservation:
++                        case XENMEM_decrease_reservation:
++                        case XENMEM_populate_physmap:
++                                if (pmt.u.reservation.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case XENMEM_exchange:
++                                /* This is checked by Xen, but do it
++                                   here as well for sanity. */
++                                if (pmt.u.exchange.in.domid !=
++                                    pmt.u.exchange.out.domid)
++                                        return -EINVAL;
++                                if (pmt.u.exchange.in.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case XENMEM_maximum_ram_page:
++                        case XENMEM_machphys_mfn_list:
++                        case XENMEM_machphys_mapping:
++                        case XENMEM_memory_map:
++                        case XENMEM_machine_memory_map:
++                                return -EACCES;
++                        case XENMEM_current_reservation:
++                        case XENMEM_maximum_reservation:
++                        case XENMEM_maximum_gpfn:
++                                if (pmt.u.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case XENMEM_add_to_physmap:
++                                if (pmt.u.add_to_physmap.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case XENMEM_set_memory_map:
++                                if (pmt.u.foreign_memory_map.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        default:
++                                return -EACCES;
++                        }
++                }
++
++                ret = HYPERVISOR_memory_op(pmt.cmd, &pmt.u);
++                if (ret >= 0) {
++                        if (copy_to_user(udata, &pmt, sizeof(pmt)))
++                                ret = -EFAULT;
++                }
++                break;
++        }
++        break;
++
+         case IOCTL_PRIVCMD_HVMOP: {
+                 privcmd_hvmop_t pht;
+ 
+diff -r e06af18fc4f4 include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Tue Jun 22 16:35:53 2010 +0100
++++ b/include/xen/public/privcmd.h	Tue Jun 22 16:36:46 2010 +0100
+@@ -35,9 +35,11 @@
+ 
+ #include <linux/types.h>
+ #ifdef __KERNEL__
+-#include <xen/hvm.h>
++#include <xen/interface/hvm/hvm_op.h>
++#include <xen/interface/memory.h>
+ #else
+ #include <xen/hvm/hvm_op.h>
++#include <xen/memory.h>
+ #endif
+ 
+ typedef struct privcmd_hypercall
+@@ -87,6 +89,20 @@
+ 	} u  __attribute__((aligned(8)));
+ } privcmd_domctl_t;
+ 
++typedef struct privcmd_memop {
++        unsigned cmd;
++        union {
++                xen_memory_reservation_t reservation;
++                xen_memory_exchange_t exchange;
++                domid_t domid;
++                xen_add_to_physmap_t add_to_physmap;
++                xen_foreign_memory_map_t foreign_memory_map;
++                xen_machphys_mfn_list_t machphys_mfn_list;
++                xen_machphys_mapping_t machphys_mapping;
++                xen_memory_map_t memory_map;
++        } u;
++} privcmd_memop_t;
++
+ typedef struct privcmd_hvmop {
+         unsigned cmd;
+         union {
+@@ -121,5 +137,7 @@
+ 	_IOC(_IOC_NONE, 'P', 102, sizeof(privcmd_hvmop_t))
+ #define IOCTL_PRIVCMD_SHUTDOWN					\
+ 	_IOC(_IOC_NONE, 'P', 103, sizeof(sched_remote_shutdown_t))
++#define IOCTL_PRIVCMD_MEMOP				        \
++	_IOC(_IOC_NONE, 'P', 104, sizeof(privcmd_memop_t))
+ 
+ #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

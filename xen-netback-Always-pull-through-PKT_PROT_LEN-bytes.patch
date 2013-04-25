@@ -1,0 +1,36 @@
+From 5add68c2ee8a957c7732ad316cac3d58af0a5d4e Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Tue, 23 Feb 2010 12:11:51 +0000
+Subject: [PATCH] xen/netback: Always pull through PKT_PROT_LEN bytes into the linear part of an skb.
+
+Previously PKT_PROT_LEN would only have an effect on the first fragment.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+---
+ drivers/xen/netback/netback.c |   10 ++++++++++
+ 1 files changed, 10 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 7e1dfd1..e668704 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -1346,6 +1346,16 @@ static void net_tx_submit(void)
+ 
+ 		netbk_fill_frags(skb);
+ 
++		/*
++		 * If the initial fragment was < PKT_PROT_LEN then
++		 * pull through some bytes from the other fragments to
++		 * increase the linear region to PKT_PROT_LEN bytes.
++		 */
++		if (skb_headlen(skb) < PKT_PROT_LEN && skb_is_nonlinear(skb)) {
++			int target = min_t(int, skb->len, PKT_PROT_LEN);
++			__pskb_pull_tail(skb, target - skb_headlen(skb));
++		}
++
+ 		skb->dev      = netif->dev;
+ 		skb->protocol = eth_type_trans(skb, skb->dev);
+ 
+-- 
+1.5.6.5
+

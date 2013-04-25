@@ -1,0 +1,46 @@
+From 7ec9d1e805338fd18bbce73e8c72e4d09da8f2d5 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Tue, 11 May 2010 09:33:42 +0100
+Subject: [PATCH] xen/netback: correctly setup skb->ip_summed on receive
+
+In 2.6.18 CHECKSUM_PARTIAL and CHECKSUM_UNNECESSARY were both synonyms for
+CHECKSUM_HW. This is no longer the case and we need to select the correct one.
+
+  data_validated csum_blank -> ip_summed
+  0              0             CHECKSUM_NONE
+  0              1             CHECKSUM_PARTIAL
+  1              0             CHECKSUM_UNNECESSARY
+  1              1             CHECKSUM_PARTIAL
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Tested-by: Matej Zary <zary@cvtisr.sk>
+Tested-by: Michael D Labriola <mlabriol@gdeb.com>
+---
+ drivers/xen/netback/netback.c |   10 +++-------
+ 1 files changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 0bc6398..5dc4f98 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -1332,14 +1332,10 @@ static void net_tx_submit(void)
+ 			netif_idx_release(pending_idx);
+ 		}
+ 
+-		/*
+-		 * Old frontends do not assert data_validated but we
+-		 * can infer it from csum_blank so test both flags.
+-		 */
+-		if (txp->flags & (NETTXF_data_validated|NETTXF_csum_blank))
++		if (txp->flags & NETTXF_csum_blank)
+ 			skb->ip_summed = CHECKSUM_PARTIAL;
+-		else
+-			skb->ip_summed = CHECKSUM_NONE;
++		else if (txp->flags & NETTXF_data_validated)
++			skb->ip_summed = CHECKSUM_UNNECESSARY;
+ 
+ 		netbk_fill_frags(skb);
+ 
+-- 
+1.5.6.5
+

@@ -1,0 +1,452 @@
+From 0b2c59c0bcd6a812c58e56e5cecfedfe69611eb4 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Thu, 3 Jun 2010 03:12:35 +0000
+Subject: [PATCH 3/7] blktap: Remove broken sysfs pause/resume API
+
+blktap: Remove broken sysfs pause/resume API.
+
+Safe to remove. This never worked on kernels > 2.6.18 anyway, because
+the original pause/resume attribute flipping would deadlock. Newer
+toolstacks should use tap-ctl calls instead.
+
+Signed-off-by: Jake Wires <jake.wires@citrix.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |   14 -----
+ drivers/xen/blktap2/device.c  |   46 ---------------
+ drivers/xen/blktap2/request.c |    4 +-
+ drivers/xen/blktap2/ring.c    |  127 ------------------------------------------
+ drivers/xen/blktap2/sysfs.c   |  105 ++---------------------------------
+ 5 files changed, 6 insertions(+), 290 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 7bbb812..3574f53 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -31,8 +31,6 @@ extern int blktap_debug_level;
+ #define BLKTAP_RING_FD               2
+ #define BLKTAP_RING_VMA              3
+ #define BLKTAP_DEVICE                4
+-#define BLKTAP_PAUSE_REQUESTED       6
+-#define BLKTAP_PAUSED                7
+ #define BLKTAP_SHUTDOWN_REQUESTED    8
+ #define BLKTAP_PASSTHROUGH           9
+ 
+@@ -41,15 +39,9 @@ extern int blktap_debug_level;
+ #define BLKTAP2_IOCTL_ALLOC_TAP	     200
+ #define BLKTAP2_IOCTL_FREE_TAP       201
+ #define BLKTAP2_IOCTL_CREATE_DEVICE  202
+-#define BLKTAP2_IOCTL_SET_PARAMS     203
+-#define BLKTAP2_IOCTL_PAUSE          204
+-#define BLKTAP2_IOCTL_REOPEN         205
+-#define BLKTAP2_IOCTL_RESUME         206
+ 
+ #define BLKTAP2_MAX_MESSAGE_LEN      256
+ 
+-#define BLKTAP2_RING_MESSAGE_PAUSE   1
+-#define BLKTAP2_RING_MESSAGE_RESUME  2
+ #define BLKTAP2_RING_MESSAGE_CLOSE   3
+ 
+ #define BLKTAP_REQUEST_FREE          0
+@@ -120,8 +112,6 @@ struct blktap_ring {
+ 	unsigned long                  ring_vstart;
+ 	unsigned long                  user_vstart;
+ 
+-	int                            response;
+-
+ 	wait_queue_head_t              poll_wait;
+ 
+ 	dev_t                          devno;
+@@ -203,8 +193,6 @@ int blktap_ring_init(int *);
+ int blktap_ring_free(void);
+ int blktap_ring_create(struct blktap *);
+ int blktap_ring_destroy(struct blktap *);
+-int blktap_ring_pause(struct blktap *);
+-int blktap_ring_resume(struct blktap *);
+ void blktap_ring_kick_user(struct blktap *);
+ 
+ int blktap_sysfs_init(void);
+@@ -216,8 +204,6 @@ int blktap_device_init(int *);
+ void blktap_device_free(void);
+ int blktap_device_create(struct blktap *);
+ int blktap_device_destroy(struct blktap *);
+-int blktap_device_pause(struct blktap *);
+-int blktap_device_resume(struct blktap *);
+ int blktap_device_run_queue(struct blktap *);
+ void blktap_device_restart(struct blktap *);
+ void blktap_device_finish_request(struct blktap *,
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index b122f13..d718fef 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -923,52 +923,6 @@ blktap_device_configure(struct blktap *tap)
+ }
+ 
+ int
+-blktap_device_resume(struct blktap *tap)
+-{
+-	int err;
+-
+-	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !blktap_active(tap))
+-		return -ENODEV;
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return 0;
+-
+-	err = blktap_ring_resume(tap);
+-	if (err)
+-		return err;
+-
+-	/* device size may have changed */
+-	blktap_device_configure(tap);
+-
+-	BTDBG("restarting device\n");
+-	blktap_device_restart(tap);
+-
+-	return 0;
+-}
+-
+-int
+-blktap_device_pause(struct blktap *tap)
+-{
+-	unsigned long flags;
+-	struct blktap_device *dev = &tap->device;
+-
+-	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !blktap_active(tap))
+-		return -ENODEV;
+-
+-	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return 0;
+-
+-	spin_lock_irqsave(&dev->lock, flags);
+-
+-	blk_stop_queue(dev->gd->queue);
+-	set_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
+-
+-	spin_unlock_irqrestore(&dev->lock, flags);
+-
+-	return blktap_ring_pause(tap);
+-}
+-
+-int
+ blktap_device_destroy(struct blktap *tap)
+ {
+ 	struct blktap_device *dev = &tap->device;
+diff --git a/drivers/xen/blktap2/request.c b/drivers/xen/blktap2/request.c
+index 770736a..4efd013 100644
+--- a/drivers/xen/blktap2/request.c
++++ b/drivers/xen/blktap2/request.c
+@@ -238,12 +238,10 @@ blktap_request_free(struct blktap *tap, struct blktap_request *request)
+ 	list_add(&request->free_list, &pool.free_list);
+ 	atomic_dec(&handle->bucket->reqs_in_use);
+ 	free = atomic_dec_and_test(&pool.reqs_in_use);
++	tap->pending_cnt--;
+ 
+ 	spin_unlock_irqrestore(&pool.lock, flags);
+ 
+-	if (--tap->pending_cnt == 0)
+-		wake_up_interruptible(&tap->wq);
+-
+ 	if (free)
+ 		wake_up(&pool.wait_queue);
+ }
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 855b416..adea141 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -178,9 +178,6 @@ blktap_ring_vm_close(struct vm_area_struct *vma)
+ 	ring->vma = NULL;
+ 	clear_bit(BLKTAP_RING_VMA, &tap->dev_inuse);
+ 
+-	clear_bit(BLKTAP_PAUSED, &tap->dev_inuse);
+-	clear_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
+-
+ 	wake_up(&tap->wq);
+ }
+ 
+@@ -381,70 +378,6 @@ blktap_ring_ioctl(struct inode *inode, struct file *filp,
+ 
+ 		tap->params = params;
+ 		return blktap_device_create(tap);
+-
+-	case BLKTAP2_IOCTL_SET_PARAMS:
+-		if (!arg)
+-			return -EINVAL;
+-
+-		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-			return -EINVAL;
+-
+-		if (copy_from_user(&params, (struct blktap_params __user *)arg,
+-				   sizeof(params))) {
+-			BTERR("failed to get params\n");
+-			return -EFAULT;
+-		}
+-
+-		if (blktap_validate_params(tap, &params)) {
+-			BTERR("invalid params\n");
+-			return -EINVAL;
+-		}
+-
+-		tap->params = params;
+-		return 0;
+-
+-	case BLKTAP2_IOCTL_PAUSE:
+-		if (!test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse))
+-			return -EINVAL;
+-
+-		set_bit(BLKTAP_PAUSED, &tap->dev_inuse);
+-		clear_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
+-
+-		blktap_ring_set_message(tap, 0);
+-		wake_up_interruptible(&tap->wq);
+-
+-		return 0;
+-
+-
+-	case BLKTAP2_IOCTL_REOPEN:
+-		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-			return -EINVAL;
+-
+-		if (!arg)
+-			return -EINVAL;
+-
+-		if (copy_to_user((char __user *)arg,
+-				 tap->params.name,
+-				 strlen(tap->params.name) + 1))
+-			return -EFAULT;
+-
+-		blktap_ring_set_message(tap, 0);
+-		wake_up_interruptible(&tap->wq);
+-
+-		return 0;
+-
+-	case BLKTAP2_IOCTL_RESUME:
+-		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-			return -EINVAL;
+-
+-		tap->ring.response = (int)arg;
+-		if (!tap->ring.response)
+-			clear_bit(BLKTAP_PAUSED, &tap->dev_inuse);
+-
+-		blktap_ring_set_message(tap, 0);
+-		wake_up_interruptible(&tap->wq);
+-
+-		return 0;
+ 	}
+ 
+ 	return -ENOIOCTLCMD;
+@@ -494,66 +427,6 @@ blktap_ring_kick_user(struct blktap *tap)
+ }
+ 
+ int
+-blktap_ring_resume(struct blktap *tap)
+-{
+-	int err;
+-	struct blktap_ring *ring = &tap->ring;
+-
+-	if (!blktap_active(tap))
+-		return -ENODEV;
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return -EINVAL;
+-
+-	/* set shared flag for resume */
+-	ring->response = 0;
+-
+-	blktap_ring_set_message(tap, BLKTAP2_RING_MESSAGE_RESUME);
+-	blktap_ring_kick_user(tap);
+-
+-	wait_event_interruptible(tap->wq, ring->response ||
+-				 !test_bit(BLKTAP_PAUSED, &tap->dev_inuse));
+-
+-	err = ring->response;
+-	ring->response = 0;
+-
+-	BTDBG("err: %d\n", err);
+-
+-	if (err)
+-		return err;
+-
+-	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return -EAGAIN;
+-
+-	return 0;
+-}
+-
+-int
+-blktap_ring_pause(struct blktap *tap)
+-{
+-	if (!blktap_active(tap))
+-		return -ENODEV;
+-
+-	if (!test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse))
+-		return -EINVAL;
+-
+-	BTDBG("draining queue\n");
+-	wait_event_interruptible(tap->wq, !tap->pending_cnt);
+-	if (tap->pending_cnt)
+-		return -EAGAIN;
+-
+-	blktap_ring_set_message(tap, BLKTAP2_RING_MESSAGE_PAUSE);
+-	blktap_ring_kick_user(tap);
+-
+-	BTDBG("waiting for tapdisk response\n");
+-	wait_event_interruptible(tap->wq, test_bit(BLKTAP_PAUSED, &tap->dev_inuse));
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return -EAGAIN;
+-
+-	return 0;
+-}
+-
+-int
+ blktap_ring_destroy(struct blktap *tap)
+ {
+ 	if (!test_bit(BLKTAP_RING_FD, &tap->dev_inuse) &&
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index b67112c..a1756c8 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -38,12 +38,6 @@ blktap_sysfs_exit(struct blktap *tap)
+ }
+ 
+ #define CLASS_DEVICE_ATTR(a,b,c,d) DEVICE_ATTR(a,b,c,d)
+-
+-static ssize_t blktap_sysfs_pause_device(struct device *, struct device_attribute *, const char *, size_t);
+-CLASS_DEVICE_ATTR(pause, S_IWUSR, NULL, blktap_sysfs_pause_device);
+-static ssize_t blktap_sysfs_resume_device(struct device *, struct device_attribute *, const char *, size_t);
+-CLASS_DEVICE_ATTR(resume, S_IWUSR, NULL, blktap_sysfs_resume_device);
+-
+ static ssize_t
+ blktap_sysfs_set_name(struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
+ {
+@@ -57,12 +51,6 @@ blktap_sysfs_set_name(struct device *dev, struct device_attribute *attr, const c
+ 		err = -ENODEV;
+ 		goto out;
+ 	}
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
+-		err = -EPERM;
+-		goto out;
+-	}
+-
+ 	if (size > BLKTAP2_MAX_MESSAGE_LEN) {
+ 		err = -ENAMETOOLONG;
+ 		goto out;
+@@ -123,81 +111,6 @@ blktap_sysfs_remove_device(struct device *dev,
+ }
+ CLASS_DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
+ 
+-static ssize_t
+-blktap_sysfs_pause_device(struct device *dev,
+-			  struct device_attribute *attr,
+-			  const char *buf, size_t size)
+-{
+-	int err;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+-
+-	blktap_sysfs_enter(tap);
+-
+-	BTDBG("pausing %u:%u: dev_inuse: %lu\n",
+-	      MAJOR(tap->ring.devno), MINOR(tap->ring.devno), tap->dev_inuse);
+-
+-	if (!tap->ring.dev ||
+-	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
+-		err = -ENODEV;
+-		goto out;
+-	}
+-
+-	if (test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse)) {
+-		err = -EBUSY;
+-		goto out;
+-	}
+-
+-	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
+-		err = 0;
+-		goto out;
+-	}
+-
+-	err = blktap_device_pause(tap);
+-	if (!err) {
+-		device_remove_file(dev, &dev_attr_pause);
+-		err = device_create_file(dev, &dev_attr_resume);
+-	}
+-
+-out:
+-	blktap_sysfs_exit(tap);
+-
+-	return (err ? err : size);
+-}
+-
+-static ssize_t
+-blktap_sysfs_resume_device(struct device *dev,
+-			   struct device_attribute *attr,
+-			   const char *buf, size_t size)
+-{
+-	int err;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+-
+-	blktap_sysfs_enter(tap);
+-
+-	if (!tap->ring.dev ||
+-	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
+-		err = -ENODEV;
+-		goto out;
+-	}
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
+-		err = -EINVAL;
+-		goto out;
+-	}
+-
+-	err = blktap_device_resume(tap);
+-	if (!err) {
+-		device_remove_file(dev, &dev_attr_resume);
+-		err = device_create_file(dev, &dev_attr_pause);
+-	}
+-
+-out:
+-	blktap_sysfs_exit(tap);
+-
+-	BTDBG("returning %zd\n", (err ? err : size));
+-	return (err ? err : size);
+-}
+-
+ #ifdef ENABLE_PASSTHROUGH
+ static ssize_t
+ blktap_sysfs_enable_passthrough(struct device *dev,
+@@ -316,26 +229,18 @@ blktap_sysfs_create(struct blktap *tap)
+ 	printk(KERN_CRIT "%s: adding attributes for dev %p\n", __func__, dev);
+ 	err = device_create_file(dev, &dev_attr_name);
+ 	if (err)
+-		goto out;
++		goto fail;
+ 	err = device_create_file(dev, &dev_attr_remove);
+ 	if (err)
+-		goto out_unregister_name;
+-	err = device_create_file(dev, &dev_attr_pause);
+-	if (err)
+-		goto out_unregister_remove;
++		goto fail;
+ 	err = device_create_file(dev, &dev_attr_debug);
+ 	if (err)
+-		goto out_unregister_pause;
++		goto fail;
+ 
+ 	return 0;
+ 
+-out_unregister_pause:
+-	device_remove_file(dev, &dev_attr_pause);
+-out_unregister_remove:
+-	device_remove_file(dev, &dev_attr_remove);
+-out_unregister_name:
+-	device_remove_file(dev, &dev_attr_name);
+-out:
++fail:
++	device_unregister(dev);
+ 	return err;
+ }
+ 
+-- 
+1.7.0.4
+

@@ -1,0 +1,170 @@
+diff -r dd1c48ad06c8 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Wed Jun 02 11:12:47 2010 +0100
++++ b/drivers/xen/netback/common.h	Wed Jun 02 11:15:14 2010 +0100
+@@ -58,7 +58,6 @@
+ typedef struct netif_st {
+ 	/* Unique identifier for this interface. */
+ 	domid_t          domid;
+-	unsigned int     group;
+ 	unsigned int     handle;
+ 
+ 	u8               fe_dev_addr[6];
+@@ -100,7 +99,6 @@
+ 
+ 	/* Miscellaneous private stuff. */
+ 	struct list_head list;  /* scheduling list */
+-	struct list_head group_list;
+ 	atomic_t         refcnt;
+ 	struct net_device *dev;
+ 	struct net_device_stats stats;
+@@ -261,15 +259,12 @@
+ 
+ 	struct list_head pending_inuse_head;
+ 	struct list_head net_schedule_list;
+-	struct list_head group_domain_list;
+ 
+ 	spinlock_t net_schedule_list_lock;
+ 	spinlock_t release_lock;
+-	spinlock_t group_domain_list_lock;
+ 
+ 	struct page **mmap_pages;
+ 
+-	unsigned int group_domain_nr;
+ 	unsigned int alloc_index;
+ 
+ 	struct page_ext page_extinfo[MAX_PENDING_REQS];
+@@ -299,8 +294,4 @@
+ 
+ 	unsigned long mfn_list[MAX_MFN_ALLOC];
+ };
+-
+-extern struct xen_netbk *xen_netbk;
+-extern unsigned int netbk_nr_groups;
+-
+ #endif /* __NETIF__BACKEND__COMMON_H__ */
+diff -r dd1c48ad06c8 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Wed Jun 02 11:12:47 2010 +0100
++++ b/drivers/xen/netback/interface.c	Wed Jun 02 11:15:14 2010 +0100
+@@ -54,41 +54,14 @@
+ 
+ static void __netif_up(netif_t *netif)
+ {
+-	unsigned int group = 0;
+-	unsigned int min_domains = xen_netbk[0].group_domain_nr;
+-	unsigned int i;
+-
+-	/* Find the list which contains least number of domains. */
+-	for (i = 1; i < netbk_nr_groups; i++) {
+-		if (xen_netbk[i].group_domain_nr < min_domains) {
+-			group = i;
+-			min_domains = xen_netbk[i].group_domain_nr;
+-		}
+-	}
+-
+-	spin_lock(&xen_netbk[group].group_domain_list_lock);
+-	list_add_tail(&netif->group_list,
+-		      &xen_netbk[group].group_domain_list);
+-	xen_netbk[group].group_domain_nr++;
+-	spin_unlock(&xen_netbk[group].group_domain_list_lock);
+-	netif->group = group;
+-
+ 	enable_irq(netif->irq);
+ 	netif_schedule_work(netif);
+ }
+ 
+ static void __netif_down(netif_t *netif)
+ {
+-	struct xen_netbk *netbk = xen_netbk + netif->group;
+-
+ 	disable_irq(netif->irq);
+ 	netif_deschedule_work(netif);
+-
+-	netif->group = UINT_MAX;
+-	spin_lock(&netbk->group_domain_list_lock);
+-	netbk->group_domain_nr--;
+-	list_del(&netif->group_list);
+-	spin_unlock(&netbk->group_domain_list_lock);
+ }
+ 
+ static int net_open(struct net_device *dev)
+@@ -230,7 +203,6 @@
+ 	netif = netdev_priv(dev);
+ 	memset(netif, 0, sizeof(*netif));
+ 	netif->domid  = domid;
+-	netif->group = UINT_MAX;
+ 	netif->handle = handle;
+ 	atomic_set(&netif->refcnt, 1);
+ 	init_waitqueue_head(&netif->waiting_to_free);
+diff -r dd1c48ad06c8 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed Jun 02 11:12:47 2010 +0100
++++ b/drivers/xen/netback/netback.c	Wed Jun 02 11:15:14 2010 +0100
+@@ -41,10 +41,10 @@
+ 
+ /*define NETBE_DEBUG_INTERRUPT*/
+ 
+-struct xen_netbk *xen_netbk;
+-unsigned int netbk_nr_groups;
++static struct xen_netbk *xen_netbk;
++static unsigned int netbk_nr_groups = 1;
+ 
+-#define GET_GROUP_INDEX(netif) ((netif)->group)
++#define GET_GROUP_INDEX(netif) (0)
+ 
+ static void netif_idx_release(struct xen_netbk *, u16 pending_idx);
+ static void make_tx_response(netif_t *netif, 
+@@ -93,8 +93,6 @@
+ static int MODPARM_permute_returns = 0;
+ module_param_named(permute_returns, MODPARM_permute_returns, bool, S_IRUSR|S_IWUSR);
+ MODULE_PARM_DESC(permute_returns, "Randomly permute the order in which TX responses are sent to the frontend");
+-module_param_named(groups, netbk_nr_groups, uint, 0);
+-MODULE_PARM_DESC(groups, "Specify the number of tasklet pairs to use");
+ 
+ int netbk_copy_skb_mode;
+ 
+@@ -1521,20 +1519,9 @@
+ irqreturn_t netif_be_int(int irq, void *dev_id)
+ {
+ 	netif_t *netif = dev_id;
+-	unsigned int group = GET_GROUP_INDEX(netif);
+-
+-	if (unlikely(group >= netbk_nr_groups)) {
+-		/*
+-		 * Short of having a way to bind the IRQ in disabled mode
+-		 * (IRQ_NOAUTOEN), we have to ignore the first invocation(s)
+-		 * (before we got assigned to a group).
+-		 */
+-		BUG_ON(group != UINT_MAX);
+-		return IRQ_HANDLED;
+-	}
+ 
+ 	add_to_net_schedule_list_tail(netif);
+-	maybe_schedule_tx_action(group);
++	maybe_schedule_tx_action(GET_GROUP_INDEX(netif));
+ 
+ 	if (netif_schedulable(netif) && !netbk_queue_full(netif))
+ 		netif_wake_queue(netif->dev);
+@@ -1650,11 +1637,8 @@
+ 	if (!is_running_on_xen())
+ 		return -ENODEV;
+ 
+-	if (!netbk_nr_groups)
+-		netbk_nr_groups = (num_online_cpus() + 1) / 2;
+-
+ 	/* We can increase reservation by this much in net_rx_action(). */
+-	balloon_update_driver_allowance(netbk_nr_groups * NET_RX_RING_SIZE);
++	balloon_update_driver_allowance(NET_RX_RING_SIZE);
+ 
+ 	xen_netbk = __vmalloc(netbk_nr_groups * sizeof(*xen_netbk),
+ 			    GFP_KERNEL|__GFP_HIGHMEM|__GFP_ZERO, PAGE_KERNEL);
+@@ -1693,11 +1677,9 @@
+ 
+ 		INIT_LIST_HEAD(&netbk->pending_inuse_head);
+ 		INIT_LIST_HEAD(&netbk->net_schedule_list);
+-		INIT_LIST_HEAD(&netbk->group_domain_list);
+ 
+ 		spin_lock_init(&netbk->net_schedule_list_lock);
+ 		spin_lock_init(&netbk->release_lock);
+-		spin_lock_init(&netbk->group_domain_list_lock);
+ 
+ 		for (i = 0; i < MAX_PENDING_REQS; i++) {
+ 			page = netbk->mmap_pages[i];

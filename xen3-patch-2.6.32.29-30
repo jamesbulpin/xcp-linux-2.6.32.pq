@@ -1,0 +1,18 @@
+From: Jiri Slaby <jslaby@suse.cz>
+Subject: Linux 2.6.32.30
+Patch-mainline: Linux 2.6.32.30
+
+Signed-off-by: Jiri Slaby <jslaby@suse.cz>
+Automatically created from "patches.kernel.org/patch-2.6.32.29-30" by xen-port-patches.py
+
+diff -r de5e69b3ac8a arch/x86/kernel/acpi/boot.c
+--- a/arch/x86/kernel/acpi/boot.c	Wed Aug 17 15:43:41 2011 +0100
++++ b/arch/x86/kernel/acpi/boot.c	Wed Aug 17 15:44:36 2011 +0100
+@@ -79,6 +79,7 @@ static u64 acpi_lapic_addr __initdata = 
+ #endif
+ #else
+ #define acpi_skip_timer_override 0
++#define acpi_fix_pin2_polarity 0
+ #endif
+ 
+ #ifndef __HAVE_ARCH_CMPXCHG

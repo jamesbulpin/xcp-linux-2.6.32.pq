@@ -1,0 +1,60 @@
+From d6d9cc0ce2973f6a6e5f4bbfc2f8af0dc31150b8 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:34 -0700
+Subject: [PATCH 14/18] xen/blktap: Avoid a tapdisk deadlock in device destruction.
+
+The last bdev opener closing syncs the inode down to the disk,
+potentially deadlocking blktap_device_destroy when winning a race for
+bd_mutex beforehand.
+
+Trivially fixed by try-locking the mutex. But still dangerous if the
+prerequisites for succeeding open ever change, so add some strategic
+commentary.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/device.c |   14 +++++++++++++-
+ 1 files changed, 13 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 5540124..65ce712 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -43,6 +43,10 @@ blktap_device_open(struct block_device *bdev, fmode_t mode)
+ 	if (!tapdev)
+ 		return -ENXIO;
+ 
++	/* NB. we might have bounced a bd trylock by tapdisk. when
++	 * failing for reasons not !tapdev, make sure to kick tapdisk
++	 * out of destroy wait state again. */
++
+ 	return 0;
+ }
+ 
+@@ -734,7 +738,14 @@ blktap_device_destroy(struct blktap *tap)
+ 		return 0;
+ 
+ 	bdev = bdget_disk(gd, 0);
+-	mutex_lock(&bdev->bd_mutex);
++
++	err = !mutex_trylock(&bdev->bd_mutex);
++	if (err) {
++		/* NB. avoid a deadlock. the last opener syncs the
++		 * bdev holding bd_mutex. */
++		err = -EBUSY;
++		goto out_nolock;
++	}
+ 
+ 	if (bdev->bd_openers) {
+ 		err = -EBUSY;
+@@ -753,6 +764,7 @@ blktap_device_destroy(struct blktap *tap)
+ 	err = 0;
+ out:
+ 	mutex_unlock(&bdev->bd_mutex);
++out_nolock:
+ 	bdput(bdev);
+ 
+ 	return err;
+-- 
+1.7.0.4
+

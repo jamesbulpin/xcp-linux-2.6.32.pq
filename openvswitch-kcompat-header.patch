@@ -1,0 +1,39 @@
+diff -r 9efd0732c3c0 net/openvswitch/datapath.h
+--- a/net/openvswitch/datapath.h
++++ b/net/openvswitch/datapath.h
+@@ -32,6 +32,7 @@
+ #include "flow.h"
+ #include "dp_sysfs.h"
+ #include "vlan.h"
++#include "kcompat.h"
+ 
+ struct vport;
+ 
+diff -r 9efd0732c3c0 net/openvswitch/kcompat.h
+--- /dev/null
++++ b/net/openvswitch/kcompat.h
+@@ -0,0 +1,24 @@
++#define HAVE_CSUM_COPY_DBG 1
++#define HAVE_ERR_CAST 1
++#define HAVE_IPV4_IS_MULTICAST 1
++#define HAVE_DEV_DISABLE_LRO 1
++#define HAVE_DEV_GET_STATS 1
++#define HAVE_DEV_GET_BY_INDEX_RCU 1
++#define HAVE_RCU_READ_LOCK_HELD 1
++#define HAVE_SKB_DST_ACCESSOR_FUNCS 1
++#define HAVE_SKB_COPY_FROM_LINEAR_DATA_OFFSET 1
++#define HAVE_SKB_COW_HEAD 1
++#define HAVE_SKBUFF_HEADER_HELPERS 1
++#define HAVE_ICMP6_HDR 1
++#define HAVE_SKB_WARN_LRO 1
++#define HAVE_KMEMDUP 1
++#define HAVE_BOOL_TYPE 1
++#define HAVE_CSUM_TYPES 1
++#define HAVE_CSUM_REPLACE4 1
++#define HAVE_CSUM_UNFOLD 1
++#define HAVE_NLA_NUL_STRING 1
++#define HAVE_NLA_GET_BE16 1
++#define HAVE_NLA_FIND_NESTED 1
++#define HAVE_RTNL_LINK_STATS64 1
++#define HAVE_VLAN_BUG_WORKAROUND 1
++#define HAVE_LOG2_H 1

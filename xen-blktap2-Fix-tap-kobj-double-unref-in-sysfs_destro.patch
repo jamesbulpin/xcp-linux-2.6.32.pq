@@ -1,0 +1,36 @@
+From 0b5b80fe1e7dc36c53f1fec8f8d6510327dfc7aa Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Fri, 26 Feb 2010 10:43:06 -0800
+Subject: [PATCH 23/23] xen/blktap: Fix tap kobj double unref in sysfs_destroy
+
+It's that final put_device in device_unregister which is supposed to
+clear the caller's reference. Subtle indeed, because refcount went
+2->3 when after sysfs_destroy:
+
+ +1 for our own ring->dev
+ +1 for the open sysfs ./remove attribute
+ +1 for the callback scheduled
+
+Drops to 1 in device_unregister and 0 only after leaving callbacks.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/sysfs.c |    1 -
+ 1 files changed, 0 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 6a164ac..23a3a51 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -360,7 +360,6 @@ blktap_sysfs_destroy(struct blktap *tap)
+ 				     !atomic_read(&tap->ring.sysfs_refcnt)))
+ 		return -EAGAIN;
+ 
+-	put_device(dev);
+ 	device_schedule_callback(dev, device_unregister);
+ 
+ 	return 0;
+-- 
+1.7.0.4
+

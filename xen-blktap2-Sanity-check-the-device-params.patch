@@ -1,0 +1,347 @@
+From b4bf8c4f3bdc19afaed7e651b69696392beda9a6 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:31 -0700
+Subject: [PATCH 01/18] xen/blktap: Sanity check the device params.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h |   15 +------
+ drivers/xen/blktap2/device.c |  100 ++++++++++++++++++++++++++++---------------
+ drivers/xen/blktap2/ring.c   |   20 +++-----
+ drivers/xen/blktap2/sysfs.c  |   27 +++++++-----
+ 4 files changed, 91 insertions(+), 71 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 33603cd..12a7821 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -153,8 +153,6 @@ struct blktap {
+ 	atomic_t                       refcnt;
+ 	unsigned long                  dev_inuse;
+ 
+-	struct blktap_params           params;
+-
+ 	struct blktap_ring             ring;
+ 	struct blktap_device           device;
+ 
+@@ -163,6 +161,7 @@ struct blktap {
+ 	struct scatterlist             sg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+ 
+ 	wait_queue_head_t              wq;
++	char                           name[BLKTAP2_MAX_MESSAGE_LEN];
+ 
+ 	struct blktap_statistics       stats;
+ };
+@@ -175,16 +174,6 @@ blktap_active(struct blktap *tap)
+ 	return test_bit(BLKTAP_RING_VMA, &tap->dev_inuse);
+ }
+ 
+-static inline int
+-blktap_validate_params(struct blktap *tap, struct blktap_params *params)
+-{
+-	/* TODO: sanity check */
+-	params->name[sizeof(params->name) - 1] = '\0';
+-	BTINFO("%s: capacity: %llu, sector-size: %lu\n",
+-	       params->name, params->capacity, params->sector_size);
+-	return 0;
+-}
+-
+ int blktap_control_destroy_device(struct blktap *);
+ 
+ int blktap_ring_init(int *);
+@@ -200,7 +189,7 @@ int blktap_sysfs_destroy(struct blktap *);
+ 
+ int blktap_device_init(int *);
+ void blktap_device_free(void);
+-int blktap_device_create(struct blktap *);
++int blktap_device_create(struct blktap *, struct blktap_params *);
+ int blktap_device_destroy(struct blktap *);
+ int blktap_device_run_queue(struct blktap *);
+ void blktap_device_restart(struct blktap *);
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 1756f7c..d2a4501 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -770,23 +770,21 @@ blktap_device_restart(struct blktap *tap)
+ }
+ 
+ static void
+-blktap_device_configure(struct blktap *tap)
++blktap_device_configure(struct blktap *tap,
++			struct blktap_params *params)
+ {
+ 	struct request_queue *rq;
+ 	struct blktap_device *dev = &tap->device;
+ 
+-	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !dev->gd)
+-		return;
+-
+ 	dev = &tap->device;
+ 	rq  = dev->gd->queue;
+ 
+ 	spin_lock_irq(&dev->lock);
+ 
+-	set_capacity(dev->gd, tap->params.capacity);
++	set_capacity(dev->gd, params->capacity);
+ 
+ 	/* Hard sector size and max sectors impersonate the equiv. hardware. */
+-	blk_queue_hardsect_size(rq, tap->params.sector_size);
++	blk_queue_logical_block_size(rq, params->sector_size);
+ 	blk_queue_max_sectors(rq, 512);
+ 
+ 	/* Each segment in a request is up to an aligned page in size. */
+@@ -803,6 +801,37 @@ blktap_device_configure(struct blktap *tap)
+ 	spin_unlock_irq(&dev->lock);
+ }
+ 
++static int
++blktap_device_validate_params(struct blktap *tap,
++			      struct blktap_params *params)
++{
++	struct device *dev = tap->ring.dev;
++	int sector_order, name_sz;
++
++	sector_order = ffs(params->sector_size) - 1;
++
++	if (sector_order <  9 ||
++	    sector_order > 12 ||
++	    params->sector_size != 1U<<sector_order)
++		goto fail;
++
++	if (!params->capacity ||
++	    (params->capacity > ULLONG_MAX >> sector_order))
++		goto fail;
++
++	name_sz = min(sizeof(params->name), sizeof(tap->name));
++	if (strnlen(params->name, name_sz) >= name_sz)
++		goto fail;
++
++	return 0;
++
++fail:
++	params->name[name_sz-1] = 0;
++	dev_err(dev, "capacity: %llu, sector-size: %lu, name: %s\n",
++		params->capacity, params->sector_size, params->name);
++	return -EINVAL;
++}
++
+ int
+ blktap_device_destroy(struct blktap *tap)
+ {
+@@ -835,32 +864,29 @@ blktap_device_destroy(struct blktap *tap)
+ }
+ 
+ int
+-blktap_device_create(struct blktap *tap)
++blktap_device_create(struct blktap *tap, struct blktap_params *params)
+ {
+ 	int minor, err;
+ 	struct gendisk *gd;
+ 	struct request_queue *rq;
+-	struct blktap_device *dev;
++	struct blktap_device *tapdev;
+ 
+-	gd    = NULL;
+-	rq    = NULL;
+-	dev   = &tap->device;
+-	minor = tap->minor;
++	gd     = NULL;
++	rq     = NULL;
++	tapdev = &tap->device;
++	minor  = tap->minor;
+ 
+ 	if (test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
+ 		return -EEXIST;
+ 
+-	if (blktap_validate_params(tap, &tap->params))
++	if (blktap_device_validate_params(tap, params))
+ 		return -EINVAL;
+ 
+-	BTINFO("minor %d sectors %Lu sector-size %lu\n",
+-	       minor, tap->params.capacity, tap->params.sector_size);
+-
+-	err = -ENODEV;
+-
+ 	gd = alloc_disk(1);
+-	if (!gd)
+-		goto error;
++	if (!gd) {
++		err = -ENOMEM;
++		goto fail;
++	}
+ 
+ 	if (minor < 26)
+ 		sprintf(gd->disk_name, "tapdev%c", 'a' + minor);
+@@ -871,35 +897,39 @@ blktap_device_create(struct blktap *tap)
+ 	gd->major = blktap_device_major;
+ 	gd->first_minor = minor;
+ 	gd->fops = &blktap_device_file_operations;
+-	gd->private_data = dev;
+-
+-	spin_lock_init(&dev->lock);
+-	rq = blk_init_queue(blktap_device_do_request, &dev->lock);
+-	if (!rq)
+-		goto error;
++	gd->private_data = tapdev;
+ 
++	spin_lock_init(&tapdev->lock);
++	rq = blk_init_queue(blktap_device_do_request, &tapdev->lock);
++	if (!rq) {
++		err = -ENOMEM;
++		goto fail;
++	}
+ 	elevator_init(rq, "noop");
+ 
+ 	gd->queue     = rq;
+-	rq->queuedata = dev;
+-	dev->gd       = gd;
++	rq->queuedata = tapdev;
++	tapdev->gd    = gd;
++
++	blktap_device_configure(tap, params);
++	add_disk(gd);
++
++	if (params->name[0])
++		strncpy(tap->name, params->name, sizeof(tap->name)-1);
+ 
+ 	set_bit(BLKTAP_DEVICE, &tap->dev_inuse);
+-	blktap_device_configure(tap);
+ 
+-	add_disk(gd);
++	dev_info(&gd->dev, "sector-size: %u capacity: %llu\n",
++		 rq->hardsect_size, get_capacity(gd));
+ 
+-	err = 0;
+-	goto out;
++	return 0;
+ 
+- error:
++fail:
+ 	if (gd)
+ 		del_gendisk(gd);
+ 	if (rq)
+ 		blk_cleanup_queue(rq);
+ 
+- out:
+-	BTINFO("creation of %u:%u: %d\n", blktap_device_major, tap->minor, err);
+ 	return err;
+ }
+ 
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index d7d0c79..807477d 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -342,7 +342,6 @@ static int
+ blktap_ring_ioctl(struct inode *inode, struct file *filp,
+ 		  unsigned int cmd, unsigned long arg)
+ {
+-	struct blktap_params params;
+ 	struct blktap *tap = filp->private_data;
+ 
+ 	BTDBG("%d: cmd: %u, arg: %lu\n", tap->minor, cmd, arg);
+@@ -353,26 +352,23 @@ blktap_ring_ioctl(struct inode *inode, struct file *filp,
+ 		blktap_read_ring(tap);
+ 		return 0;
+ 
+-	case BLKTAP2_IOCTL_CREATE_DEVICE:
++	case BLKTAP2_IOCTL_CREATE_DEVICE: {
++		struct blktap_params params;
++		void __user *ptr = (void *)arg;
++
+ 		if (!arg)
+ 			return -EINVAL;
+ 
+ 		if (!blktap_active(tap))
+-			return -ENODEV;
++			return -EACCES;
+ 
+-		if (copy_from_user(&params, (struct blktap_params __user *)arg,
+-				   sizeof(params))) {
++		if (copy_from_user(&params, ptr, sizeof(params))) {
+ 			BTERR("failed to get params\n");
+ 			return -EFAULT;
+ 		}
+ 
+-		if (blktap_validate_params(tap, &params)) {
+-			BTERR("invalid params\n");
+-			return -EINVAL;
+-		}
+-
+-		tap->params = params;
+-		return blktap_device_create(tap);
++		return blktap_device_create(tap, &params);
++	}
+ 	}
+ 
+ 	return -ENOIOCTLCMD;
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index e342d15..07a4a03 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -2,6 +2,8 @@
+ #include <linux/device.h>
+ #include <linux/module.h>
+ #include <linux/sched.h>
++#include <linux/genhd.h>
++#include <linux/blkdev.h>
+ 
+ #include "blktap.h"
+ 
+@@ -61,7 +63,7 @@ blktap_sysfs_set_name(struct device *dev, struct device_attribute *attr, const c
+ 		goto out;
+ 	}
+ 
+-	snprintf(tap->params.name, sizeof(tap->params.name) - 1, "%s", buf);
++	snprintf(tap->name, sizeof(tap->name) - 1, "%s", buf);
+ 	err = size;
+ 
+ out:
+@@ -79,8 +81,8 @@ blktap_sysfs_get_name(struct device *dev, struct device_attribute *attr, char *b
+ 
+ 	if (!tap->ring.dev)
+ 		size = -ENODEV;
+-	else if (tap->params.name[0])
+-		size = sprintf(buf, "%s\n", tap->params.name);
++	else if (tap->name[0])
++		size = sprintf(buf, "%s\n", tap->name);
+ 	else
+ 		size = sprintf(buf, "%d\n", tap->minor);
+ 
+@@ -131,12 +133,18 @@ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, cha
+ 	}
+ 
+ 	tmp += sprintf(tmp, "%s (%u:%u), refcnt: %d, dev_inuse: 0x%08lx\n",
+-		       tap->params.name, MAJOR(tap->ring.devno),
++		       tap->name, MAJOR(tap->ring.devno),
+ 		       MINOR(tap->ring.devno), atomic_read(&tap->refcnt),
+ 		       tap->dev_inuse);
+-	tmp += sprintf(tmp, "capacity: 0x%llx, sector size: 0x%lx, "
+-		       "device users: %d\n", tap->params.capacity,
+-		       tap->params.sector_size, tap->device.users);
++
++	if (tap->device.gd) {
++		struct gendisk *gd = tap->device.gd;
++		struct block_device *bdev = bdget_disk(gd, 0);
++		tmp += sprintf(tmp, "capacity: 0x%llx, sector size: %#x, "
++			       "device users: %d\n", get_capacity(gd),
++			       gd->queue->hardsect_size, bdev->bd_openers);
++		bdput(bdev);
++	}
+ 
+ 	tmp += sprintf(tmp, "pending requests: %d\n", tap->pending_cnt);
+ 	for (i = 0; i < MAX_PENDING_REQS; i++) {
+@@ -263,10 +271,7 @@ blktap_sysfs_show_devices(struct class *class, char *buf)
+ 		if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
+ 			continue;
+ 
+-		ret += sprintf(buf + ret, "%d ", tap->minor);
+-		ret += snprintf(buf + ret, sizeof(tap->params.name) - 1,
+-				tap->params.name);
+-		ret += sprintf(buf + ret, "\n");
++		ret += sprintf(buf + ret, "%d %s\n", tap->minor, tap->name);
+ 	}
+ 
+ 	return ret;
+-- 
+1.7.0.4
+

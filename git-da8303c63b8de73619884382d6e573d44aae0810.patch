@@ -1,0 +1,122 @@
+From da8303c63b8de73619884382d6e573d44aae0810 Mon Sep 17 00:00:00 2001
+From: Tejun Heo <tj@kernel.org>
+Date: Wed, 19 Oct 2011 14:33:05 +0200
+Subject: [PATCH] block: make get_request[_wait]() fail if queue is dead
+
+Currently get_request[_wait]() allocates request whether queue is dead
+or not.  This patch makes get_request[_wait]() return NULL if @q is
+dead.  blk_queue_bio() is updated to fail the submitted bio if request
+allocation fails.  While at it, add docbook comments for
+get_request[_wait]().
+
+Note that the current code has rather unclear (there are spurious DEAD
+tests scattered around) assumption that the owner of a queue
+guarantees that no request travels block layer if the queue is dead
+and this patch in itself doesn't change much; however, this will allow
+fixing the broken assumption in the next patch.
+
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+---
+ block/blk-core.c |   54 ++++++++++++++++++++++++++++++++++++++----------------
+ 1 files changed, 38 insertions(+), 16 deletions(-)
+
+diff -r b1b901f1e910 block/blk-core.c
+--- a/block/blk-core.c	Wed Oct 19 14:32:38 2011 +0200
++++ b/block/blk-core.c	Thu May 24 18:10:23 2012 +0100
+@@ -739,10 +739,19 @@ static void freed_request(struct request
+ 		__freed_request(q, sync ^ 1);
+ }
+ 
+-/*
+- * Get a free request, queue_lock must be held.
+- * Returns NULL on failure, with queue_lock held.
+- * Returns !NULL on success, with queue_lock *not held*.
++/**
++ * get_request - get a free request
++ * @q: request_queue to allocate request from
++ * @rw_flags: RW and SYNC flags
++ * @bio: bio to allocate request for (can be %NULL)
++ * @gfp_mask: allocation mask
++ *
++ * Get a free request from @q.  This function may fail under memory
++ * pressure or if @q is dead.
++ *
++ * Must be callled with @q->queue_lock held and,
++ * Returns %NULL on failure, with @q->queue_lock held.
++ * Returns !%NULL on success, with @q->queue_lock *not held*.
+  */
+ static struct request *get_request(struct request_queue *q, int rw_flags,
+ 				   struct bio *bio, gfp_t gfp_mask)
+@@ -753,6 +762,9 @@ static struct request *get_request(struc
+ 	const bool is_sync = rw_is_sync(rw_flags) != 0;
+ 	int may_queue;
+ 
++	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
++		return NULL;
++
+ 	may_queue = elv_may_queue(q, rw_flags);
+ 	if (may_queue == ELV_MQUEUE_NO)
+ 		goto rq_starved;
+@@ -844,11 +856,18 @@ out:
+ 	return rq;
+ }
+ 
+-/*
+- * No available requests for this queue, unplug the device and wait for some
+- * requests to become available.
++/**
++ * get_request_wait - get a free request with retry
++ * @q: request_queue to allocate request from
++ * @rw_flags: RW and SYNC flags
++ * @bio: bio to allocate request for (can be %NULL)
+  *
+- * Called with q->queue_lock held, and returns with it unlocked.
++ * Get a free request from @q.  This function keeps retrying under memory
++ * pressure and fails iff @q is dead.
++ *
++ * Must be callled with @q->queue_lock held and,
++ * Returns %NULL on failure, with @q->queue_lock held.
++ * Returns !%NULL on success, with @q->queue_lock *not held*.
+  */
+ static struct request *get_request_wait(struct request_queue *q, int rw_flags,
+ 					struct bio *bio)
+@@ -862,6 +881,9 @@ static struct request *get_request_wait(
+ 		struct io_context *ioc;
+ 		struct request_list *rl = &q->rq;
+ 
++		if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
++			return NULL;
++
+ 		prepare_to_wait_exclusive(&rl->wait[is_sync], &wait,
+ 				TASK_UNINTERRUPTIBLE);
+ 
+@@ -896,13 +918,12 @@ struct request *blk_get_request(struct r
+ 	BUG_ON(rw != READ && rw != WRITE);
+ 
+ 	spin_lock_irq(q->queue_lock);
+-	if (gfp_mask & __GFP_WAIT) {
++	if (gfp_mask & __GFP_WAIT)
+ 		rq = get_request_wait(q, rw, NULL);
+-	} else {
++	else
+ 		rq = get_request(q, rw, NULL, gfp_mask);
+-		if (!rq)
+-			spin_unlock_irq(q->queue_lock);
+-	}
++	if (!rq)
++		spin_unlock_irq(q->queue_lock);
+ 	/* q->queue_lock is unlocked at this point */
+ 
+ 	return rq;
+@@ -1284,6 +1305,10 @@ get_rq:
+ 	 * Returns with the queue unlocked.
+ 	 */
+ 	req = get_request_wait(q, rw_flags, bio);
++	if (unlikely(!req)) {
++		bio_endio(bio, -ENODEV);	/* @q is dead */
++		goto out;
++	}
+ 
+ 	/*
+ 	 * After dropping the lock and possibly sleeping here, our request

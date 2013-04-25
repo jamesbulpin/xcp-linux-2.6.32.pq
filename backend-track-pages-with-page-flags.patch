@@ -1,0 +1,73 @@
+diff -r 7d1858b6cdbb drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jun 30 23:59:39 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jul 01 00:00:01 2010 -0700
+@@ -637,6 +637,9 @@
+ 	if (!pending_reqs || !pending_grant_handles || !pending_pages)
+ 		goto out_of_memory;
+ 
++	for(i = 0; i < mmap_pages; i++)
++		SetPageBlkback(pending_pages[i]);
++
+ 	for (i = 0; i < mmap_pages; i++)
+ 		pending_grant_handles[i] = BLKBACK_INVALID_HANDLE;
+ 
+diff -r 7d1858b6cdbb drivers/xen/core/gnttab.c
+--- a/drivers/xen/core/gnttab.c	Wed Jun 30 23:59:39 2010 -0700
++++ b/drivers/xen/core/gnttab.c	Thu Jul 01 00:00:01 2010 -0700
+@@ -598,6 +598,8 @@
+ 	*pagep = new_page;
+ 
+ 	SetPageForeign(page, gnttab_page_free);
++	ClearPageNetback(page);
++	ClearPageBlkback(page);
+ 	page->mapping = NULL;
+ 
+ out:
+diff -r 7d1858b6cdbb drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed Jun 30 23:59:39 2010 -0700
++++ b/drivers/xen/netback/netback.c	Thu Jul 01 00:00:01 2010 -0700
+@@ -847,9 +847,14 @@
+ static inline int copy_pending_req(struct xen_netbk *netbk,
+ 				   pending_ring_idx_t pending_idx)
+ {
+-	return gnttab_copy_grant_page(
++	int err = gnttab_copy_grant_page(
+ 			netbk->grant_tx_handle[pending_idx],
+ 			&netbk->mmap_pages[pending_idx]);
++
++	if (!err)
++		SetPageNetback(netbk->mmap_pages[pending_idx]);
++
++	return err;
+ }
+ 
+ static void permute_dealloc_ring(PEND_RING_IDX dc, PEND_RING_IDX dp)
+@@ -1764,6 +1769,7 @@
+ 		for (i = 0; i < MAX_PENDING_REQS; i++) {
+ 			page = netbk->mmap_pages[i];
+ 			SetPageForeign(page, netif_page_release);
++			SetPageNetback(page);
+ 			netif_set_page_ext(page, group, i);
+ 			INIT_LIST_HEAD(&netbk->pending_inuse[i].list);
+ 		}
+diff -r 7d1858b6cdbb include/linux/page-flags.h
+--- a/include/linux/page-flags.h	Wed Jun 30 23:59:39 2010 -0700
++++ b/include/linux/page-flags.h	Thu Jul 01 00:00:01 2010 -0700
+@@ -112,7 +112,7 @@
+ #endif
+ #ifdef CONFIG_XEN
+ 	PG_foreign,		/* Page is owned by foreign allocator. */
+-	/* PG_netback,		   Page is owned by netback */
++	PG_netback,		/* Page is owned by netback */
+ 	PG_blkback,		/* Page is owned by blkback */
+ #endif
+ 	__NR_PAGEFLAGS,
+@@ -375,7 +375,7 @@
+ {
+ 	((void (*)(struct page *, unsigned int))page->index)(page, order);
+ }
+-/*PAGEFLAG(Netback, netback)*/
++PAGEFLAG(Netback, netback)
+ PAGEFLAG(Blkback, blkback)
+ #endif
+ 

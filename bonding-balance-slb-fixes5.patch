@@ -1,0 +1,189 @@
+diff -r de46f480c0fd net/bridge/br_fdb.c
+--- a/net/bridge/br_fdb.c	Fri Mar 19 12:49:11 2010 +0000
++++ b/net/bridge/br_fdb.c	Fri Mar 19 13:57:28 2010 +0000
+@@ -30,6 +30,12 @@
+ 		      const unsigned char *addr);
+ 
+ static u32 fdb_salt __read_mostly;
++
++static int fdb_garp_lock_time = 5;
++module_param(fdb_garp_lock_time, int, 0600);
++MODULE_PARM_DESC(fdb_garp_lock_time, "Time to lock a FDB entry after a gratuitous ARP, in seconds");
++
++#define NO_GARP_LOCK (jiffies)
+ 
+ int __init br_fdb_init(void)
+ {
+@@ -320,7 +326,8 @@
+ static struct net_bridge_fdb_entry *fdb_create(struct hlist_head *head,
+ 					       struct net_bridge_port *source,
+ 					       const unsigned char *addr,
+-					       int is_local)
++					       int is_local,
++					       unsigned long garp_lock_until)
+ {
+ 	struct net_bridge_fdb_entry *fdb;
+ 
+@@ -334,6 +341,7 @@
+ 		fdb->is_local = is_local;
+ 		fdb->is_static = is_local;
+ 		fdb->ageing_timer = jiffies;
++		fdb->garp_lock_until = garp_lock_until;
+ 	}
+ 	return fdb;
+ }
+@@ -361,7 +369,7 @@
+ 		fdb_delete(fdb);
+ 	}
+ 
+-	if (!fdb_create(head, source, addr, 1))
++	if (!fdb_create(head, source, addr, 1, NO_GARP_LOCK))
+ 		return -ENOMEM;
+ 
+ 	return 0;
+@@ -378,13 +386,57 @@
+ 	return ret;
+ }
+ 
++static int is_gratuitous_arp(struct sk_buff *skb)
++{
++	static const u8 bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
++#pragma pack(1)
++	struct arp_pkt {
++		u16     hw_addr_space;
++		u16     prot_addr_space;
++		u8      hw_addr_len;
++		u8      prot_addr_len;
++		u16     op_code;
++		u8      mac_src[ETH_ALEN];	/* sender hardware address */
++		u32     ip_src;			/* sender IP address */
++		u8      mac_dst[ETH_ALEN];	/* target hardware address */
++		u32     ip_dst;			/* target IP address */
++	};
++#pragma pack()
++	struct arp_pkt *arp = (struct arp_pkt *)skb->data;
++
++	if (compare_ether_addr(bcast, eth_hdr(skb)->h_dest) != 0)
++		return 0;
++
++	if (!arp)
++		return 0;
++
++	if (skb->len < sizeof(struct arp_pkt))
++		return 0;
++
++	if (eth_hdr(skb)->h_proto != htons(ETH_P_ARP))
++		return 0;
++
++	if (arp->op_code != htons(ARPOP_REPLY))
++		return 0;
++
++	return 1;
++}
++
++static int is_physical_port(struct net_bridge *br, struct net_bridge_port *port)
++{
++	extern struct net_bridge_port *br_locate_physical_port(struct net_bridge *br);
++
++	struct net_bridge_port *phys_port = br_locate_physical_port(br);
++
++	return phys_port && phys_port == port;
++}
++
+ int br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
+ 		   struct sk_buff *skb)
+ {
+ 	const unsigned char *addr = eth_hdr(skb)->h_source;
+ 	struct hlist_head *head = &br->hash[br_mac_hash(addr)];
+ 	struct net_bridge_fdb_entry *fdb;
+-	static const u8 bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+ 
+ 	/* some users want to always flood. */
+ 	if (hold_time(br) == 0)
+@@ -403,39 +455,22 @@
+ 		 * port then ignore it.
+                  *
+                  * _Unless_ it is a broadcast ARP reply in which case
+-                 * the guest in question has migrated.
++                 * the guest in question has migrated. However we lock
++                 * out updates due to broadcast ARP replies received
++                 * on the physical port for a configurable amount of
++                 * time after any broadcast ARP from the same source
++                 * address received on a non-physical link -- this is
++                 * order to avoid incorrect learning when a broadcast
++                 * ARP transmitted by a VM on this host comes back in
++                 * another bond link and causes the bridge to learn
++                 * the MAC on the exernal port.
+ 		 */
+-		extern struct net_bridge_port *br_locate_physical_port(struct net_bridge *br);
+-		struct net_bridge_port *phys_port = br_locate_physical_port(br);
+-		if (phys_port && phys_port != fdb->dst && phys_port == source) {
+-#pragma pack(1)
+-			struct arp_pkt {
+-				u16     hw_addr_space;
+-				u16     prot_addr_space;
+-				u8      hw_addr_len;
+-				u8      prot_addr_len;
+-				u16     op_code;
+-				u8      mac_src[ETH_ALEN];	/* sender hardware address */
+-				u32     ip_src;			/* sender IP address */
+-				u8      mac_dst[ETH_ALEN];	/* target hardware address */
+-				u32     ip_dst;			/* target IP address */
+-			};
+-#pragma pack()
+-			struct arp_pkt *arp = (struct arp_pkt *)skb->data;
++		if (!is_physical_port(br, fdb->dst) && is_physical_port(br, source)) {
+ 
+-			if (compare_ether_addr(bcast, eth_hdr(skb)->h_dest) != 0)
++			if (!is_gratuitous_arp(skb))
+ 				return 0;
+ 
+-			if (!arp)
+-				return 0;
+-
+-			if (skb->len < sizeof(struct arp_pkt))
+-				return 0;
+-
+-			if (eth_hdr(skb)->h_proto != htons(ETH_P_ARP))
+-				return 0;
+-
+-			if (arp->op_code != htons(ARPOP_REPLY))
++			if (time_before(jiffies, fdb->garp_lock_until))
+ 				return 0;
+ 		}
+ 
+@@ -443,14 +478,21 @@
+ 		if (unlikely(fdb->is_local)) {
+ 			return 0;
+ 		} else {
++			if (is_gratuitous_arp(skb) && !is_physical_port(br, source))
++				fdb->garp_lock_until = jiffies + fdb_garp_lock_time*HZ;
++
+ 			/* fastpath: update of existing entry */
+ 			fdb->dst = source;
+ 			fdb->ageing_timer = jiffies;
+ 		}
+ 	} else {
+ 		spin_lock(&br->hash_lock);
+-		if (!fdb_find(head, addr))
+-			fdb_create(head, source, addr, 0);
++		if (!fdb_find(head, addr)) {
++			unsigned long garp_lock = NO_GARP_LOCK;
++			if (is_gratuitous_arp(skb) && !is_physical_port(br, source))
++					garp_lock = jiffies + fdb_garp_lock_time*HZ;
++			fdb_create(head, source, addr, 0, garp_lock);
++		}
+ 		/* else  we lose race and someone else inserts
+ 		 * it first, don't bother updating
+ 		 */
+diff -r de46f480c0fd net/bridge/br_private.h
+--- a/net/bridge/br_private.h	Fri Mar 19 12:49:11 2010 +0000
++++ b/net/bridge/br_private.h	Fri Mar 19 13:57:28 2010 +0000
+@@ -53,6 +53,7 @@
+ 	struct rcu_head			rcu;
+ 	atomic_t			use_count;
+ 	unsigned long			ageing_timer;
++	unsigned long			garp_lock_until;
+ 	mac_addr			addr;
+ 	unsigned char			is_local;
+ 	unsigned char			is_static;

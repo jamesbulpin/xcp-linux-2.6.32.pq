@@ -1,0 +1,38 @@
+From edc295c0ccb6bb9fc4b9ce7af895e6422e5b5e2c Mon Sep 17 00:00:00 2001
+From: Steven Smith <ssmith@weybridge.uk.xensource.com>
+Date: Fri, 30 Oct 2009 13:55:23 -0700
+Subject: [PATCH] xen/netback: make sure that pg->mapping is never NULL for a page mapped from a foreign domain.
+
+Otherwise, the foreign maps tracking infrastructure gets confused, and
+thinks that the foreign page is local.  This means that you can't
+forward that packet to another foreign domain.  This leads to very
+high packet drop, and hence very poor performance.
+
+Signed-off-by: Steven Smith <steven.smith@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/netback.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 4796820..d88103a 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -97,12 +97,12 @@ static inline unsigned long idx_to_kaddr(unsigned int idx)
+ /* extra field used in struct page */
+ static inline void netif_set_page_index(struct page *pg, unsigned int index)
+ {
+-	*(unsigned long *)&pg->mapping = index;
++	*(unsigned long *)&pg->mapping = index + 1;
+ }
+ 
+ static inline int netif_page_index(struct page *pg)
+ {
+-	unsigned long idx = (unsigned long)pg->mapping;
++	unsigned long idx = (unsigned long)pg->mapping - 1;
+ 
+ 	if (!PageForeign(pg))
+ 		return -1;
+-- 
+1.5.6.5
+

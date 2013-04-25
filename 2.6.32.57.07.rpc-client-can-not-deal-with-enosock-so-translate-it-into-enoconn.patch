@@ -1,0 +1,61 @@
+From 5fe46e9d733f19a880ef7e516002bd4c2b833e14 Mon Sep 17 00:00:00 2001
+From: Bian Naimeng <biannm@cn.fujitsu.com>
+Date: Mon, 8 Mar 2010 14:49:01 +0800
+Subject: rpc client can not deal with ENOSOCK, so translate it into ENOCONN
+
+From: Bian Naimeng <biannm@cn.fujitsu.com>
+
+commit 5fe46e9d733f19a880ef7e516002bd4c2b833e14 upstream.
+
+If NFSv4 client send a request before connect, or the old connection was broken
+because a ETIMEOUT error catched by call_status, ->send_request will return
+ENOSOCK, but rpc layer can not deal with it, so make sure ->send_request can
+translate ENOSOCK into ENOCONN.
+
+Signed-off-by: Bian Naimeng <biannm@cn.fujitsu.com>
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+Cc: Chuck Lever <chuck.lever@oracle.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ net/sunrpc/xprtsock.c |    8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -563,8 +563,6 @@ static int xs_udp_send_request(struct rp
+ 		/* Still some bytes left; set up for a retry later. */
+ 		status = -EAGAIN;
+ 	}
+-	if (!transport->sock)
+-		goto out;
+ 
+ 	switch (status) {
+ 	case -ENOTSOCK:
+@@ -584,7 +582,7 @@ static int xs_udp_send_request(struct rp
+ 		 * prompts ECONNREFUSED. */
+ 		clear_bit(SOCK_ASYNC_NOSPACE, &transport->sock->flags);
+ 	}
+-out:
++
+ 	return status;
+ }
+ 
+@@ -666,8 +664,6 @@ static int xs_tcp_send_request(struct rp
+ 		status = -EAGAIN;
+ 		break;
+ 	}
+-	if (!transport->sock)
+-		goto out;
+ 
+ 	switch (status) {
+ 	case -ENOTSOCK:
+@@ -687,7 +683,7 @@ static int xs_tcp_send_request(struct rp
+ 	case -ENOTCONN:
+ 		clear_bit(SOCK_ASYNC_NOSPACE, &transport->sock->flags);
+ 	}
+-out:
++
+ 	return status;
+ }
+ 

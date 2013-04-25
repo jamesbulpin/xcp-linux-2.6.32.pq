@@ -1,0 +1,51 @@
+v2.6.38-4493-gc8def55
+
+commit c8def554d031664e984323f6a5d667f070717776
+Author: Milton Miller <miltonm@bga.com>
+Date:   Tue Mar 15 13:27:17 2011 -0600
+
+    smp_call_function_interrupt: use typedef and %pf
+
+    Use the newly added smp_call_func_t in smp_call_function_interrupt for
+    the func variable, and make the comment above the WARN more assertive
+    and explicit.  Also, func is a function pointer and does not need an
+    offset, so use %pf not %pS.
+
+    Signed-off-by: Milton Miller <miltonm@bga.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+---
+ kernel/smp.c |   16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff -r 211f713767c0 kernel/smp.c
+--- a/kernel/smp.c	Thu Dec 09 03:40:30 2010 +0000
++++ b/kernel/smp.c	Tue Aug 02 17:01:29 2011 +0100
+@@ -189,7 +189,7 @@ void generic_smp_call_function_interrupt
+ 	 */
+ 	list_for_each_entry_rcu(data, &call_function.queue, csd.list) {
+ 		int refs;
+-		void (*func) (void *info);
++		smp_call_func_t func;
+ 
+ 		/*
+ 		 * Since we walk the list without any locks, we might
+@@ -218,13 +218,13 @@ void generic_smp_call_function_interrupt
+ 		func(data->csd.info);
+ 
+ 		/*
+-		 * If the cpu mask is not still set then it enabled interrupts,
+-		 * we took another smp interrupt, and executed the function
+-		 * twice on this cpu.  In theory that copy decremented refs.
++		 * If the cpu mask is not still set then func enabled
++		 * interrupts (BUG), and this cpu took another smp call
++		 * function interrupt and executed func(info) twice
++		 * on this cpu.  That nested execution decremented refs.
+ 		 */
+ 		if (!cpumask_test_and_clear_cpu(cpu, data->cpumask)) {
+-			WARN(1, "%pS enabled interrupts and double executed\n",
+-			     func);
++			WARN(1, "%pf enabled interrupts and double executed\n", func);
+ 			continue;
+ 		}
+ 

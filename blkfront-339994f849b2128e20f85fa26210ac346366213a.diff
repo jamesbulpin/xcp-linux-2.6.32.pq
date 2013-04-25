@@ -1,0 +1,134 @@
+blkfront: Lock blkfront_info when closing
+
+The bdev .open/.release fops race against backend switches to Closing,
+handled by the XenBus thread.
+
+The original code attempted to serialize block device holders and
+xenbus only via bd_mutex. This is insufficient, the info->bd pointer
+may already be stale (or null) while xenbus tries to bump up the
+refcount.
+
+Protect blkfront_info with a dedicated mutex.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+diff --git a/drivers/xen/blkfront/blkfront.c b/drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c
++++ b/drivers/xen/blkfront/blkfront.c
+@@ -63,6 +63,7 @@
+ #define GRANT_INVALID_REF	0
+ 
+ static void connect(struct blkfront_info *);
++static void blkfront_closing(struct blkfront_info *);
+ static int blkfront_remove(struct xenbus_device *);
+ static int talk_to_backend(struct xenbus_device *, struct blkfront_info *);
+ static int setup_blkring(struct xenbus_device *, struct blkfront_info *);
+@@ -75,7 +76,6 @@
+ static void blkif_completion(struct blk_shadow *);
+ static void blkif_free(struct blkfront_info *, int);
+ 
+-
+ /**
+  * Entry point to this code when a new device is created.  Allocate the basic
+  * structures and the ring buffer for communication with the backend, and
+@@ -107,6 +107,7 @@
+ 		return -ENOMEM;
+ 	}
+ 
++	mutex_init(&info->mutex);
+ 	info->xbdev = dev;
+ 	info->vdevice = vdevice;
+ 	info->connected = BLKIF_STATE_DISCONNECTED;
+@@ -265,7 +266,6 @@
+ 			    enum xenbus_state backend_state)
+ {
+ 	struct blkfront_info *info = dev->dev.driver_data;
+-	struct block_device *bd;
+ 
+ 	DPRINTK("blkfront:backend_changed.\n");
+ 
+@@ -284,24 +284,7 @@
+ 		break;
+ 
+ 	case XenbusStateClosing:
+-		if (!info->gd) {
+-			xenbus_frontend_closed(dev);
+-			break;
+-		}
+-		bd = bdget_disk(info->gd, 0);
+-		if (bd == NULL)
+-			xenbus_dev_fatal(dev, -ENODEV, "bdget failed");
+-
+-		mutex_lock(&bd->bd_mutex);
+-		if (info->users > 0)
+-			xenbus_dev_error(dev, -EBUSY,
+-					 "Device in use; refusing to close");
+-		else {
+-			xlvbd_release_gendisk(info);
+-			xenbus_frontend_closed(info->xbdev);
+-		}
+-		mutex_unlock(&bd->bd_mutex);
+-		bdput(bd);
++		blkfront_closing(info);
+ 		break;
+ 	}
+ }
+@@ -547,6 +530,43 @@
+ 	return 0;
+ }
+ 
++static void
++blkfront_closing(struct blkfront_info *info)
++{
++	struct xenbus_device *xbdev = info->xbdev;
++	struct block_device *bdev = NULL;
++
++	mutex_lock(&info->mutex);
++
++	if (xbdev->state == XenbusStateClosing) {
++		mutex_unlock(&info->mutex);
++		return;
++	}
++
++	if (info->gd)
++		bdev = bdget_disk(info->gd, 0);
++
++	mutex_unlock(&info->mutex);
++
++	if (!bdev) {
++		xenbus_frontend_closed(xbdev);
++		return;
++	}
++
++	mutex_lock(&bdev->bd_mutex);
++
++	if (info->users) {
++		xenbus_dev_error(xbdev, -EBUSY,
++				 "Device in use; refusing to close");
++		xenbus_switch_state(xbdev, XenbusStateClosing);
++	} else {
++		xlvbd_release_gendisk(info);
++		xenbus_frontend_closed(xbdev);
++	}
++
++	mutex_unlock(&bdev->bd_mutex);
++	bdput(bdev);
++}
+ 
+ /*
+  * blkif_queue_request
+diff --git a/drivers/xen/blkfront/block.h b/drivers/xen/blkfront/block.h
+--- a/drivers/xen/blkfront/block.h
++++ b/drivers/xen/blkfront/block.h
+@@ -96,8 +96,9 @@
+  */
+ struct blkfront_info
+ {
++	struct mutex mutex;
+ 	struct xenbus_device *xbdev;
+- 	struct gendisk *gd;
++	struct gendisk *gd;
+ 	int vdevice;
+ 	blkif_vdev_t handle;
+ 	int connected;

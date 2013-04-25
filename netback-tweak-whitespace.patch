@@ -1,0 +1,33 @@
+diff -r e530e53db723 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Tue Jun 08 14:30:56 2010 +0100
++++ b/drivers/xen/netback/netback.c	Tue Jun 08 14:59:59 2010 +0100
+@@ -244,8 +244,8 @@
+ 	offset = nskb->data - skb->data;
+ 
+ 	nskb->transport_header = skb->transport_header + offset;
+-	nskb->network_header   = skb->network_header   + offset;
+-	nskb->mac_header       = skb->mac_header       + offset;
++	nskb->network_header = skb->network_header + offset;
++	nskb->mac_header = skb->mac_header + offset;
+ 
+ 	return nskb;
+ 
+@@ -430,7 +430,7 @@
+ 
+ 			mmu = npo->mmu + npo->mmu_prod++;
+ 			mmu->ptr = ((maddr_t)new_mfn << PAGE_SHIFT) |
+-				MMU_MACHPHYS_UPDATE;
++				    MMU_MACHPHYS_UPDATE;
+ 			mmu->val = page_to_pfn(page);
+ 		}
+ 
+@@ -693,7 +693,8 @@
+ 
+ 		if (skb->ip_summed == CHECKSUM_PARTIAL) /* local packet? */
+ 			flags |= NETRXF_csum_blank | NETRXF_data_validated;
+-		else if (skb->ip_summed == CHECKSUM_UNNECESSARY) /* remote but checksummed? */
++		else if (skb->ip_summed == CHECKSUM_UNNECESSARY)
++			/* remote but checksummed. */
+ 			flags |= NETRXF_data_validated;
+ 
+ 		if (meta[npo.meta_cons].copy)

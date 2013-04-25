@@ -1,0 +1,22 @@
+diff -r e4d2e01bdf44 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Mon Nov 24 17:29:22 2008 -0800
++++ b/drivers/xen/blkback/blkback.c	Mon Nov 24 17:33:33 2008 -0800
+@@ -423,14 +423,14 @@ static int do_block_io_op(blkif_t *blkif
+ 		if (RING_REQUEST_CONS_OVERFLOW(&blk_rings->common, rc))
+ 			break;
+ 
+-		pending_req = alloc_req();
+-		if (NULL == pending_req) {
+-			blkif->st_oo_req++;
++		if (blkif->remove_requested) {
+ 			more_to_do = 1;
+ 			break;
+ 		}
+ 
+-		if (blkif->remove_requested) {
++		pending_req = alloc_req();
++		if (NULL == pending_req) {
++			blkif->st_oo_req++;
+ 			more_to_do = 1;
+ 			break;
+ 		}

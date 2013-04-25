@@ -1,0 +1,162 @@
+blkback: eliminate unnecessary blkback thread wake-ups
+
+When waiting for pages from the page pool, use an exclusive wait so
+when a page becomes available only one thread is woken.  When pool
+pages are freed, we need to only wait a thread that is waiting for a
+page so we now need a per-blkif wait queue to wait for requests from
+the front end.
+
+There is a bit of trickiness when removing the blkif.  A removal
+request may occur immediately after the thread is woken by
+__page_pool_wake().  Since this blkif won't consume the newly freed
+page, we need to wake the next thread that is waiting for pages.  Do
+this by calling __page_pool_wake() again as the thread exits.
+
+When a request is completed, the there are no more outstanding
+requests for this blkif then the thread would be woken.  However, we
+only need to do the wake up here if blkif_bdev_sync() is waiting for
+all outstanding requests to be completed.  Another per-blkif wait
+queue is added (drain_wait) is added for this.
+
+# HG changeset patch
+# Parent 2a51dbcaf03b21b3efa979846d4bd250d7be38a9
+
+diff -r 2a51dbcaf03b drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jul 04 16:56:31 2012 +0100
++++ b/drivers/xen/blkback/blkback.c	Wed Jul 18 13:41:03 2012 +0100
+@@ -179,16 +179,8 @@ blkif_bdev_close(blkif_t *blkif)
+ static void
+ blkif_bdev_sync(blkif_t *blkif)
+ {
+-	do {
+-		set_current_state(TASK_UNINTERRUPTIBLE);
+-
+-		if (!atomic_read(&blkif->requests_pending))
+-			break;
+-
+-		schedule();
+-	} while (1);
+-
+-	__set_current_state(TASK_RUNNING);
++	wait_event(blkif->drain_wait,
++		   atomic_read(&blkif->requests_pending) == 0);
+ }
+ 
+ unsigned int
+@@ -411,21 +403,6 @@ static inline void collect_statistics(pe
+ }
+ 
+ /******************************************************************
+- * QUEUE MANAGEMENT FUNCTIONS
+- */
+-
+-static inline int blkif_activate(blkif_t *blkif)
+-{
+-	if (blkif->remove_requested)
+-		return 1;
+-
+-	if (blkif->waiting_reqs)
+-		return (blkif->pool->nr_free > 0);
+-
+-	return 0;
+-}
+-
+-/******************************************************************
+  * SCHEDULER FUNCTIONS
+  */
+ 
+@@ -452,8 +429,12 @@ blkif_queue_run(void *arg)
+ 		if (try_to_freeze())
+ 			continue;
+ 
+-		wait_event_interruptible(blkif->pool->wait,
+-					 blkif_activate(blkif));
++		wait_event_interruptible(blkif->req_wait,
++					 blkif->waiting_reqs
++					 || blkif->remove_requested);
++		wait_event_interruptible_exclusive(blkif->pool->wait,
++						   blkif->pool->nr_free > 0
++						   || blkif->remove_requested);
+ 
+ 		blkif->waiting_reqs = 0;
+ 		smp_mb(); /* clear flag *before* checking for work */
+@@ -466,6 +447,13 @@ blkif_queue_run(void *arg)
+ 			print_stats(blkif);
+ 	}
+ 
++	/*
++	 * May have been woken by __page_pool_wake() and removed
++	 * immediately afterwards.  Call __page_pool_wake() again so
++	 * we don't lose a wake up.
++	 */
++	__page_pool_wake(blkif->pool);
++
+ 	blkif_bdev_sync(blkif);
+ 
+ 	if (log_stats)
+@@ -553,13 +541,8 @@ static void __end_block_io_op(pending_re
+ 
+ 		blkback_request_free(pending_req);
+ 
+-		if (atomic_dec_and_test(&blkif->requests_pending)) {
+-			unsigned long flags;
+-			spin_lock_irqsave(&blkif->xenblkd_lock, flags);
+-			if (blkif->xenblkd)
+-				wake_up_process(blkif->xenblkd);
+-			spin_unlock_irqrestore(&blkif->xenblkd_lock, flags);
+-		}
++		if (atomic_dec_and_test(&blkif->requests_pending))
++			wake_up(&blkif->drain_wait);
+ 	}
+ }
+ 
+@@ -577,23 +560,14 @@ static void end_block_io_op(struct bio *
+ void blkif_notify_work(blkif_t *blkif)
+ {
+ 	blkif->waiting_reqs = 1;
+-
+-	spin_lock_irq(&blkif->xenblkd_lock);
+-
+-	if (blkif->xenblkd)
+-		wake_up_process(blkif->xenblkd);
+-
+-	spin_unlock_irq(&blkif->xenblkd_lock);
++	wake_up(&blkif->req_wait);
+ }
+ 
+ irqreturn_t blkif_be_int(int irq, void *dev_id)
+ {
+ 	blkif_t *blkif = dev_id;
+ 
+-	blkif->waiting_reqs = 1;
+-
+-	if (blkif->xenblkd)
+-		wake_up_process(blkif->xenblkd);
++	blkif_notify_work(blkif);
+ 
+ 	return IRQ_HANDLED;
+ }
+diff -r 2a51dbcaf03b drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Jul 04 16:56:31 2012 +0100
++++ b/drivers/xen/blkback/common.h	Wed Jul 18 13:41:03 2012 +0100
+@@ -96,6 +96,8 @@ typedef struct blkif_st {
+ 	spinlock_t           xenblkd_lock;
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
++	wait_queue_head_t req_wait;
++	wait_queue_head_t drain_wait;
+ 	struct request_queue *plug;
+ 	struct blkback_page_pool *pool;
+ 
+diff -r 2a51dbcaf03b drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Wed Jul 04 16:56:31 2012 +0100
++++ b/drivers/xen/blkback/interface.c	Wed Jul 18 13:41:03 2012 +0100
+@@ -47,6 +47,8 @@ blkif_t *blkif_alloc(domid_t domid)
+ 	blkif->st_print = jiffies;
+ 	atomic_set(&blkif->requests_pending, 0);
+ 	spin_lock_init(&blkif->xenblkd_lock);
++	init_waitqueue_head(&blkif->req_wait);
++	init_waitqueue_head(&blkif->drain_wait);
+ 
+ 	return blkif;
+ }

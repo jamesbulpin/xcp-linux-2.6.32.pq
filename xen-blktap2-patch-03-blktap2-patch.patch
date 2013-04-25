@@ -1,0 +1,3106 @@
+From ef109b456c8f362acf733e2baeffb443004c824d Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 27 Mar 2009 09:36:50 +0000
+Subject: [PATCH 01/23] patch 03-blktap2-patch
+
+---
+ drivers/xen/Makefile            |    1 +
+ drivers/xen/blktap/Makefile     |    3 +
+ drivers/xen/blktap/blktap.h     |  244 +++++++++
+ drivers/xen/blktap/control.c    |  277 ++++++++++
+ drivers/xen/blktap/device.c     | 1132 +++++++++++++++++++++++++++++++++++++++
+ drivers/xen/blktap/request.c    |  297 ++++++++++
+ drivers/xen/blktap/ring.c       |  613 +++++++++++++++++++++
+ drivers/xen/blktap/sysfs.c      |  425 +++++++++++++++
+ drivers/xen/blktap/wait_queue.c |   40 ++
+ 9 files changed, 3032 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/xen/blktap/Makefile
+ create mode 100644 drivers/xen/blktap/blktap.h
+ create mode 100644 drivers/xen/blktap/control.c
+ create mode 100644 drivers/xen/blktap/device.c
+ create mode 100644 drivers/xen/blktap/request.c
+ create mode 100644 drivers/xen/blktap/ring.c
+ create mode 100644 drivers/xen/blktap/sysfs.c
+ create mode 100644 drivers/xen/blktap/wait_queue.c
+
+diff --git a/drivers/xen/Makefile b/drivers/xen/Makefile
+--- a/drivers/xen/Makefile
++++ b/drivers/xen/Makefile
+@@ -14,5 +14,6 @@
+ obj-$(CONFIG_XEN_BALLOON)		+= $(xen-balloon-y)
+ obj-$(CONFIG_XEN_BLKDEV_BACKEND)	+= blkback/
++obj-$(CONFIG_XEN_BLKDEV_TAP)		+= blktap2/
+ obj-$(CONFIG_XEN_NETDEV_BACKEND)	+= netback/
+ obj-$(CONFIG_XEN_TPMDEV_BACKEND)	+= tpmback/
+ obj-$(CONFIG_XEN_BLKDEV_FRONTEND)	+= blkfront/
+diff --git a/drivers/xen/blktap2/Makefile b/drivers/xen/blktap2/Makefile
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/Makefile
+@@ -0,0 +1,3 @@
++obj-y := blktap.o
++
++blktap-objs := control.o ring.o wait_queue.o device.o request.o sysfs.o
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/blktap.h
+@@ -0,0 +1,244 @@
++#ifndef _BLKTAP_H_
++#define _BLKTAP_H_
++
++#include <linux/fs.h>
++#include <linux/poll.h>
++#include <linux/cdev.h>
++#include <xen/blkif.h>
++#include <xen/gnttab.h>
++
++//#define ENABLE_PASSTHROUGH
++
++extern int blktap_debug_level;
++
++#define BTPRINTK(level, tag, force, _f, _a...)				\
++	do {								\
++		if (blktap_debug_level > level &&			\
++		    (force || printk_ratelimit()))			\
++			printk(tag "%s: " _f, __func__, ##_a);		\
++	} while (0)
++
++#define BTDBG(_f, _a...)             BTPRINTK(8, KERN_DEBUG, 1, _f, ##_a)
++#define BTINFO(_f, _a...)            BTPRINTK(0, KERN_INFO, 0, _f, ##_a)
++#define BTWARN(_f, _a...)            BTPRINTK(0, KERN_WARNING, 0, _f, ##_a)
++#define BTERR(_f, _a...)             BTPRINTK(0, KERN_ERR, 0, _f, ##_a)
++
++#define MAX_BLKTAP_DEVICE            256
++
++#define BLKTAP_CONTROL               1
++#define BLKTAP_RING_FD               2
++#define BLKTAP_RING_VMA              3
++#define BLKTAP_DEVICE                4
++#define BLKTAP_SYSFS                 5
++#define BLKTAP_PAUSE_REQUESTED       6
++#define BLKTAP_PAUSED                7
++#define BLKTAP_SHUTDOWN_REQUESTED    8
++#define BLKTAP_PASSTHROUGH           9
++#define BLKTAP_DEFERRED              10
++
++/* blktap IOCTLs: */
++#define BLKTAP2_IOCTL_KICK_FE        1
++#define BLKTAP2_IOCTL_ALLOC_TAP	     200
++#define BLKTAP2_IOCTL_FREE_TAP       201
++#define BLKTAP2_IOCTL_CREATE_DEVICE  202
++#define BLKTAP2_IOCTL_SET_PARAMS     203
++#define BLKTAP2_IOCTL_PAUSE          204
++#define BLKTAP2_IOCTL_REOPEN         205
++#define BLKTAP2_IOCTL_RESUME         206
++
++#define BLKTAP2_MAX_MESSAGE_LEN      256
++
++#define BLKTAP2_RING_MESSAGE_PAUSE   1
++#define BLKTAP2_RING_MESSAGE_RESUME  2
++#define BLKTAP2_RING_MESSAGE_CLOSE   3
++
++#define BLKTAP_REQUEST_FREE          0
++#define BLKTAP_REQUEST_PENDING       1
++
++/*
++ * The maximum number of requests that can be outstanding at any time
++ * is determined by
++ *
++ *   [mmap_alloc * MAX_PENDING_REQS * BLKIF_MAX_SEGMENTS_PER_REQUEST] 
++ *
++ * where mmap_alloc < MAX_DYNAMIC_MEM.
++ *
++ * TODO:
++ * mmap_alloc is initialised to 2 and should be adjustable on the fly via
++ * sysfs.
++ */
++#define BLK_RING_SIZE		__RING_SIZE((blkif_sring_t *)0, PAGE_SIZE)
++#define MAX_DYNAMIC_MEM		BLK_RING_SIZE
++#define MAX_PENDING_REQS	BLK_RING_SIZE
++#define MMAP_PAGES (MAX_PENDING_REQS * BLKIF_MAX_SEGMENTS_PER_REQUEST)
++#define MMAP_VADDR(_start, _req, _seg)					\
++        (_start +                                                       \
++         ((_req) * BLKIF_MAX_SEGMENTS_PER_REQUEST * PAGE_SIZE) +        \
++         ((_seg) * PAGE_SIZE))
++
++#define blktap_get(_b) (atomic_inc(&(_b)->refcnt))
++#define blktap_put(_b)					\
++	do {						\
++		if (atomic_dec_and_test(&(_b)->refcnt))	\
++			wake_up(&(_b)->wq);		\
++	} while (0)
++
++struct blktap;
++
++struct grant_handle_pair {
++	grant_handle_t                 kernel;
++	grant_handle_t                 user;
++};
++#define INVALID_GRANT_HANDLE           0xFFFF
++
++struct blktap_handle {
++	unsigned int                   ring;
++	unsigned int                   device;
++	unsigned int                   minor;
++};
++
++struct blktap_params {
++	char                           name[BLKTAP2_MAX_MESSAGE_LEN];
++	unsigned long long             capacity;
++	unsigned long                  sector_size;
++};
++
++struct blktap_device {
++	int                            users;
++	spinlock_t                     lock;
++	struct gendisk                *gd;
++
++#ifdef ENABLE_PASSTHROUGH
++	struct block_device           *bdev;
++#endif
++};
++
++struct blktap_ring {
++	struct vm_area_struct         *vma;
++	blkif_front_ring_t             ring;
++	struct vm_foreign_map          foreign_map;
++	unsigned long                  ring_vstart;
++	unsigned long                  user_vstart;
++
++	int                            response;
++
++	wait_queue_head_t              poll_wait;
++
++	dev_t                          devno;
++	struct class_device           *dev;
++	atomic_t                       sysfs_refcnt;
++	struct mutex                   sysfs_mutex;
++};
++
++struct blktap_statistics {
++	unsigned long                  st_print;
++	int                            st_rd_req;
++	int                            st_wr_req;
++	int                            st_oo_req;
++	int                            st_rd_sect;
++	int                            st_wr_sect;
++	s64                            st_rd_cnt;
++	s64                            st_rd_sum_usecs;
++	s64                            st_rd_max_usecs;
++	s64                            st_wr_cnt;
++	s64                            st_wr_sum_usecs;
++	s64                            st_wr_max_usecs;	
++};
++
++struct blktap_request {
++	uint64_t                       id;
++	uint16_t                       usr_idx;
++
++	uint8_t                        status;
++	atomic_t                       pendcnt;
++	uint8_t                        nr_pages;
++	unsigned short                 operation;
++
++	struct timeval                 time;
++	struct grant_handle_pair       handles[BLKIF_MAX_SEGMENTS_PER_REQUEST];
++	struct list_head               free_list;
++};
++
++struct blktap {
++	int                            minor;
++	pid_t                          pid;
++	atomic_t                       refcnt;
++	unsigned long                  dev_inuse;
++
++	struct blktap_params           params;
++
++	struct rw_semaphore            tap_sem;
++
++	struct blktap_ring             ring;
++	struct blktap_device           device;
++
++	int                            pending_cnt;
++	struct blktap_request         *pending_requests[MAX_PENDING_REQS];
++
++	wait_queue_head_t              wq;
++	struct list_head               deferred_queue;
++
++	struct blktap_statistics       stats;
++};
++
++extern struct blktap *blktaps[MAX_BLKTAP_DEVICE];
++
++static inline int
++blktap_active(struct blktap *tap)
++{
++	return test_bit(BLKTAP_RING_VMA, &tap->dev_inuse);
++}
++
++static inline int
++blktap_validate_params(struct blktap *tap, struct blktap_params *params)
++{
++	/* TODO: sanity check */
++	params->name[sizeof(params->name) - 1] = '\0';
++	BTINFO("%s: capacity: %llu, sector-size: %lu\n",
++	       params->name, params->capacity, params->sector_size);
++	return 0;
++}
++
++int blktap_control_destroy_device(struct blktap *);
++
++int blktap_ring_init(int *);
++int blktap_ring_free(void);
++int blktap_ring_create(struct blktap *);
++int blktap_ring_destroy(struct blktap *);
++int blktap_ring_pause(struct blktap *);
++int blktap_ring_resume(struct blktap *);
++void blktap_ring_kick_user(struct blktap *);
++
++int blktap_sysfs_init(void);
++void blktap_sysfs_free(void);
++int blktap_sysfs_create(struct blktap *);
++int blktap_sysfs_destroy(struct blktap *);
++
++int blktap_device_init(int *);
++void blktap_device_free(void);
++int blktap_device_create(struct blktap *);
++int blktap_device_destroy(struct blktap *);
++int blktap_device_pause(struct blktap *);
++int blktap_device_resume(struct blktap *);
++void blktap_device_restart(struct blktap *);
++void blktap_device_finish_request(struct blktap *,
++				  blkif_response_t *,
++				  struct blktap_request *);
++void blktap_device_fail_pending_requests(struct blktap *);
++#ifdef ENABLE_PASSTHROUGH
++int blktap_device_enable_passthrough(struct blktap *,
++				     unsigned, unsigned);
++#endif
++
++void blktap_defer(struct blktap *);
++void blktap_run_deferred(void);
++
++int blktap_request_pool_init(void);
++void blktap_request_pool_free(void);
++int blktap_request_pool_grow(void);
++int blktap_request_pool_shrink(void);
++struct blktap_request *blktap_request_allocate(struct blktap *);
++void blktap_request_free(struct blktap *, struct blktap_request *);
++unsigned long request_to_kaddr(struct blktap_request *, int);
++
++#endif
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/control.c
+@@ -0,0 +1,277 @@
++#include <linux/module.h>
++#include <linux/miscdevice.h>
++
++#include "blktap.h"
++
++static DEFINE_SPINLOCK(blktap_control_lock);
++struct blktap *blktaps[MAX_BLKTAP_DEVICE];
++
++static int ring_major;
++static int device_major;
++static int blktap_control_registered;
++
++static void
++blktap_control_initialize_tap(struct blktap *tap)
++{
++	int minor = tap->minor;
++
++	memset(tap, 0, sizeof(*tap));
++	set_bit(BLKTAP_CONTROL, &tap->dev_inuse);
++	init_rwsem(&tap->tap_sem);
++	init_waitqueue_head(&tap->wq);
++	atomic_set(&tap->refcnt, 0);
++
++	tap->minor = minor;
++}
++
++static struct blktap *
++blktap_control_create_tap(void)
++{
++	int minor;
++	struct blktap *tap;
++
++	tap = kmalloc(sizeof(*tap), GFP_KERNEL);
++	if (unlikely(!tap))
++		return NULL;
++
++	blktap_control_initialize_tap(tap);
++
++	spin_lock_irq(&blktap_control_lock);
++	for (minor = 0; minor < MAX_BLKTAP_DEVICE; minor++)
++		if (!blktaps[minor])
++			break;
++
++	if (minor == MAX_BLKTAP_DEVICE) {
++		kfree(tap);
++		tap = NULL;
++		goto out;
++	}
++
++	tap->minor = minor;
++	blktaps[minor] = tap;
++
++out:
++	spin_unlock_irq(&blktap_control_lock);
++	return tap;
++}
++
++static struct blktap *
++blktap_control_allocate_tap(void)
++{
++	int err, minor;
++	struct blktap *tap;
++
++	/*
++	 * This is called only from the ioctl, which
++	 * means we should always have interrupts enabled.
++	 */
++	BUG_ON(irqs_disabled());
++
++	spin_lock_irq(&blktap_control_lock);
++
++	for (minor = 0; minor < MAX_BLKTAP_DEVICE; minor++) {
++		tap = blktaps[minor];
++		if (!tap)
++			goto found;
++
++		if (!tap->dev_inuse) {
++			blktap_control_initialize_tap(tap);
++			goto found;
++		}
++	}
++
++	tap = NULL;
++
++found:
++	spin_unlock_irq(&blktap_control_lock);
++
++	if (!tap) {
++		tap = blktap_control_create_tap();
++		if (!tap)
++			return NULL;
++	}
++
++	err = blktap_ring_create(tap);
++	if (err) {
++		BTERR("ring creation failed: %d\n", err);
++		clear_bit(BLKTAP_CONTROL, &tap->dev_inuse);
++		return NULL;
++	}
++
++	BTINFO("allocated tap %p\n", tap);
++	return tap;
++}
++
++static int
++blktap_control_ioctl(struct inode *inode, struct file *filp,
++		     unsigned int cmd, unsigned long arg)
++{
++	unsigned long dev;
++	struct blktap *tap;
++
++	switch (cmd) {
++	case BLKTAP2_IOCTL_ALLOC_TAP: {
++		struct blktap_handle h;
++
++		tap = blktap_control_allocate_tap();
++		if (!tap) {
++			BTERR("error allocating device\n");
++			return -ENOMEM;
++		}
++
++		h.ring   = ring_major;
++		h.device = device_major;
++		h.minor  = tap->minor;
++
++		if (copy_to_user((struct blktap_handle __user *)arg,
++				 &h, sizeof(h))) {
++			blktap_control_destroy_device(tap);
++			return -EFAULT;
++		}
++
++		return 0;
++	}
++
++	case BLKTAP2_IOCTL_FREE_TAP:
++		dev = arg;
++
++		if (dev > MAX_BLKTAP_DEVICE || !blktaps[dev])
++			return -EINVAL;
++
++		blktap_control_destroy_device(blktaps[dev]);
++		return 0;
++	}
++
++	return -ENOIOCTLCMD;
++}
++
++static struct file_operations blktap_control_file_operations = {
++	.owner    = THIS_MODULE,
++	.ioctl    = blktap_control_ioctl,
++};
++
++static struct miscdevice blktap_misc = {
++	.minor    = MISC_DYNAMIC_MINOR,
++	.name     = "blktap-control",
++	.fops     = &blktap_control_file_operations,
++};
++
++int
++blktap_control_destroy_device(struct blktap *tap)
++{
++	int err;
++	unsigned long inuse;
++
++	if (!tap)
++		return 0;
++
++	set_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse);
++
++	for (;;) {
++		inuse = tap->dev_inuse;
++		err   = blktap_device_destroy(tap);
++		if (err)
++			goto wait;
++
++		inuse = tap->dev_inuse;
++		err   = blktap_ring_destroy(tap);
++		if (err)
++			goto wait;
++
++		inuse = tap->dev_inuse;
++		err   = blktap_sysfs_destroy(tap);
++		if (err)
++			goto wait;
++
++		break;
++
++	wait:
++		BTDBG("inuse: 0x%lx, dev_inuse: 0x%lx\n",
++		      inuse, tap->dev_inuse);
++		if (wait_event_interruptible(tap->wq, tap->dev_inuse != inuse))
++			break;
++	}
++
++	clear_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse);
++
++	if (tap->dev_inuse == (1UL << BLKTAP_CONTROL)) {
++		err = 0;
++		clear_bit(BLKTAP_CONTROL, &tap->dev_inuse);
++	}
++
++	return err;
++}
++
++static int
++blktap_control_init(void)
++{
++	int err;
++
++	err = misc_register(&blktap_misc);
++	if (err) {
++		BTERR("misc_register failed for control device");
++		return err;
++	}
++
++	blktap_control_registered = 1;
++	return 0;
++}
++
++static void
++blktap_control_free(void)
++{
++	int i;
++
++	for (i = 0; i < MAX_BLKTAP_DEVICE; i++)
++		blktap_control_destroy_device(blktaps[i]);
++
++	if (blktap_control_registered)
++		if (misc_deregister(&blktap_misc) < 0)
++			BTERR("misc_deregister failed for control device");
++}
++
++static void
++blktap_exit(void)
++{
++	blktap_control_free();
++	blktap_ring_free();
++	blktap_sysfs_free();
++	blktap_device_free();
++	blktap_request_pool_free();
++}
++
++static int __init
++blktap_init(void)
++{
++	int err;
++
++	err = blktap_request_pool_init();
++	if (err)
++		return err;
++
++	err = blktap_device_init(&device_major);
++	if (err)
++		goto fail;
++
++	err = blktap_ring_init(&ring_major);
++	if (err)
++		goto fail;
++
++	err = blktap_sysfs_init();
++	if (err)
++		goto fail;
++
++	err = blktap_control_init();
++	if (err)
++		goto fail;
++
++	return 0;
++
++fail:
++	blktap_exit();
++	return err;
++}
++
++module_init(blktap_init);
++module_exit(blktap_exit);
++MODULE_LICENSE("Dual BSD/GPL");
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/device.c
+@@ -0,0 +1,1132 @@
++#include <linux/fs.h>
++#include <linux/blkdev.h>
++#include <linux/cdrom.h>
++#include <linux/hdreg.h>
++#include <linux/module.h>
++
++#include <scsi/scsi.h>
++#include <scsi/scsi_ioctl.h>
++
++#include <xen/xenbus.h>
++#include <xen/interface/io/blkif.h>
++
++#include "blktap.h"
++
++#ifdef CONFIG_XEN_BLKDEV_BACKEND
++#include "../blkback/blkback-pagemap.h"
++#else
++struct blkback_pagemap { };
++#define blkback_pagemap_read(page) BUG();
++#endif
++
++#if 0
++#define DPRINTK_IOCTL(_f, _a...) printk(KERN_ALERT _f, ## _a)
++#else
++#define DPRINTK_IOCTL(_f, _a...) ((void)0)
++#endif
++
++struct blktap_grant_table {
++	int cnt;
++	struct gnttab_map_grant_ref grants[BLKIF_MAX_SEGMENTS_PER_REQUEST * 2];
++};
++
++static int blktap_device_major;
++
++static inline struct blktap *
++dev_to_blktap(struct blktap_device *dev)
++{
++	return container_of(dev, struct blktap, device);
++}
++
++static int
++blktap_device_open(struct inode *inode, struct file *filep)
++{
++	struct blktap *tap;
++	struct blktap_device *dev = inode->i_bdev->bd_disk->private_data;
++
++	if (!dev)
++		return -ENOENT;
++
++	tap = dev_to_blktap(dev);
++	if (!blktap_active(tap) ||
++	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse))
++		return -ENOENT;
++
++	dev->users++;
++
++	return 0;
++}
++
++static int
++blktap_device_release(struct inode *inode, struct file *filep)
++{
++	struct blktap_device *dev = inode->i_bdev->bd_disk->private_data;
++	struct blktap *tap = dev_to_blktap(dev);
++
++	dev->users--;
++	if (test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse))
++		blktap_device_destroy(tap);
++
++	return 0;
++}
++
++static int
++blktap_device_getgeo(struct block_device *bd, struct hd_geometry *hg)
++{
++	/* We don't have real geometry info, but let's at least return
++	   values consistent with the size of the device */
++	sector_t nsect = get_capacity(bd->bd_disk);
++	sector_t cylinders = nsect;
++
++	hg->heads = 0xff;
++	hg->sectors = 0x3f;
++	sector_div(cylinders, hg->heads * hg->sectors);
++	hg->cylinders = cylinders;
++	if ((sector_t)(hg->cylinders + 1) * hg->heads * hg->sectors < nsect)
++		hg->cylinders = 0xffff;
++	return 0;
++}
++
++static int
++blktap_device_ioctl(struct inode *inode, struct file *filep,
++		    unsigned command, unsigned long argument)
++{
++	int i;
++
++	DPRINTK_IOCTL("command: 0x%x, argument: 0x%lx, dev: 0x%04x\n",
++		      command, (long)argument, inode->i_rdev);
++
++	switch (command) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
++	case HDIO_GETGEO: {
++		struct block_device *bd = inode->i_bdev;
++		struct hd_geometry geo;
++		int ret;
++
++                if (!argument)
++                        return -EINVAL;
++
++		geo.start = get_start_sect(bd);
++		ret = blktap_device_getgeo(bd, &geo);
++		if (ret)
++			return ret;
++
++		if (copy_to_user((struct hd_geometry __user *)argument, &geo,
++				 sizeof(geo)))
++                        return -EFAULT;
++
++                return 0;
++	}
++#endif
++	case CDROMMULTISESSION:
++		BTDBG("FIXME: support multisession CDs later\n");
++		for (i = 0; i < sizeof(struct cdrom_multisession); i++)
++			if (put_user(0, (char __user *)(argument + i)))
++				return -EFAULT;
++		return 0;
++
++	case SCSI_IOCTL_GET_IDLUN:
++		if (!access_ok(VERIFY_WRITE, argument, 
++			sizeof(struct scsi_idlun)))
++			return -EFAULT;
++
++		/* return 0 for now. */
++		__put_user(0, &((struct scsi_idlun __user *)argument)->dev_id);
++		__put_user(0, 
++			&((struct scsi_idlun __user *)argument)->host_unique_id);
++		return 0;
++
++	default:
++		/*printk(KERN_ALERT "ioctl %08x not supported by Xen blkdev\n",
++		  command);*/
++		return -EINVAL; /* same return as native Linux */
++	}
++
++	return 0;
++}
++
++static struct block_device_operations blktap_device_file_operations = {
++	.owner     = THIS_MODULE,
++	.open      = blktap_device_open,
++	.release   = blktap_device_release,
++	.ioctl     = blktap_device_ioctl,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
++	.getgeo    = blktap_device_getgeo
++#endif
++};
++
++static int
++blktap_map_uaddr_fn(pte_t *ptep, struct page *pmd_page,
++		    unsigned long addr, void *data)
++{
++	pte_t *pte = (pte_t *)data;
++
++	BTDBG("ptep %p -> %012llx\n", ptep, pte_val(*pte));
++	set_pte(ptep, *pte);
++	xen_invlpg(addr);
++	return 0;
++}
++
++static int
++blktap_map_uaddr(struct mm_struct *mm, unsigned long address, pte_t pte)
++{
++	return apply_to_page_range(mm, address,
++				   PAGE_SIZE, blktap_map_uaddr_fn, &pte);
++}
++
++static int
++blktap_umap_uaddr_fn(pte_t *ptep, struct page *pmd_page,
++		     unsigned long addr, void *data)
++{
++	struct mm_struct *mm = (struct mm_struct *)data;
++
++	BTDBG("ptep %p\n", ptep);
++	pte_clear(mm, addr, ptep);
++	xen_invlpg(addr);
++	return 0;
++}
++
++static int
++blktap_umap_uaddr(struct mm_struct *mm, unsigned long address)
++{
++	return apply_to_page_range(mm, address,
++				   PAGE_SIZE, blktap_umap_uaddr_fn, mm);
++}
++
++static void
++blktap_device_end_dequeued_request(struct blktap_device *dev,
++				   struct request *req, int uptodate)
++{
++	int ret;
++
++	ret = end_that_request_first(req, uptodate, req->hard_nr_sectors);
++	BUG_ON(ret);
++
++	spin_lock_irq(&dev->lock);
++	end_that_request_last(req, uptodate);
++	spin_unlock_irq(&dev->lock);
++}
++
++/*
++ * tap->tap_sem held on entry
++ */
++static void
++blktap_device_fast_flush(struct blktap *tap, struct blktap_request *request)
++{
++	uint64_t ptep;
++	int ret, usr_idx;
++	unsigned int i, cnt;
++	struct page **map, *page;
++	struct blktap_ring *ring;
++	struct grant_handle_pair *khandle;
++	unsigned long kvaddr, uvaddr, offset;
++	struct gnttab_unmap_grant_ref unmap[BLKIF_MAX_SEGMENTS_PER_REQUEST * 2];
++
++	cnt     = 0;
++	ring    = &tap->ring;
++	usr_idx = request->usr_idx;
++	map     = ring->foreign_map.map;
++
++	if (!ring->vma)
++		return;
++
++	if (xen_feature(XENFEAT_auto_translated_physmap))
++		zap_page_range(ring->vma, 
++			       MMAP_VADDR(ring->user_vstart, usr_idx, 0),
++			       request->nr_pages << PAGE_SHIFT, NULL);
++
++	for (i = 0; i < request->nr_pages; i++) {
++		kvaddr = request_to_kaddr(request, i);
++		uvaddr = MMAP_VADDR(ring->user_vstart, usr_idx, i);
++
++		khandle = request->handles + i;
++
++		if (khandle->kernel != INVALID_GRANT_HANDLE) {
++			gnttab_set_unmap_op(&unmap[cnt], kvaddr,
++					    GNTMAP_host_map, khandle->kernel);
++			cnt++;
++			set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT,
++					    INVALID_P2M_ENTRY);
++		}
++
++		if (khandle->user != INVALID_GRANT_HANDLE) {
++			BUG_ON(xen_feature(XENFEAT_auto_translated_physmap));
++			if (create_lookup_pte_addr(ring->vma->vm_mm,
++						   uvaddr, &ptep) != 0) {
++				BTERR("Couldn't get a pte addr!\n");
++				return;
++			}
++
++			gnttab_set_unmap_op(&unmap[cnt], ptep,
++					    GNTMAP_host_map
++					    | GNTMAP_application_map
++					    | GNTMAP_contains_pte,
++					    khandle->user);
++			cnt++;
++		}
++
++		offset = (uvaddr - ring->vma->vm_start) >> PAGE_SHIFT;
++
++		BTDBG("offset: 0x%08lx, page: %p, request: %p, usr_idx: %d, "
++		      "seg: %d, kvaddr: 0x%08lx, khandle: %u, uvaddr: "
++		      "0x%08lx, handle: %u\n", offset, map[offset], request,
++		      usr_idx, i, kvaddr, khandle->kernel, uvaddr,
++		      khandle->user);
++
++		page = map[offset];
++		if (page) {
++			ClearPageReserved(map[offset]);
++			if (PageBlkback(page)) {
++				ClearPageBlkback(page);
++				set_page_private(page, 0);
++			}
++		}
++		map[offset] = NULL;
++
++		khandle->kernel = INVALID_GRANT_HANDLE;
++		khandle->user   = INVALID_GRANT_HANDLE;
++	}
++
++	if (cnt) {
++		ret = HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
++						unmap, cnt);
++		BUG_ON(ret);
++	}
++
++	if (!xen_feature(XENFEAT_auto_translated_physmap))
++		zap_page_range(ring->vma, 
++			       MMAP_VADDR(ring->user_vstart, usr_idx, 0), 
++			       request->nr_pages << PAGE_SHIFT, NULL);
++}
++
++/*
++ * tap->tap_sem held on entry
++ */
++static void
++blktap_unmap(struct blktap *tap, struct blktap_request *request)
++{
++	int i, usr_idx;
++	unsigned long kvaddr;
++
++	usr_idx = request->usr_idx;
++	down_write(&tap->ring.vma->vm_mm->mmap_sem);
++
++	for (i = 0; i < request->nr_pages; i++) {
++		BTDBG("request: %p, seg: %d, kvaddr: 0x%08lx, khandle: %u, "
++		      "uvaddr: 0x%08lx, uhandle: %u\n", request, i,
++		      request_to_kaddr(request, i),
++		      request->handles[i].kernel,
++		      MMAP_VADDR(tap->ring.user_vstart, usr_idx, i),
++		      request->handles[i].user);
++
++		if (request->handles[i].kernel == INVALID_GRANT_HANDLE) {
++			kvaddr = request_to_kaddr(request, i);
++			blktap_umap_uaddr(&init_mm, kvaddr);
++			set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT,
++					    INVALID_P2M_ENTRY);
++		}
++	}
++
++	blktap_device_fast_flush(tap, request);
++	up_write(&tap->ring.vma->vm_mm->mmap_sem);
++}
++
++/*
++ * called if the tapdisk process dies unexpectedly.
++ * fail and release any pending requests and disable queue.
++ */
++void
++blktap_device_fail_pending_requests(struct blktap *tap)
++{
++	int usr_idx;
++	struct request *req;
++	struct blktap_device *dev;
++	struct blktap_request *request;
++
++	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
++		return;
++
++	down_write(&tap->tap_sem);
++
++	dev = &tap->device;
++	for (usr_idx = 0; usr_idx < MAX_PENDING_REQS; usr_idx++) {
++		request = tap->pending_requests[usr_idx];
++		if (!request || request->status != BLKTAP_REQUEST_PENDING)
++			continue;
++
++		BTERR("%u:%u: failing pending %s of %d pages\n",
++		      blktap_device_major, tap->minor,
++		      (request->operation == BLKIF_OP_READ ?
++		       "read" : "write"), request->nr_pages);
++
++		blktap_unmap(tap, request);
++		req = (struct request *)(unsigned long)request->id;
++		blktap_device_end_dequeued_request(dev, req, 0);
++		blktap_request_free(tap, request);
++	}
++
++	up_write(&tap->tap_sem);
++
++	spin_lock_irq(&dev->lock);
++
++	/* fail any future requests */
++	dev->gd->queue->queuedata = NULL;
++	blk_start_queue(dev->gd->queue);
++
++	spin_unlock_irq(&dev->lock);
++}
++
++/*
++ * tap->tap_sem held on entry
++ */
++void
++blktap_device_finish_request(struct blktap *tap,
++			     blkif_response_t *res,
++			     struct blktap_request *request)
++{
++	int uptodate;
++	struct request *req;
++	struct blktap_device *dev;
++
++	dev = &tap->device;
++
++	blktap_unmap(tap, request);
++
++	req = (struct request *)(unsigned long)request->id;
++	uptodate = (res->status == BLKIF_RSP_OKAY);
++
++	BTDBG("req %p res status %d operation %d/%d id %lld\n", req,
++		res->status, res->operation, request->operation, res->id);
++
++	switch (request->operation) {
++	case BLKIF_OP_READ:
++	case BLKIF_OP_WRITE:
++		if (unlikely(res->status != BLKIF_RSP_OKAY))
++			BTERR("Bad return from device data "
++				"request: %x\n", res->status);
++		blktap_device_end_dequeued_request(dev, req, uptodate);
++		break;
++	default:
++		BUG();
++	}
++
++	blktap_request_free(tap, request);
++}
++
++static int
++blktap_prep_foreign(struct blktap *tap,
++		    struct blktap_request *request,
++		    blkif_request_t *blkif_req,
++		    unsigned int seg, struct page *page,
++		    struct blktap_grant_table *table)
++{
++	uint64_t ptep;
++	uint32_t flags;
++	struct page *tap_page;
++	struct blktap_ring *ring;
++	struct blkback_pagemap map;
++	unsigned long uvaddr, kvaddr;
++
++	ring = &tap->ring;
++	map  = blkback_pagemap_read(page);
++	blkif_req->seg[seg].gref = map.gref;
++
++	uvaddr = MMAP_VADDR(ring->user_vstart, request->usr_idx, seg);
++	kvaddr = request_to_kaddr(request, seg);
++	flags  = GNTMAP_host_map |
++		(request->operation == BLKIF_OP_WRITE ? GNTMAP_readonly : 0);
++
++	gnttab_set_map_op(&table->grants[table->cnt],
++			  kvaddr, flags, map.gref, map.domid);
++	table->cnt++;
++
++	/* enable chained tap devices */
++	tap_page = pfn_to_page(__pa(kvaddr) >> PAGE_SHIFT);
++	set_page_private(tap_page, page_private(page));
++	SetPageBlkback(tap_page);
++
++	if (xen_feature(XENFEAT_auto_translated_physmap))
++		return 0;
++
++	if (create_lookup_pte_addr(ring->vma->vm_mm, uvaddr, &ptep)) {
++		BTERR("couldn't get a pte addr!\n");
++		return -1;
++	}
++
++	flags |= GNTMAP_application_map | GNTMAP_contains_pte;
++	gnttab_set_map_op(&table->grants[table->cnt],
++			  ptep, flags, map.gref, map.domid);
++	table->cnt++;
++
++	return 0;
++}
++
++static int
++blktap_map_foreign(struct blktap *tap,
++		   struct blktap_request *request,
++		   blkif_request_t *blkif_req,
++		   struct blktap_grant_table *table)
++{
++	struct page *page;
++	int i, grant, err, usr_idx;
++	struct blktap_ring *ring;
++	unsigned long uvaddr, kvaddr, foreign_mfn;
++
++	if (!table->cnt)
++		return 0;
++
++	err = HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref,
++					table->grants, table->cnt);
++	BUG_ON(err);
++
++	grant   = 0;
++	usr_idx = request->usr_idx;
++	ring    = &tap->ring;
++
++	for (i = 0; i < request->nr_pages; i++) {
++		if (!blkif_req->seg[i].gref)
++			continue;
++
++		uvaddr = MMAP_VADDR(ring->user_vstart, usr_idx, i);
++		kvaddr = request_to_kaddr(request, i);
++
++		if (unlikely(table->grants[grant].status)) {
++			BTERR("invalid kernel buffer: could not remap it\n");
++			err |= 1;
++			table->grants[grant].handle = INVALID_GRANT_HANDLE;
++		}
++
++		request->handles[i].kernel = table->grants[grant].handle;
++		foreign_mfn = table->grants[grant].dev_bus_addr >> PAGE_SHIFT;
++		grant++;
++
++		if (xen_feature(XENFEAT_auto_translated_physmap))
++			goto done;
++
++		if (unlikely(table->grants[grant].status)) {
++			BTERR("invalid user buffer: could not remap it\n");
++			err |= 1;
++			table->grants[grant].handle = INVALID_GRANT_HANDLE;
++		}
++
++		request->handles[i].user = table->grants[grant].handle;
++		grant++;
++
++	done:
++		if (err)
++			continue;
++
++		page = pfn_to_page(__pa(kvaddr) >> PAGE_SHIFT);
++
++		if (!xen_feature(XENFEAT_auto_translated_physmap))
++			set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT,
++					    FOREIGN_FRAME(foreign_mfn));
++		else if (vm_insert_page(ring->vma, uvaddr, page))
++			err |= 1;
++
++		BTDBG("pending_req: %p, seg: %d, page: %p, "
++		      "kvaddr: 0x%08lx, khandle: %u, uvaddr: 0x%08lx, "
++		      "uhandle: %u\n", request, i, page,
++		      kvaddr, request->handles[i].kernel,		       
++		      uvaddr, request->handles[i].user);
++	}
++
++	return err;
++}
++
++static void
++blktap_map(struct blktap *tap,
++	   struct blktap_request *request,
++	   unsigned int seg, struct page *page)
++{
++	pte_t pte;
++	int usr_idx;
++	struct blktap_ring *ring;
++	unsigned long uvaddr, kvaddr;
++
++	ring    = &tap->ring;
++	usr_idx = request->usr_idx;
++	uvaddr  = MMAP_VADDR(ring->user_vstart, usr_idx, seg);
++	kvaddr  = request_to_kaddr(request, seg);
++
++	pte = mk_pte(page, ring->vma->vm_page_prot);
++	blktap_map_uaddr(ring->vma->vm_mm, uvaddr, pte_mkwrite(pte));
++	blktap_map_uaddr(&init_mm, kvaddr, mk_pte(page, PAGE_KERNEL));
++
++	set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT, pte_mfn(pte));
++	request->handles[seg].kernel = INVALID_GRANT_HANDLE;
++	request->handles[seg].user   = INVALID_GRANT_HANDLE;
++
++	BTDBG("pending_req: %p, seg: %d, page: %p, kvaddr: 0x%08lx, "
++	      "uvaddr: 0x%08lx\n", request, seg, page, kvaddr,
++	      uvaddr);
++}
++
++static int
++blktap_device_process_request(struct blktap *tap,
++			      struct blktap_request *request,
++			      struct request *req)
++{
++	struct bio *bio;
++	struct page *page;
++	struct bio_vec *bvec;
++	int idx, usr_idx, err;
++	struct blktap_ring *ring;
++	struct blktap_grant_table table;
++	unsigned int fsect, lsect, nr_sects;
++	unsigned long offset, uvaddr, kvaddr;
++	struct blkif_request blkif_req, *target;
++
++	err = -1;
++	memset(&table, 0, sizeof(table));
++
++	if (!blktap_active(tap))
++		goto out;
++
++	ring    = &tap->ring;
++	usr_idx = request->usr_idx;
++	blkif_req.id = usr_idx;
++	blkif_req.sector_number = (blkif_sector_t)req->sector;
++	blkif_req.handle = 0;
++	blkif_req.operation = rq_data_dir(req) ?
++		BLKIF_OP_WRITE : BLKIF_OP_READ;
++
++	request->id        = (unsigned long)req;
++	request->operation = blkif_req.operation;
++	request->status    = BLKTAP_REQUEST_PENDING;
++	do_gettimeofday(&request->time);
++
++	nr_sects = 0;
++	request->nr_pages = 0;
++	blkif_req.nr_segments = 0;
++	rq_for_each_bio(bio, req) {
++		bio_for_each_segment(bvec, bio, idx) {
++			BUG_ON(blkif_req.nr_segments ==
++			       BLKIF_MAX_SEGMENTS_PER_REQUEST);
++
++			fsect     = bvec->bv_offset >> 9;
++			lsect     = fsect + (bvec->bv_len >> 9) - 1;
++			nr_sects += bvec->bv_len >> 9;
++
++			blkif_req.seg[blkif_req.nr_segments] =
++				(struct blkif_request_segment) {
++				.gref       = 0,
++				.first_sect = fsect,
++				.last_sect  = lsect };
++
++			if (PageBlkback(bvec->bv_page)) {
++				/* foreign page -- use xen */
++				if (blktap_prep_foreign(tap,
++							request,
++							&blkif_req,
++							blkif_req.nr_segments,
++							bvec->bv_page,
++							&table))
++					goto out;
++			} else {
++				/* do it the old fashioned way */
++				blktap_map(tap,
++					   request,
++					   blkif_req.nr_segments,
++					   bvec->bv_page);
++			}
++
++			uvaddr = MMAP_VADDR(ring->user_vstart,
++					    usr_idx, blkif_req.nr_segments);
++			kvaddr = request_to_kaddr(request,
++						  blkif_req.nr_segments);
++			offset = (uvaddr - ring->vma->vm_start) >> PAGE_SHIFT;
++			page   = pfn_to_page(__pa(kvaddr) >> PAGE_SHIFT);
++			ring->foreign_map.map[offset] = page;
++			SetPageReserved(page);
++
++			BTDBG("mapped uaddr %08lx to page %p pfn 0x%lx\n",
++			      uvaddr, page, __pa(kvaddr) >> PAGE_SHIFT);
++			BTDBG("offset: 0x%08lx, pending_req: %p, seg: %d, "
++			      "page: %p, kvaddr: 0x%08lx, uvaddr: 0x%08lx\n",
++			      offset, request, blkif_req.nr_segments,
++			      page, kvaddr, uvaddr);
++
++			blkif_req.nr_segments++;
++			request->nr_pages++;
++		}
++	}
++
++	if (blktap_map_foreign(tap, request, &blkif_req, &table))
++		goto out;
++
++	/* Finally, write the request message to the user ring. */
++	target = RING_GET_REQUEST(&ring->ring, ring->ring.req_prod_pvt);
++	memcpy(target, &blkif_req, sizeof(blkif_req));
++	target->id = request->usr_idx;
++	wmb(); /* blktap_poll() reads req_prod_pvt asynchronously */
++	ring->ring.req_prod_pvt++;
++
++	if (rq_data_dir(req)) {
++		tap->stats.st_wr_sect += nr_sects;
++		tap->stats.st_wr_req++;
++	} else {
++		tap->stats.st_rd_sect += nr_sects;
++		tap->stats.st_rd_req++;
++	}
++
++	err = 0;
++
++out:
++	if (err)
++		blktap_device_fast_flush(tap, request);
++	return err;
++}
++
++#ifdef ENABLE_PASSTHROUGH
++#define rq_for_each_bio_safe(_bio, _tmp, _req)				\
++	if ((_req)->bio)						\
++		for (_bio = (_req)->bio;				\
++		     _bio && ((_tmp = _bio->bi_next) || 1);		\
++		     _bio = _tmp)
++
++static void
++blktap_device_forward_request(struct blktap *tap, struct request *req)
++{
++	struct bio *bio, *tmp;
++	struct blktap_device *dev;
++
++	dev = &tap->device;
++
++	rq_for_each_bio_safe(bio, tmp, req) {
++		bio->bi_bdev = dev->bdev;
++		submit_bio(bio->bi_rw, bio);
++	}
++}
++
++static void
++blktap_device_close_bdev(struct blktap *tap)
++{
++	struct blktap_device *dev;
++
++	dev = &tap->device;
++
++	if (dev->bdev)
++		blkdev_put(dev->bdev);
++
++	dev->bdev = NULL;
++	clear_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse);
++}
++
++static int
++blktap_device_open_bdev(struct blktap *tap, u32 pdev)
++{
++	struct block_device *bdev;
++	struct blktap_device *dev;
++
++	dev = &tap->device;
++
++	bdev = open_by_devnum(pdev, FMODE_WRITE);
++	if (IS_ERR(bdev)) {
++		BTERR("opening device %x:%x failed: %ld\n",
++		      MAJOR(pdev), MINOR(pdev), PTR_ERR(bdev));
++		return PTR_ERR(bdev);
++	}
++
++	if (!bdev->bd_disk) {
++		BTERR("device %x:%x doesn't exist\n",
++		      MAJOR(pdev), MINOR(pdev));
++		blkdev_put(dev->bdev);
++		return -ENOENT;
++	}
++
++	dev->bdev = bdev;
++	set_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse);
++
++	/* TODO: readjust queue parameters */
++
++	BTINFO("set device %d to passthrough on %x:%x\n",
++	       tap->minor, MAJOR(pdev), MINOR(pdev));
++
++	return 0;
++}
++
++int
++blktap_device_enable_passthrough(struct blktap *tap,
++				 unsigned major, unsigned minor)
++{
++	u32 pdev;
++	struct blktap_device *dev;
++
++	dev  = &tap->device;
++	pdev = MKDEV(major, minor);
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return -EINVAL;
++
++	if (dev->bdev) {
++		if (pdev)
++			return -EINVAL;
++		blktap_device_close_bdev(tap);
++		return 0;
++	}
++
++	return blktap_device_open_bdev(tap, pdev);
++}
++#endif
++
++/*
++ * dev->lock held on entry
++ */
++static void
++blktap_device_run_queue(struct blktap *tap)
++{
++	int queued, err;
++	request_queue_t *rq;
++	struct request *req;
++	struct blktap_ring *ring;
++	struct blktap_device *dev;
++	struct blktap_request *request;
++
++	queued = 0;
++	ring   = &tap->ring;
++	dev    = &tap->device;
++	rq     = dev->gd->queue;
++
++	BTDBG("running queue for %d\n", tap->minor);
++
++	while ((req = elv_next_request(rq)) != NULL) {
++		if (!blk_fs_request(req)) {
++			end_request(req, 0);
++			continue;
++		}
++
++		if (blk_barrier_rq(req)) {
++			end_request(req, 0);
++			continue;
++		}
++
++#ifdef ENABLE_PASSTHROUGH
++		if (test_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse)) {
++			blkdev_dequeue_request(req);
++			blktap_device_forward_request(tap, req);
++			continue;
++		}
++#endif
++
++		if (RING_FULL(&ring->ring)) {
++		wait:
++			/* Avoid pointless unplugs. */
++			blk_stop_queue(rq);
++			blktap_defer(tap);
++			break;
++		}
++
++		request = blktap_request_allocate(tap);
++		if (!request) {
++			tap->stats.st_oo_req++;
++			goto wait;
++		}
++
++		BTDBG("req %p: dev %d cmd %p, sec 0x%llx, (0x%x/0x%lx) "
++		      "buffer:%p [%s], pending: %p\n", req, tap->minor,
++		      req->cmd, req->sector, req->current_nr_sectors,
++		      req->nr_sectors, req->buffer,
++		      rq_data_dir(req) ? "write" : "read", request);
++
++		blkdev_dequeue_request(req);
++
++		spin_unlock_irq(&dev->lock);
++		down_read(&tap->tap_sem);
++
++		err = blktap_device_process_request(tap, request, req);
++		if (!err)
++			queued++;
++		else {
++			blktap_device_end_dequeued_request(dev, req, 0);
++			blktap_request_free(tap, request);
++		}
++
++		up_read(&tap->tap_sem);
++		spin_lock_irq(&dev->lock);
++	}
++
++	if (queued)
++		blktap_ring_kick_user(tap);
++}
++
++/*
++ * dev->lock held on entry
++ */
++static void
++blktap_device_do_request(request_queue_t *rq)
++{
++	struct request *req;
++	struct blktap *tap;
++	struct blktap_device *dev;
++
++	dev = rq->queuedata;
++	if (!dev)
++		goto fail;
++
++	tap = dev_to_blktap(dev);
++	if (!blktap_active(tap))
++		goto fail;
++
++	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse) ||
++	    test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse)) {
++		blktap_defer(tap);
++		return;
++	}
++
++	blktap_device_run_queue(tap);
++	return;
++
++fail:
++	while ((req = elv_next_request(rq))) {
++		BTERR("device closed: failing secs %llu - %llu\n",
++		      req->sector, req->sector + req->nr_sectors);
++		end_request(req, 0);
++	}
++}
++
++void
++blktap_device_restart(struct blktap *tap)
++{
++	struct blktap_device *dev;
++
++	dev = &tap->device;
++	if (!dev->gd || !dev->gd->queue)
++		return;
++
++	if (blktap_active(tap) && RING_FULL(&tap->ring.ring)) {
++		blktap_defer(tap);
++		return;
++	}
++
++	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse) ||
++	    test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse)) {
++		blktap_defer(tap);
++		return;
++	}
++
++	spin_lock_irq(&dev->lock);
++
++	/* Re-enable calldowns. */
++	if (blk_queue_stopped(dev->gd->queue))
++		blk_start_queue(dev->gd->queue);
++
++	/* Kick things off immediately. */
++	blktap_device_do_request(dev->gd->queue);
++
++	spin_unlock_irq(&dev->lock);
++}
++
++static void
++blktap_device_configure(struct blktap *tap)
++{
++	struct request_queue *rq;
++	struct blktap_device *dev = &tap->device;
++
++	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !dev->gd)
++		return;
++
++	dev = &tap->device;
++	rq  = dev->gd->queue;
++
++	spin_lock_irq(&dev->lock);
++
++	set_capacity(dev->gd, tap->params.capacity);
++
++	/* Hard sector size and max sectors impersonate the equiv. hardware. */
++	blk_queue_hardsect_size(rq, tap->params.sector_size);
++	blk_queue_max_sectors(rq, 512);
++
++	/* Each segment in a request is up to an aligned page in size. */
++	blk_queue_segment_boundary(rq, PAGE_SIZE - 1);
++	blk_queue_max_segment_size(rq, PAGE_SIZE);
++
++	/* Ensure a merged request will fit in a single I/O ring slot. */
++	blk_queue_max_phys_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
++	blk_queue_max_hw_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
++
++	/* Make sure buffer addresses are sector-aligned. */
++	blk_queue_dma_alignment(rq, 511);
++
++	spin_unlock_irq(&dev->lock);
++}
++
++int
++blktap_device_resume(struct blktap *tap)
++{
++	int err;
++
++	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !blktap_active(tap))
++		return -ENODEV;
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return 0;
++
++	err = blktap_ring_resume(tap);
++	if (err)
++		return err;
++
++	/* device size may have changed */
++	blktap_device_configure(tap);
++
++	BTDBG("restarting device\n");
++	blktap_device_restart(tap);
++
++	return 0;
++}
++
++int
++blktap_device_pause(struct blktap *tap)
++{
++	unsigned long flags;
++	struct blktap_device *dev = &tap->device;
++
++	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse) || !blktap_active(tap))
++		return -ENODEV;
++
++	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return 0;
++
++	spin_lock_irqsave(&dev->lock, flags);
++
++	blk_stop_queue(dev->gd->queue);
++	set_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
++
++	spin_unlock_irqrestore(&dev->lock, flags);
++
++	return blktap_ring_pause(tap);
++}
++
++int
++blktap_device_destroy(struct blktap *tap)
++{
++	struct blktap_device *dev = &tap->device;
++
++	if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
++		return 0;
++
++	BTINFO("destroy device %d users %d\n", tap->minor, dev->users);
++
++	if (dev->users)
++		return -EBUSY;
++
++	spin_lock_irq(&dev->lock);
++	/* No more blktap_device_do_request(). */
++	blk_stop_queue(dev->gd->queue);
++	clear_bit(BLKTAP_DEVICE, &tap->dev_inuse);
++	spin_unlock_irq(&dev->lock);
++
++#ifdef ENABLE_PASSTHROUGH
++	if (dev->bdev)
++		blktap_device_close_bdev(tap);
++#endif
++
++	del_gendisk(dev->gd);
++	put_disk(dev->gd);
++	blk_cleanup_queue(dev->gd->queue);
++
++	dev->gd = NULL;
++
++	wake_up(&tap->wq);
++
++	return 0;
++}
++
++int
++blktap_device_create(struct blktap *tap)
++{
++	int minor, err;
++	struct gendisk *gd;
++	struct request_queue *rq;
++	struct blktap_device *dev;
++
++	gd    = NULL;
++	rq    = NULL;
++	dev   = &tap->device;
++	minor = tap->minor;
++
++	if (test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
++		return -EEXIST;
++
++	if (blktap_validate_params(tap, &tap->params))
++		return -EINVAL;
++
++	BTINFO("minor %d sectors %Lu sector-size %lu\n",
++	       minor, tap->params.capacity, tap->params.sector_size);
++
++	err = -ENODEV;
++
++	gd = alloc_disk(1);
++	if (!gd)
++		goto error;
++
++	if (minor < 26)
++		sprintf(gd->disk_name, "tapdev%c", 'a' + minor);
++	else
++		sprintf(gd->disk_name, "tapdev%c%c",
++			'a' + ((minor / 26) - 1), 'a' + (minor % 26));
++
++	gd->major = blktap_device_major;
++	gd->first_minor = minor;
++	gd->fops = &blktap_device_file_operations;
++	gd->private_data = dev;
++
++	dev->lock = SPIN_LOCK_UNLOCKED;
++	rq = blk_init_queue(blktap_device_do_request, &dev->lock);
++	if (!rq)
++		goto error;
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,10)
++	elevator_init(rq, "noop");
++#else
++	elevator_init(rq, &elevator_noop);
++#endif
++
++	gd->queue     = rq;
++	rq->queuedata = dev;
++	dev->gd       = gd;
++
++	set_bit(BLKTAP_DEVICE, &tap->dev_inuse);
++	blktap_device_configure(tap);
++
++	add_disk(gd);
++
++	err = 0;
++	goto out;
++
++ error:
++	if (gd)
++		del_gendisk(gd);
++	if (rq)
++		blk_cleanup_queue(rq);
++
++ out:
++	BTINFO("creation of %u:%u: %d\n", blktap_device_major, tap->minor, err);
++	return err;
++}
++
++int
++blktap_device_init(int *maj)
++{
++	int major;
++
++	/* Dynamically allocate a major for this device */
++	major = register_blkdev(0, "tapdev");
++	if (major < 0) {
++		BTERR("Couldn't register blktap device\n");
++		return -ENOMEM;
++	}	
++
++	blktap_device_major = *maj = major;
++	BTINFO("blktap device major %d\n", major);
++
++	return 0;
++}
++
++void
++blktap_device_free(void)
++{
++	if (blktap_device_major)
++		if (unregister_blkdev(blktap_device_major, "tapdev"))
++			BTERR("blktap device unregister failed\n");
++}
+diff --git a/drivers/xen/blktap2/request.c b/drivers/xen/blktap2/request.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/request.c
+@@ -0,0 +1,297 @@
++#include <linux/spinlock.h>
++#include <xen/balloon.h>
++
++#include "blktap.h"
++
++#define MAX_BUCKETS                      8
++#define BUCKET_SIZE                      MAX_PENDING_REQS
++
++#define BLKTAP_POOL_CLOSING              1
++
++struct blktap_request_bucket;
++
++struct blktap_request_handle {
++	int                              slot;
++	uint8_t                          inuse;
++	struct blktap_request            request;
++	struct blktap_request_bucket    *bucket;
++};
++
++struct blktap_request_bucket {
++	atomic_t                         reqs_in_use;
++	struct blktap_request_handle     handles[BUCKET_SIZE];
++	struct page                    **foreign_pages;
++};
++
++struct blktap_request_pool {
++	spinlock_t                       lock;
++	uint8_t                          status;
++	struct list_head                 free_list;
++	atomic_t                         reqs_in_use;
++	wait_queue_head_t                wait_queue;
++	struct blktap_request_bucket    *buckets[MAX_BUCKETS];
++};
++
++static struct blktap_request_pool pool;
++
++static inline struct blktap_request_handle *
++blktap_request_to_handle(struct blktap_request *req)
++{
++	return container_of(req, struct blktap_request_handle, request);
++}
++
++static void
++blktap_request_pool_init_request(struct blktap_request *request)
++{
++	int i;
++
++	request->usr_idx  = -1;
++	request->nr_pages = 0;
++	request->status   = BLKTAP_REQUEST_FREE;
++	INIT_LIST_HEAD(&request->free_list);
++	for (i = 0; i < ARRAY_SIZE(request->handles); i++) {
++		request->handles[i].user   = INVALID_GRANT_HANDLE;
++		request->handles[i].kernel = INVALID_GRANT_HANDLE;
++	}
++}
++
++static int
++blktap_request_pool_allocate_bucket(void)
++{
++	int i, idx;
++	unsigned long flags;
++	struct blktap_request *request;
++	struct blktap_request_handle *handle;
++	struct blktap_request_bucket *bucket;
++
++	bucket = kzalloc(sizeof(struct blktap_request_bucket), GFP_KERNEL);
++	if (!bucket)
++		goto fail;
++
++	bucket->foreign_pages = alloc_empty_pages_and_pagevec(MMAP_PAGES);
++	if (!bucket->foreign_pages)
++		goto fail;
++
++	spin_lock_irqsave(&pool.lock, flags);
++
++	idx = -1;
++	for (i = 0; i < MAX_BUCKETS; i++) {
++		if (!pool.buckets[i]) {
++			idx = i;
++			pool.buckets[idx] = bucket;
++			break;
++		}
++	}
++
++	if (idx == -1) {
++		spin_unlock_irqrestore(&pool.lock, flags);
++		goto fail;
++	}
++
++	for (i = 0; i < BUCKET_SIZE; i++) {
++		handle  = bucket->handles + i;
++		request = &handle->request;
++
++		handle->slot   = i;
++		handle->inuse  = 0;
++		handle->bucket = bucket;
++
++		blktap_request_pool_init_request(request);
++		list_add_tail(&request->free_list, &pool.free_list);
++	}
++
++	spin_unlock_irqrestore(&pool.lock, flags);
++
++	return 0;
++
++fail:
++	if (bucket && bucket->foreign_pages)
++		free_empty_pages_and_pagevec(bucket->foreign_pages, MMAP_PAGES);
++	kfree(bucket);
++	return -ENOMEM;
++}
++
++static void
++blktap_request_pool_free_bucket(struct blktap_request_bucket *bucket)
++{
++	if (!bucket)
++		return;
++
++	BTDBG("freeing bucket %p\n", bucket);
++
++	free_empty_pages_and_pagevec(bucket->foreign_pages, MMAP_PAGES);
++	kfree(bucket);
++}
++
++unsigned long
++request_to_kaddr(struct blktap_request *req, int seg)
++{
++	struct blktap_request_handle *handle = blktap_request_to_handle(req);
++	int idx = handle->slot * BLKIF_MAX_SEGMENTS_PER_REQUEST + seg;
++	unsigned long pfn = page_to_pfn(handle->bucket->foreign_pages[idx]);
++	return (unsigned long)pfn_to_kaddr(pfn);
++}
++
++int
++blktap_request_pool_shrink(void)
++{
++	int i, err;
++	unsigned long flags;
++	struct blktap_request_bucket *bucket;
++
++	err = -EAGAIN;
++
++	spin_lock_irqsave(&pool.lock, flags);
++
++	/* always keep at least one bucket */
++	for (i = 1; i < MAX_BUCKETS; i++) {
++		bucket = pool.buckets[i];
++		if (!bucket)
++			continue;
++
++		if (atomic_read(&bucket->reqs_in_use))
++			continue;
++
++		blktap_request_pool_free_bucket(bucket);
++		pool.buckets[i] = NULL;
++		err = 0;
++		break;
++	}
++
++	spin_unlock_irqrestore(&pool.lock, flags);
++
++	return err;
++}
++
++int
++blktap_request_pool_grow(void)
++{
++	return blktap_request_pool_allocate_bucket();
++}
++
++struct blktap_request *
++blktap_request_allocate(struct blktap *tap)
++{
++	int i;
++	uint16_t usr_idx;
++	unsigned long flags;
++	struct blktap_request *request;
++
++	usr_idx = -1;
++	request = NULL;
++
++	spin_lock_irqsave(&pool.lock, flags);
++
++	if (pool.status == BLKTAP_POOL_CLOSING)
++		goto out;
++
++	for (i = 0; i < ARRAY_SIZE(tap->pending_requests); i++)
++		if (!tap->pending_requests[i]) {
++			usr_idx = i;
++			break;
++		}
++
++	if (usr_idx == (uint16_t)-1)
++		goto out;
++
++	if (!list_empty(&pool.free_list)) {
++		request = list_entry(pool.free_list.next,
++				     struct blktap_request, free_list);
++		list_del(&request->free_list);
++	}
++
++	if (request) {
++		struct blktap_request_handle *handle;
++
++		atomic_inc(&pool.reqs_in_use);
++
++		handle = blktap_request_to_handle(request);
++		atomic_inc(&handle->bucket->reqs_in_use);
++		handle->inuse = 1;
++
++		request->usr_idx = usr_idx;
++
++		tap->pending_requests[usr_idx] = request;
++		tap->pending_cnt++;
++	}
++
++out:
++	spin_unlock_irqrestore(&pool.lock, flags);
++	return request;
++}
++
++void
++blktap_request_free(struct blktap *tap, struct blktap_request *request)
++{
++	int free;
++	unsigned long flags;
++	struct blktap_request_handle *handle;
++
++	BUG_ON(request->usr_idx >= ARRAY_SIZE(tap->pending_requests));
++	handle = blktap_request_to_handle(request);
++
++	spin_lock_irqsave(&pool.lock, flags);
++
++	handle->inuse = 0;
++	tap->pending_requests[request->usr_idx] = NULL;
++	blktap_request_pool_init_request(request);
++	list_add(&request->free_list, &pool.free_list);
++	atomic_dec(&handle->bucket->reqs_in_use);
++	free = atomic_dec_and_test(&pool.reqs_in_use);
++
++	spin_unlock_irqrestore(&pool.lock, flags);
++
++	if (--tap->pending_cnt == 0)
++		wake_up_interruptible(&tap->wq);
++
++	if (free)
++		wake_up(&pool.wait_queue);
++}
++
++void
++blktap_request_pool_free(void)
++{
++	int i;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pool.lock, flags);
++
++	pool.status = BLKTAP_POOL_CLOSING;
++	while (atomic_read(&pool.reqs_in_use)) {
++		spin_unlock_irqrestore(&pool.lock, flags);
++		wait_event(pool.wait_queue, !atomic_read(&pool.reqs_in_use));
++		spin_lock_irqsave(&pool.lock, flags);
++	}
++
++	for (i = 0; i < MAX_BUCKETS; i++) {
++		blktap_request_pool_free_bucket(pool.buckets[i]);
++		pool.buckets[i] = NULL;
++	}
++
++	spin_unlock_irqrestore(&pool.lock, flags);
++}
++
++int
++blktap_request_pool_init(void)
++{
++	int i, err;
++
++	memset(&pool, 0, sizeof(pool));
++
++	spin_lock_init(&pool.lock);
++	INIT_LIST_HEAD(&pool.free_list);
++	atomic_set(&pool.reqs_in_use, 0);
++	init_waitqueue_head(&pool.wait_queue);
++
++	for (i = 0; i < 2; i++) {
++		err = blktap_request_pool_allocate_bucket();
++		if (err)
++			goto fail;
++	}
++
++	return 0;
++
++fail:
++	blktap_request_pool_free();
++	return err;
++}
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/ring.c
+@@ -0,0 +1,613 @@
++#include <linux/module.h>
++#include <linux/signal.h>
++
++#include "blktap.h"
++
++static int blktap_ring_major;
++
++static inline struct blktap *
++vma_to_blktap(struct vm_area_struct *vma)
++{
++	struct vm_foreign_map *m = vma->vm_private_data;
++	struct blktap_ring *r = container_of(m, struct blktap_ring, foreign_map);
++	return container_of(r, struct blktap, ring);
++}
++
++ /* 
++  * BLKTAP - immediately before the mmap area,
++  * we have a bunch of pages reserved for shared memory rings.
++  */
++#define RING_PAGES 1
++
++static int
++blktap_read_ring(struct blktap *tap)
++{
++	/* This is called to read responses from the ring. */
++	int usr_idx;
++	RING_IDX rc, rp;
++	blkif_response_t res;
++	struct blktap_ring *ring;
++	struct blktap_request *request;
++
++	down_read(&tap->tap_sem);
++
++	ring = &tap->ring;
++	if (!ring->vma) {
++		up_read(&tap->tap_sem);
++		return 0;
++	}
++
++	/* for each outstanding message on the ring  */
++	rp = ring->ring.sring->rsp_prod;
++	rmb();
++
++	for (rc = ring->ring.rsp_cons; rc != rp; rc++) {
++		memcpy(&res, RING_GET_RESPONSE(&ring->ring, rc), sizeof(res));
++		mb(); /* rsp_cons read by RING_FULL() in do_block_io_op(). */
++		++ring->ring.rsp_cons;
++
++		usr_idx = (int)res.id;
++		if (usr_idx >= MAX_PENDING_REQS ||
++		    !tap->pending_requests[usr_idx]) {
++			BTWARN("Request %d/%d invalid [%x], tapdisk %d%p\n",
++			       rc, rp, usr_idx, tap->pid, ring->vma);
++			continue;
++		}
++
++		request = tap->pending_requests[usr_idx];
++		BTDBG("request %p response #%d id %x\n", request, rc, usr_idx);
++		blktap_device_finish_request(tap, &res, request);
++	}
++
++	up_read(&tap->tap_sem);
++
++	blktap_run_deferred();
++
++	return 0;
++}
++
++static struct page *
++blktap_ring_nopage(struct vm_area_struct *vma,
++		   unsigned long address, int *type)
++{
++	/*
++	 * if the page has not been mapped in by the driver then return
++	 * NOPAGE_SIGBUS to the domain.
++	 */
++
++	return NOPAGE_SIGBUS;
++}
++
++static pte_t
++blktap_ring_clear_pte(struct vm_area_struct *vma,
++		      unsigned long uvaddr,
++		      pte_t *ptep, int is_fullmm)
++{
++	pte_t copy;
++	struct blktap *tap;
++	unsigned long kvaddr;
++	struct page **map, *page;
++	struct blktap_ring *ring;
++	struct blktap_request *request;
++	struct grant_handle_pair *khandle;
++	struct gnttab_unmap_grant_ref unmap[2];
++	int offset, seg, usr_idx, count = 0;
++
++	tap  = vma_to_blktap(vma);
++	ring = &tap->ring;
++	map  = ring->foreign_map.map;
++	BUG_ON(!map);	/* TODO Should this be changed to if statement? */
++
++	/*
++	 * Zap entry if the address is before the start of the grant
++	 * mapped region.
++	 */
++	if (uvaddr < ring->user_vstart)
++		return ptep_get_and_clear_full(vma->vm_mm, uvaddr,
++					       ptep, is_fullmm);
++
++	offset  = (int)((uvaddr - ring->user_vstart) >> PAGE_SHIFT);
++	usr_idx = offset / BLKIF_MAX_SEGMENTS_PER_REQUEST;
++	seg     = offset % BLKIF_MAX_SEGMENTS_PER_REQUEST;
++
++	offset  = (int)((uvaddr - vma->vm_start) >> PAGE_SHIFT);
++	page    = map[offset];
++	if (page) {
++		ClearPageReserved(page);
++		if (PageBlkback(page)) {
++			ClearPageBlkback(page);
++			set_page_private(page, 0);
++		}
++	}
++	map[offset] = NULL;
++
++	request = tap->pending_requests[usr_idx];
++	kvaddr  = request_to_kaddr(request, seg);
++	khandle = request->handles + seg;
++
++	if (khandle->kernel != INVALID_GRANT_HANDLE) {
++		gnttab_set_unmap_op(&unmap[count], kvaddr, 
++				    GNTMAP_host_map, khandle->kernel);
++		count++;
++
++		set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT, 
++				    INVALID_P2M_ENTRY);
++	}
++
++
++	if (khandle->user != INVALID_GRANT_HANDLE) {
++		BUG_ON(xen_feature(XENFEAT_auto_translated_physmap));
++
++		copy = *ptep;
++		gnttab_set_unmap_op(&unmap[count], virt_to_machine(ptep), 
++				    GNTMAP_host_map 
++				    | GNTMAP_application_map 
++				    | GNTMAP_contains_pte,
++				    khandle->user);
++		count++;
++	} else
++		copy = ptep_get_and_clear_full(vma->vm_mm, uvaddr, ptep,
++					       is_fullmm);
++
++	if (count)
++		if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
++					      unmap, count))
++			BUG();
++
++	khandle->kernel = INVALID_GRANT_HANDLE;
++	khandle->user   = INVALID_GRANT_HANDLE;
++
++	return copy;
++}
++
++static void
++blktap_ring_vm_unmap(struct vm_area_struct *vma)
++{
++	struct blktap *tap = vma_to_blktap(vma);
++
++	down_write(&tap->tap_sem);
++	clear_bit(BLKTAP_RING_VMA, &tap->dev_inuse);
++	clear_bit(BLKTAP_PAUSED, &tap->dev_inuse);
++	clear_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
++	up_write(&tap->tap_sem);
++}
++
++static void
++blktap_ring_vm_close(struct vm_area_struct *vma)
++{
++	struct blktap *tap = vma_to_blktap(vma);
++	struct blktap_ring *ring = &tap->ring;
++
++	blktap_ring_vm_unmap(vma);                 /* fail future requests */
++	blktap_device_fail_pending_requests(tap);  /* fail pending requests */
++	blktap_device_restart(tap);                /* fail deferred requests */
++
++	down_write(&tap->tap_sem);
++
++	zap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
++
++	kfree(ring->foreign_map.map);
++	ring->foreign_map.map = NULL;
++
++	/* Free the ring page. */
++	ClearPageReserved(virt_to_page(ring->ring.sring));
++	free_page((unsigned long)ring->ring.sring);
++
++	BTINFO("unmapping ring %d\n", tap->minor);
++	ring->ring.sring = NULL;
++	ring->vma = NULL;
++
++	up_write(&tap->tap_sem);
++
++	wake_up(&tap->wq);
++}
++
++static struct vm_operations_struct blktap_ring_vm_operations = {
++	.close    = blktap_ring_vm_close,
++	.unmap    = blktap_ring_vm_unmap,
++	.nopage   = blktap_ring_nopage,
++	.zap_pte  = blktap_ring_clear_pte,
++};
++
++static int
++blktap_ring_open(struct inode *inode, struct file *filp)
++{
++	int idx;
++	struct blktap *tap;
++
++	idx = iminor(inode);
++	if (idx < 0 || idx > MAX_BLKTAP_DEVICE || blktaps[idx] == NULL) {
++		BTERR("unable to open device blktap%d\n", idx);
++		return -ENODEV;
++	}
++
++	tap = blktaps[idx];
++
++	BTINFO("opening device blktap%d\n", idx);
++
++	if (!test_bit(BLKTAP_CONTROL, &tap->dev_inuse))
++		return -ENODEV;
++
++	/* Only one process can access ring at a time */
++	if (test_and_set_bit(BLKTAP_RING_FD, &tap->dev_inuse))
++		return -EBUSY;
++
++	filp->private_data = tap;
++	BTINFO("opened device %d\n", tap->minor);
++
++	return 0;
++}
++
++static int
++blktap_ring_release(struct inode *inode, struct file *filp)
++{
++	struct blktap *tap = filp->private_data;
++
++	BTINFO("freeing device %d\n", tap->minor);
++	clear_bit(BLKTAP_RING_FD, &tap->dev_inuse);
++	filp->private_data = NULL;
++	wake_up(&tap->wq);	
++	return 0;
++}
++
++/* Note on mmap:
++ * We need to map pages to user space in a way that will allow the block
++ * subsystem set up direct IO to them.  This couldn't be done before, because
++ * there isn't really a sane way to translate a user virtual address down to a 
++ * physical address when the page belongs to another domain.
++ *
++ * My first approach was to map the page in to kernel memory, add an entry
++ * for it in the physical frame list (using alloc_lomem_region as in blkback)
++ * and then attempt to map that page up to user space.  This is disallowed
++ * by xen though, which realizes that we don't really own the machine frame
++ * underlying the physical page.
++ *
++ * The new approach is to provide explicit support for this in xen linux.
++ * The VMA now has a flag, VM_FOREIGN, to indicate that it contains pages
++ * mapped from other vms.  vma->vm_private_data is set up as a mapping 
++ * from pages to actual page structs.  There is a new clause in get_user_pages
++ * that does the right thing for this sort of mapping.
++ */
++static int
++blktap_ring_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	int size, err;
++	struct page **map;
++	struct blktap *tap;
++	blkif_sring_t *sring;
++	struct blktap_ring *ring;
++
++	tap   = filp->private_data;
++	ring  = &tap->ring;
++	map   = NULL;
++	sring = NULL;
++
++	if (!tap || test_and_set_bit(BLKTAP_RING_VMA, &tap->dev_inuse))
++		return -ENOMEM;
++
++	size = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
++	if (size != (MMAP_PAGES + RING_PAGES)) {
++		BTERR("you _must_ map exactly %lu pages!\n",
++		      MMAP_PAGES + RING_PAGES);
++		return -EAGAIN;
++	}
++
++	/* Allocate the fe ring. */
++	sring = (blkif_sring_t *)get_zeroed_page(GFP_KERNEL);
++	if (!sring) {
++		BTERR("Couldn't alloc sring.\n");
++		goto fail_mem;
++	}
++
++	map = kzalloc(size * sizeof(struct page *), GFP_KERNEL);
++	if (!map) {
++		BTERR("Couldn't alloc VM_FOREIGN map.\n");
++		goto fail_mem;
++	}
++
++	SetPageReserved(virt_to_page(sring));
++    
++	SHARED_RING_INIT(sring);
++	FRONT_RING_INIT(&ring->ring, sring, PAGE_SIZE);
++
++	ring->ring_vstart = vma->vm_start;
++	ring->user_vstart = ring->ring_vstart + (RING_PAGES << PAGE_SHIFT);
++
++	/* Map the ring pages to the start of the region and reserve it. */
++	if (xen_feature(XENFEAT_auto_translated_physmap))
++		err = vm_insert_page(vma, vma->vm_start,
++				     virt_to_page(ring->ring.sring));
++	else
++		err = remap_pfn_range(vma, vma->vm_start,
++				      __pa(ring->ring.sring) >> PAGE_SHIFT,
++				      PAGE_SIZE, vma->vm_page_prot);
++	if (err) {
++		BTERR("Mapping user ring failed: %d\n", err);
++		goto fail;
++	}
++
++	/* Mark this VM as containing foreign pages, and set up mappings. */
++	ring->foreign_map.map = map;
++	vma->vm_private_data = &ring->foreign_map;
++	vma->vm_flags |= VM_FOREIGN;
++	vma->vm_flags |= VM_DONTCOPY;
++	vma->vm_flags |= VM_RESERVED;
++	vma->vm_ops = &blktap_ring_vm_operations;
++
++#ifdef CONFIG_X86
++	vma->vm_mm->context.has_foreign_mappings = 1;
++#endif
++
++	tap->pid = current->pid;
++	BTINFO("blktap: mapping pid is %d\n", tap->pid);
++
++	ring->vma = vma;
++	return 0;
++
++ fail:
++	/* Clear any active mappings. */
++	zap_page_range(vma, vma->vm_start, 
++		       vma->vm_end - vma->vm_start, NULL);
++	ClearPageReserved(virt_to_page(sring));
++ fail_mem:
++	free_page((unsigned long)sring);
++	kfree(map);
++
++	return -ENOMEM;
++}
++
++static inline void
++blktap_ring_set_message(struct blktap *tap, int msg)
++{
++	struct blktap_ring *ring = &tap->ring;
++
++	down_read(&tap->tap_sem);
++	if (ring->ring.sring)
++		ring->ring.sring->pad[0] = msg;
++	up_read(&tap->tap_sem);
++}
++
++static int
++blktap_ring_ioctl(struct inode *inode, struct file *filp,
++		  unsigned int cmd, unsigned long arg)
++{
++	struct blktap_params params;
++	struct blktap *tap = filp->private_data;
++
++	BTDBG("%d: cmd: %u, arg: %lu\n", tap->minor, cmd, arg);
++
++	switch(cmd) {
++	case BLKTAP2_IOCTL_KICK_FE:
++		/* There are fe messages to process. */
++		return blktap_read_ring(tap);
++
++	case BLKTAP2_IOCTL_CREATE_DEVICE:
++		if (!arg)
++			return -EINVAL;
++
++		if (copy_from_user(&params, (struct blktap_params __user *)arg,
++				   sizeof(params))) {
++			BTERR("failed to get params\n");
++			return -EFAULT;
++		}
++
++		if (blktap_validate_params(tap, &params)) {
++			BTERR("invalid params\n");
++			return -EINVAL;
++		}
++
++		tap->params = params;
++		return blktap_device_create(tap);
++
++	case BLKTAP2_IOCTL_SET_PARAMS:
++		if (!arg)
++			return -EINVAL;
++
++		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++			return -EINVAL;
++
++		if (copy_from_user(&params, (struct blktap_params __user *)arg,
++				   sizeof(params))) {
++			BTERR("failed to get params\n");
++			return -EFAULT;
++		}
++
++		if (blktap_validate_params(tap, &params)) {
++			BTERR("invalid params\n");
++			return -EINVAL;
++		}
++
++		tap->params = params;
++		return 0;
++
++	case BLKTAP2_IOCTL_PAUSE:
++		if (!test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse))
++			return -EINVAL;
++
++		set_bit(BLKTAP_PAUSED, &tap->dev_inuse);
++		clear_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse);
++
++		blktap_ring_set_message(tap, 0);
++		wake_up_interruptible(&tap->wq);
++
++		return 0;
++
++
++	case BLKTAP2_IOCTL_REOPEN:
++		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++			return -EINVAL;
++
++		if (!arg)
++			return -EINVAL;
++
++		if (copy_to_user((char __user *)arg,
++				 tap->params.name,
++				 strlen(tap->params.name) + 1))
++			return -EFAULT;
++
++		blktap_ring_set_message(tap, 0);
++		wake_up_interruptible(&tap->wq);
++
++		return 0;
++
++	case BLKTAP2_IOCTL_RESUME:
++		if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++			return -EINVAL;
++
++		tap->ring.response = (int)arg;
++		if (!tap->ring.response)
++			clear_bit(BLKTAP_PAUSED, &tap->dev_inuse);
++
++		blktap_ring_set_message(tap, 0);
++		wake_up_interruptible(&tap->wq);
++
++		return 0;
++	}
++
++	return -ENOIOCTLCMD;
++}
++
++static unsigned int blktap_ring_poll(struct file *filp, poll_table *wait)
++{
++	struct blktap *tap = filp->private_data;
++	struct blktap_ring *ring = &tap->ring;
++
++	poll_wait(filp, &ring->poll_wait, wait);
++	if (ring->ring.sring->pad[0] != 0 ||
++	    ring->ring.req_prod_pvt != ring->ring.sring->req_prod) {
++		RING_PUSH_REQUESTS(&ring->ring);
++		return POLLIN | POLLRDNORM;
++	}
++
++	return 0;
++}
++
++static struct file_operations blktap_ring_file_operations = {
++	.owner    = THIS_MODULE,
++	.open     = blktap_ring_open,
++	.release  = blktap_ring_release,
++	.ioctl    = blktap_ring_ioctl,
++	.mmap     = blktap_ring_mmap,
++	.poll     = blktap_ring_poll,
++};
++
++void
++blktap_ring_kick_user(struct blktap *tap)
++{
++	wake_up_interruptible(&tap->ring.poll_wait);
++}
++
++int
++blktap_ring_resume(struct blktap *tap)
++{
++	int err;
++	struct blktap_ring *ring = &tap->ring;
++
++	if (!blktap_active(tap))
++		return -ENODEV;
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return -EINVAL;
++
++	/* set shared flag for resume */
++	ring->response = 0;
++
++	blktap_ring_set_message(tap, BLKTAP2_RING_MESSAGE_RESUME);
++	blktap_ring_kick_user(tap);
++
++	wait_event_interruptible(tap->wq, ring->response ||
++				 !test_bit(BLKTAP_PAUSED, &tap->dev_inuse));
++
++	err = ring->response;
++	ring->response = 0;
++
++	BTDBG("err: %d\n", err);
++
++	if (err)
++		return err;
++
++	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return -EAGAIN;
++
++	return 0;
++}
++
++int
++blktap_ring_pause(struct blktap *tap)
++{
++	if (!blktap_active(tap))
++		return -ENODEV;
++
++	if (!test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse))
++		return -EINVAL;
++
++	BTDBG("draining queue\n");
++	wait_event_interruptible(tap->wq, !tap->pending_cnt);
++	if (tap->pending_cnt)
++		return -EAGAIN;
++
++	blktap_ring_set_message(tap, BLKTAP2_RING_MESSAGE_PAUSE);
++	blktap_ring_kick_user(tap);
++
++	BTDBG("waiting for tapdisk response\n");
++	wait_event_interruptible(tap->wq, test_bit(BLKTAP_PAUSED, &tap->dev_inuse));
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
++		return -EAGAIN;
++
++	return 0;
++}
++
++int
++blktap_ring_destroy(struct blktap *tap)
++{
++	if (!test_bit(BLKTAP_RING_FD, &tap->dev_inuse) &&
++	    !test_bit(BLKTAP_RING_VMA, &tap->dev_inuse))
++		return 0;
++
++	BTDBG("sending tapdisk close message\n");
++	blktap_ring_set_message(tap, BLKTAP2_RING_MESSAGE_CLOSE);
++	blktap_ring_kick_user(tap);
++
++	return -EAGAIN;
++}
++
++static void
++blktap_ring_initialize(struct blktap_ring *ring, int minor)
++{
++	memset(ring, 0, sizeof(*ring));
++	init_waitqueue_head(&ring->poll_wait);
++	ring->devno = MKDEV(blktap_ring_major, minor);
++}
++
++int
++blktap_ring_create(struct blktap *tap)
++{
++	struct blktap_ring *ring = &tap->ring;
++	blktap_ring_initialize(ring, tap->minor);
++	return blktap_sysfs_create(tap);
++}
++
++int
++blktap_ring_init(int *major)
++{
++	int err;
++
++	err = register_chrdev(0, "blktap2", &blktap_ring_file_operations);
++	if (err < 0) {
++		BTERR("error registering blktap ring device: %d\n", err);
++		return err;
++	}
++
++	blktap_ring_major = *major = err;
++	BTINFO("blktap ring major: %d\n", blktap_ring_major);
++	return 0;
++}
++
++int
++blktap_ring_free(void)
++{
++	if (blktap_ring_major)
++		unregister_chrdev(blktap_ring_major, "blktap2");
++
++	return 0;
++}
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -0,0 +1,425 @@
++#include <linux/types.h>
++#include <linux/device.h>
++#include <linux/module.h>
++
++#include "blktap.h"
++
++int blktap_debug_level = 1;
++
++static struct class *class;
++static DECLARE_WAIT_QUEUE_HEAD(sysfs_wq);
++
++static inline void
++blktap_sysfs_get(struct blktap *tap)
++{
++	atomic_inc(&tap->ring.sysfs_refcnt);
++}
++
++static inline void
++blktap_sysfs_put(struct blktap *tap)
++{
++	if (atomic_dec_and_test(&tap->ring.sysfs_refcnt))
++		wake_up(&sysfs_wq);
++}
++
++static inline void
++blktap_sysfs_enter(struct blktap *tap)
++{
++	blktap_sysfs_get(tap);               /* pin sysfs device */
++	mutex_lock(&tap->ring.sysfs_mutex);  /* serialize sysfs operations */
++}
++
++static inline void
++blktap_sysfs_exit(struct blktap *tap)
++{
++	mutex_unlock(&tap->ring.sysfs_mutex);
++	blktap_sysfs_put(tap);
++}
++
++static ssize_t blktap_sysfs_pause_device(struct class_device *, const char *, size_t);
++CLASS_DEVICE_ATTR(pause, S_IWUSR, NULL, blktap_sysfs_pause_device);
++static ssize_t blktap_sysfs_resume_device(struct class_device *, const char *, size_t);
++CLASS_DEVICE_ATTR(resume, S_IWUSR, NULL, blktap_sysfs_resume_device);
++
++static ssize_t
++blktap_sysfs_set_name(struct class_device *dev, const char *buf, size_t size)
++{
++	int err;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	blktap_sysfs_enter(tap);
++
++	if (!tap->ring.dev ||
++	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
++		err = -EPERM;
++		goto out;
++	}
++
++	if (size > BLKTAP2_MAX_MESSAGE_LEN) {
++		err = -ENAMETOOLONG;
++		goto out;
++	}
++
++	if (strnlen(buf, BLKTAP2_MAX_MESSAGE_LEN) >= BLKTAP2_MAX_MESSAGE_LEN) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	snprintf(tap->params.name, sizeof(tap->params.name) - 1, "%s", buf);
++	err = size;
++
++out:
++	blktap_sysfs_exit(tap);	
++	return err;
++}
++
++static ssize_t
++blktap_sysfs_get_name(struct class_device *dev, char *buf)
++{
++	ssize_t size;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	blktap_sysfs_enter(tap);
++
++	if (!tap->ring.dev)
++		size = -ENODEV;
++	else if (tap->params.name[0])
++		size = sprintf(buf, "%s\n", tap->params.name);
++	else
++		size = sprintf(buf, "%d\n", tap->minor);
++
++	blktap_sysfs_exit(tap);
++
++	return size;
++}
++CLASS_DEVICE_ATTR(name, S_IRUSR | S_IWUSR,
++		  blktap_sysfs_get_name, blktap_sysfs_set_name);
++
++static ssize_t
++blktap_sysfs_remove_device(struct class_device *dev,
++			   const char *buf, size_t size)
++{
++	int err;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	if (!tap->ring.dev)
++		return size;
++
++	if (test_and_set_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse))
++		return -EBUSY;
++
++	err = blktap_control_destroy_device(tap);
++
++	return (err ? : size);
++}
++CLASS_DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
++
++static ssize_t
++blktap_sysfs_pause_device(struct class_device *dev,
++			  const char *buf, size_t size)
++{
++	int err;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	blktap_sysfs_enter(tap);
++
++	BTDBG("pausing %u:%u: dev_inuse: %lu\n",
++	      MAJOR(tap->ring.devno), MINOR(tap->ring.devno), tap->dev_inuse);
++
++	if (!tap->ring.dev ||
++	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	if (test_bit(BLKTAP_PAUSE_REQUESTED, &tap->dev_inuse)) {
++		err = -EBUSY;
++		goto out;
++	}
++
++	if (test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
++		err = 0;
++		goto out;
++	}
++
++	err = blktap_device_pause(tap);
++	if (!err) {
++		class_device_remove_file(dev, &class_device_attr_pause);
++		class_device_create_file(dev, &class_device_attr_resume);
++	}
++
++out:
++	blktap_sysfs_exit(tap);
++
++	return (err ? err : size);
++}
++
++static ssize_t
++blktap_sysfs_resume_device(struct class_device *dev,
++			   const char *buf, size_t size)
++{
++	int err;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	blktap_sysfs_enter(tap);
++
++	if (!tap->ring.dev ||
++	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	err = blktap_device_resume(tap);
++	if (!err) {
++		class_device_remove_file(dev, &class_device_attr_resume);
++		class_device_create_file(dev, &class_device_attr_pause);
++	}
++
++out:
++	blktap_sysfs_exit(tap);
++
++	BTDBG("returning %d\n", (err ? err : size));
++	return (err ? err : size);
++}
++
++#ifdef ENABLE_PASSTHROUGH
++static ssize_t
++blktap_sysfs_enable_passthrough(struct class_device *dev,
++				const char *buf, size_t size)
++{
++	int err;
++	unsigned major, minor;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	BTINFO("passthrough request enabled\n");
++
++	blktap_sysfs_enter(tap);
++
++	if (!tap->ring.dev ||
++	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	if (test_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse)) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	err = sscanf(buf, "%x:%x", &major, &minor);
++	if (err != 2) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	err = blktap_device_enable_passthrough(tap, major, minor);
++
++out:
++	blktap_sysfs_exit(tap);
++	BTDBG("returning %d\n", (err ? err : size));
++	return (err ? err : size);
++}
++#endif
++
++static ssize_t
++blktap_sysfs_debug_device(struct class_device *dev, char *buf)
++{
++	char *tmp;
++	int i, ret;
++	struct blktap *tap = (struct blktap *)dev->class_data;
++
++	tmp = buf;
++	blktap_sysfs_get(tap);
++
++	if (!tap->ring.dev) {
++		ret = sprintf(tmp, "no device\n");
++		goto out;
++	}
++
++	tmp += sprintf(tmp, "%s (%u:%u), refcnt: %d, dev_inuse: 0x%08lx\n",
++		       tap->params.name, MAJOR(tap->ring.devno),
++		       MINOR(tap->ring.devno), atomic_read(&tap->refcnt),
++		       tap->dev_inuse);
++	tmp += sprintf(tmp, "capacity: 0x%llx, sector size: 0x%lx, "
++		       "device users: %d\n", tap->params.capacity,
++		       tap->params.sector_size, tap->device.users);
++
++	down_read(&tap->tap_sem);
++
++	tmp += sprintf(tmp, "pending requests: %d\n", tap->pending_cnt);
++	for (i = 0; i < MAX_PENDING_REQS; i++) {
++		struct blktap_request *req = tap->pending_requests[i];
++		if (!req)
++			continue;
++
++		tmp += sprintf(tmp, "req %d: id: %llu, usr_idx: %d, "
++			       "status: 0x%02x, pendcnt: %d, "
++			       "nr_pages: %u, op: %d, time: %lu:%lu\n",
++			       i, req->id, req->usr_idx,
++			       req->status, atomic_read(&req->pendcnt),
++			       req->nr_pages, req->operation, req->time.tv_sec,
++			       req->time.tv_usec);
++	}
++
++	up_read(&tap->tap_sem);
++	ret = (tmp - buf) + 1;
++
++out:
++	blktap_sysfs_put(tap);
++	BTDBG("%s\n", buf);
++
++	return ret;
++}
++CLASS_DEVICE_ATTR(debug, S_IRUSR, blktap_sysfs_debug_device, NULL);
++
++int
++blktap_sysfs_create(struct blktap *tap)
++{
++	struct blktap_ring *ring;
++	struct class_device *dev;
++
++	if (!class)
++		return -ENODEV;
++
++	ring = &tap->ring;
++
++	dev = class_device_create(class, NULL, ring->devno,
++				  NULL, "blktap%d", tap->minor);
++	if (IS_ERR(dev))
++		return PTR_ERR(dev);
++
++	ring->dev       = dev;
++	dev->class_data = tap;
++
++	mutex_init(&ring->sysfs_mutex);
++	atomic_set(&ring->sysfs_refcnt, 0);
++	set_bit(BLKTAP_SYSFS, &tap->dev_inuse);
++
++	class_device_create_file(dev, &class_device_attr_name);
++	class_device_create_file(dev, &class_device_attr_remove);
++	class_device_create_file(dev, &class_device_attr_pause);
++	class_device_create_file(dev, &class_device_attr_debug);
++
++	return 0;
++}
++
++int
++blktap_sysfs_destroy(struct blktap *tap)
++{
++	struct blktap_ring *ring;
++	struct class_device *dev;
++
++	ring = &tap->ring;
++	dev  = ring->dev;
++	if (!class || !dev)
++		return 0;
++
++	ring->dev = NULL;
++	if (wait_event_interruptible(sysfs_wq,
++				     !atomic_read(&tap->ring.sysfs_refcnt)))
++		return -EAGAIN;
++
++	/* XXX: is it safe to remove the class from a sysfs attribute? */
++	class_device_remove_file(dev, &class_device_attr_name);
++	class_device_remove_file(dev, &class_device_attr_remove);
++	class_device_remove_file(dev, &class_device_attr_pause);
++	class_device_remove_file(dev, &class_device_attr_resume);
++	class_device_remove_file(dev, &class_device_attr_debug);
++	class_device_destroy(class, ring->devno);
++
++	clear_bit(BLKTAP_SYSFS, &tap->dev_inuse);
++
++	return 0;
++}
++
++static ssize_t
++blktap_sysfs_show_verbosity(struct class *class, char *buf)
++{
++	return sprintf(buf, "%d\n", blktap_debug_level);
++}
++
++static ssize_t
++blktap_sysfs_set_verbosity(struct class *class, const char *buf, size_t size)
++{
++	int level;
++
++	if (sscanf(buf, "%d", &level) == 1) {
++		blktap_debug_level = level;
++		return size;
++	}
++
++	return -EINVAL;
++}
++CLASS_ATTR(verbosity, S_IRUSR | S_IWUSR,
++	   blktap_sysfs_show_verbosity, blktap_sysfs_set_verbosity);
++
++static ssize_t
++blktap_sysfs_show_devices(struct class *class, char *buf)
++{
++	int i, ret;
++	struct blktap *tap;
++
++	ret = 0;
++	for (i = 0; i < MAX_BLKTAP_DEVICE; i++) {
++		tap = blktaps[i];
++		if (!tap)
++			continue;
++
++		if (!test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
++			continue;
++
++		ret += sprintf(buf + ret, "%d ", tap->minor);
++		ret += snprintf(buf + ret, sizeof(tap->params.name) - 1,
++				tap->params.name);
++		ret += sprintf(buf + ret, "\n");
++	}
++
++	return ret;
++}
++CLASS_ATTR(devices, S_IRUSR, blktap_sysfs_show_devices, NULL);
++
++void
++blktap_sysfs_free(void)
++{
++	if (!class)
++		return;
++
++	class_remove_file(class, &class_attr_verbosity);
++	class_remove_file(class, &class_attr_devices);
++
++	class_destroy(class);
++}
++
++int
++blktap_sysfs_init(void)
++{
++	struct class *cls;
++
++	if (class)
++		return -EEXIST;
++
++	cls = class_create(THIS_MODULE, "blktap2");
++	if (IS_ERR(cls))
++		return PTR_ERR(cls);
++
++	class_create_file(cls, &class_attr_verbosity);
++	class_create_file(cls, &class_attr_devices);
++
++	class = cls;
++	return 0;
++}
+diff --git a/drivers/xen/blktap2/wait_queue.c b/drivers/xen/blktap2/wait_queue.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blktap2/wait_queue.c
+@@ -0,0 +1,40 @@
++#include <linux/list.h>
++#include <linux/spinlock.h>
++
++#include "blktap.h"
++
++static LIST_HEAD(deferred_work_queue);
++static DEFINE_SPINLOCK(deferred_work_lock);
++
++void
++blktap_run_deferred(void)
++{
++	LIST_HEAD(queue);
++	struct blktap *tap;
++	unsigned long flags;
++
++	spin_lock_irqsave(&deferred_work_lock, flags);
++	list_splice_init(&deferred_work_queue, &queue);
++	list_for_each_entry(tap, &queue, deferred_queue)
++		clear_bit(BLKTAP_DEFERRED, &tap->dev_inuse);
++	spin_unlock_irqrestore(&deferred_work_lock, flags);
++
++	while (!list_empty(&queue)) {
++		tap = list_entry(queue.next, struct blktap, deferred_queue);
++		list_del_init(&tap->deferred_queue);
++		blktap_device_restart(tap);
++	}
++}
++
++void
++blktap_defer(struct blktap *tap)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&deferred_work_lock, flags);
++	if (!test_bit(BLKTAP_DEFERRED, &tap->dev_inuse)) {
++		set_bit(BLKTAP_DEFERRED, &tap->dev_inuse);
++		list_add_tail(&tap->deferred_queue, &deferred_work_queue);
++	}
++	spin_unlock_irqrestore(&deferred_work_lock, flags);
++}

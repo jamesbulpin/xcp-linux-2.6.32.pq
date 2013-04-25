@@ -1,0 +1,153 @@
+diff -r 98db19e80046 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 23:17:51 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 23:18:13 2010 -0700
+@@ -81,6 +81,61 @@
+ 	}
+ }
+ 
++static void
++__blkback_signal_shutdown(struct backend_info *be,
++			  struct xenbus_transaction xbt)
++{
++	struct xenbus_device *xbdev = be->dev;
++	int err;
++
++	if (!xenbus_exists(xbt, xbdev->nodename, "shutdown-request"))
++		return;
++
++	err = xenbus_write(xbt, xbdev->nodename, "shutdown-done", "");
++	if (err)
++		xenbus_dev_error(xbdev, err, "writing shutdown-done");
++}
++
++static void
++__blkback_queue_stopped(struct backend_info *be,
++			struct xenbus_transaction xbt)
++{
++	struct xenbus_device *xbdev = be->dev;
++	blkif_t *blkif = be->blkif;
++
++	if (!xbdev || xbdev->state == XenbusStateClosing) {
++		blkif_disconnect(blkif);
++
++		if (xbdev)
++			xenbus_switch_state(xbdev, XenbusStateClosed);
++	}
++
++	if (xbdev)
++		__blkback_signal_shutdown(be, xbt);
++}
++
++static void
++blkback_queue_stop(struct backend_info *be, int force)
++{
++	struct xenbus_device *xbdev = be->dev;
++	blkif_t *blkif = be->blkif;
++	int stopped;
++
++	mutex_lock(&be->mutex);
++
++	xenbus_switch_state(xbdev, XenbusStateClosing);
++
++	stopped = !be->kthread_pid;
++
++	if (!stopped && force)
++		stopped = !blkif_queue_stop(blkif);
++
++	if (stopped)
++		__blkback_queue_stopped(be, XBT_NIL);
++
++	mutex_unlock(&be->mutex);
++}
++
+ static void update_blkif_status(blkif_t *blkif)
+ {
+ 	struct backend_info *be = blkif->be;
+@@ -351,61 +406,32 @@
+ 	backend_release(blkif->be);
+ }
+ 
+-static int xenbus_write_state(struct xenbus_device *dev,
+-			      enum xenbus_state state)
+-{
+-	int err;
+-	int current_state;
+-
+-	if (dev->state != state)
+-		return xenbus_switch_state(dev, state);
+-
+-	err = xenbus_scanf(XBT_NIL, dev->nodename, "state", "%d",
+-			   &current_state);
+-	if (err != 1)
+-		return 0;
+-
+-	err = xenbus_printf(XBT_NIL, dev->nodename, "state", "%d", state);
+-	if (err) {
+-		if (state != XenbusStateClosing) /* Avoid looping */
+-			xenbus_dev_fatal(dev, err, "writing new state");
+-		return err;
+-	}
+-
+-	return 0;
+-}
+-
+ static void start_shutdown(struct xenbus_watch *watch,
+ 			   const char **vec, unsigned int length)
+ {
+-	int err;
++	struct backend_info *be;
++	struct xenbus_device *xbdev;
++	int force, err;
++	unsigned int len;
++	blkif_t *blkif;
+ 	char *type;
+-	unsigned int len;
+-	struct backend_info *be
+-		= container_of(watch, struct backend_info, shutdown_watch);
+-	struct xenbus_device *dev = be->dev;
+ 
+-	if (be->shutdown_signalled)
+-		return;
++	be = container_of(watch, struct backend_info, shutdown_watch);
++	blkif = be->blkif;
++	xbdev = be->dev;
+ 
+-	type = xenbus_read(XBT_NIL, dev->nodename, "shutdown-request", &len);
+-	err  = (IS_ERR(type) ? PTR_ERR(type) : 0);
+-
+-	if (XENBUS_EXIST_ERR(err))
+-		return;
+-
+-	if (err) {
+-		xenbus_dev_fatal(dev, err, "reading shutdown-request");
++	type = xenbus_read(XBT_NIL, xbdev->nodename, "shutdown-request", &len);
++	if (IS_ERR(type)) {
++		err = PTR_ERR(type);
++		if (err != -ENOENT)
++			xenbus_dev_error(xbdev, err, "reading shutdown-request");
+ 		return;
+ 	}
+ 
+-	xenbus_write_state(dev, XenbusStateClosing);
+-	
+-	if (len == sizeof("force") - 1 && !memcmp(type, "force", len))
+-		if (!blkif_queue_stop(be->blkif))
+-			signal_shutdown(be); /* shutdown immediately */
++	force = !strncmp(type, "force", len);
++	kfree(type);
+ 
+-	kfree(type);
++	blkback_queue_stop(be, force);
+ }
+ 
+ void blkback_signal_paused(blkif_t *blkif)
+@@ -707,8 +733,7 @@
+ 		break;
+ 
+ 	case XenbusStateClosed:
+-		if (!blkif_queue_stop(be->blkif))
+-			signal_shutdown(be);
++		blkback_queue_stop(be, 1);
+ 		break;
+ 
+ 	case XenbusStateUnknown:

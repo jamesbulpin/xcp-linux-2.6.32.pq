@@ -1,0 +1,42 @@
+commit b5fe22bd74d9d76557df1dca5e573243daa4a47b
+Author: Ian Campbell <ian.campbell@citrix.com>
+Date:   Fri Jul 30 15:16:46 2010 +0100
+
+    xen: netback: do not unleash netback threads until initialisation is complete
+    
+    Otherwise netbk_action_thread can reference &netbk->net_schedule_list
+    (via tx_work_todo) before it is initialised. Until now it was zeroed
+    which is probably safe but not exactly robust.
+    
+    Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+    Cc: Jeremy Fitzhardinge <jeremy@goop.org>
+    Cc: Xu, Dongxiao <dongxiao.xu@intel.com>
+    Cc: Paul Durrant <Paul.Durrant@citrix.com>
+    Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+---
+ drivers/xen/netback/netback.c |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+Index: linux-2.6.32.hg/drivers/xen/netback/netback.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/xen/netback/netback.c	2010-10-07 17:11:04.326913243 +0100
++++ linux-2.6.32.hg/drivers/xen/netback/netback.c	2010-10-07 18:30:03.462905888 +0100
+@@ -1851,7 +1851,6 @@ static int __init netback_init(void)
+ 
+ 			if (!IS_ERR(netbk->kthread.task)) {
+ 				kthread_bind(netbk->kthread.task, group);
+-				wake_up_process(netbk->kthread.task);
+ 			} else {
+ 				printk(KERN_ALERT
+ 					"kthread_run() fails at netback\n");
+@@ -1877,6 +1876,9 @@ static int __init netback_init(void)
+ 		spin_lock_init(&netbk->net_schedule_list_lock);
+ 
+ 		atomic_set(&netbk->netfront_count, 0);
++
++		if (MODPARM_netback_kthread)
++			wake_up_process(netbk->kthread.task);
+ 	}
+ 
+ 	netbk_copy_skb_mode = NETBK_DONT_COPY_SKB;

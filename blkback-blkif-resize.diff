@@ -1,0 +1,147 @@
+diff -u linux-2.6.27.hg/drivers/xen/blkback/blkback.c linux-2.6.32.hg/drivers/xen/blkback/blkback.c
+--- linux-2.6.27.hg/drivers/xen/blkback/blkback.c	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/blkback.c	2010-06-30 05:45:20.000000000 -0700
+@@ -452,6 +452,8 @@
+ 	while (!blkif->remove_requested) {
+ 		if (try_to_freeze())
+ 			continue;
++		if (unlikely(blkif->size != blkif_size(blkif)))
++			blkif_resize(blkif);
+ 
+ 		wait_event_interruptible(pending_free_wq,
+ 					 blkif_activate(blkif));
+diff -u linux-2.6.27.hg/drivers/xen/blkback/common.h linux-2.6.32.hg/drivers/xen/blkback/common.h
+--- linux-2.6.27.hg/drivers/xen/blkback/common.h	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/common.h	2010-06-30 05:45:20.000000000 -0700
+@@ -81,6 +81,8 @@
+ 	int                  mode;
+ 	int                  cdrom;
+ 
++	sector_t	     size; /* Cached size paramter */
++
+ 	/* Back pointer to the backend_info. */
+ 	struct backend_info *be;
+ 	/* Private fields. */
+@@ -91,6 +93,8 @@
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+ 	struct request_queue *plug;
++    int                 is_suspended_req;
++    blkif_request_t     suspended_req;
+ 
+ 	/* queue management */
+ 	int                 queue_state;
+diff -u linux-2.6.27.hg/drivers/xen/blkback/common.h linux-2.6.32.hg/drivers/xen/blkback/common.h
+--- linux-2.6.27.hg/drivers/xen/blkback/common.h	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/common.h	2010-06-30 05:45:20.000000000 -0700
+@@ -118,11 +122,29 @@
+ 	grant_handle_t shmem_handle[BLKIF_MAX_RING_PAGES];
+ } blkif_t;
+ 
++struct backend_info
++{
++	struct xenbus_device *dev;
++	blkif_t *blkif;
++	struct xenbus_watch backend_watch;
++	struct xenbus_watch shutdown_watch;
++	struct xenbus_watch pause_watch;
++	unsigned major;
++	unsigned minor;
++	int group_added;
++	char *nodename;
++	atomic_t refcnt;
++	pid_t kthread_pid;
++	int shutdown_signalled;
++	unsigned queue_events;
++};
++
+ blkif_t *blkif_alloc(domid_t domid);
+ void blkif_disconnect(blkif_t *blkif);
+ void blkif_free(blkif_t *blkif);
+ int blkif_map(blkif_t *blkif, unsigned long *shared_pages,
+ 	      unsigned int nr_shared_pages, unsigned int evtchn);
++void blkif_resize(blkif_t *blkif);
+ 
+ #define blkif_get(_b) (atomic_inc(&(_b)->refcnt))
+ #define blkif_put(_b)					\
+diff -u linux-2.6.27.hg/drivers/xen/blkback/interface.c linux-2.6.32.hg/drivers/xen/blkback/interface.c
+--- linux-2.6.27.hg/drivers/xen/blkback/interface.c	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/interface.c	2010-06-30 05:45:19.000000000 -0700
+diff -u linux-2.6.27.hg/drivers/xen/blkback/interface.c linux-2.6.32.hg/drivers/xen/blkback/interface.c
+--- linux-2.6.27.hg/drivers/xen/blkback/interface.c	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/interface.c	2010-06-30 05:45:19.000000000 -0700
+@@ -192,6 +192,47 @@
+ 	return 0;
+ }
+ 
++void blkif_resize(blkif_t *blkif)
++{
++	struct xenbus_transaction xbt;
++	int err;
++	struct xenbus_device *dev = blkif->be->dev;
++	unsigned long long new_size = blkif_size(blkif);
++
++	printk(KERN_INFO "VBD Resize: new size %Lu\n", new_size);
++	blkif->size = new_size;
++again:
++	err = xenbus_transaction_start(&xbt);
++	if (err) {
++		printk(KERN_WARNING "Error starting transaction");
++		return;
++	}
++	err = xenbus_printf(xbt, dev->nodename, "sectors", "%Lu",
++			    blkif_size(blkif));
++	if (err) {
++		printk(KERN_WARNING "Error writing new size");
++		goto abort;
++	}
++	/*
++	 * Write the current state; we will use this to synchronize
++	 * the front-end. If the current state is "connected" the
++	 * front-end will get the new size information online.
++	 */
++	err = xenbus_printf(xbt, dev->nodename, "state", "%d", dev->state);
++	if (err) {
++		printk(KERN_WARNING "Error writing the state");
++		goto abort;
++	}
++
++	err = xenbus_transaction_end(xbt, 0);
++	if (err == -EAGAIN)
++		goto again;
++	if (err)
++		printk(KERN_WARNING "Error ending transaction");
++abort:
++	xenbus_transaction_end(xbt, 1);
++}
++
+ void blkif_disconnect(blkif_t *blkif)
+ {
+ 	atomic_dec(&blkif->refcnt);
+diff -u linux-2.6.27.hg/drivers/xen/blkback/xenbus.c linux-2.6.32.hg/drivers/xen/blkback/xenbus.c
+--- linux-2.6.27.hg/drivers/xen/blkback/xenbus.c	2010-06-30 05:46:29.000000000 -0700
++++ linux-2.6.32.hg/drivers/xen/blkback/xenbus.c	2010-06-30 05:45:20.000000000 -0700
+@@ -27,23 +27,6 @@
+ 	pr_debug("blkback/xenbus (%s:%d) " fmt ".\n",	\
+ 		 __FUNCTION__, __LINE__, ##args)
+ 
+-struct backend_info
+-{
+-	struct xenbus_device *dev;
+-	blkif_t *blkif;
+-	struct xenbus_watch backend_watch;
+-	struct xenbus_watch shutdown_watch;
+-	struct xenbus_watch pause_watch;
+-	unsigned major;
+-	unsigned minor;
+-	int group_added;
+-	char *nodename;
+-	atomic_t refcnt;
+-	pid_t kthread_pid;
+-	int shutdown_signalled;
+-	unsigned queue_events;
+-};
+-
+ DECLARE_MUTEX(blkback_dev_sem);
+ 
+ static void connect(struct backend_info *);

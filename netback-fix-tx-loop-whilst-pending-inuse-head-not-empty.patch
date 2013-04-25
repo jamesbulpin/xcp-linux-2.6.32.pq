@@ -1,0 +1,25 @@
+# HG changeset patch
+# Parent e0a440a2caa189cb6cbbe64fd07d56736c17477c
+Netback kthread was getting stuck in a continous loop if the pending_inuse_head
+ list was not empty. 
+
+This was caused by a check in tx_work_todo which was preventing the kthread 
+from scheduling out whilst there was anything on the pending_inuse_head list. 
+
+A timer was already set for the next point at which something could be removed
+from the pending_inuse_head list, so use the pending status of this timer to 
+determine if there is any work to do on pending_inuse_head.
+
+diff -r e0a440a2caa1 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -1595,7 +1595,8 @@ static inline int tx_work_todo(struct xe
+ 		return 1;
+ 
+ 	if (netbk_copy_skb_mode == NETBK_DELAYED_COPY_SKB &&
+-	    !list_empty(&netbk->pending_inuse_head))
++		!timer_pending(&netbk->netbk_tx_pending_timer) &&
++		!list_empty(&netbk->pending_inuse_head))
+ 		return 1;
+ 
+ 	if (((nr_pending_reqs(netbk) + MAX_SKB_FRAGS) < MAX_PENDING_REQS) &&

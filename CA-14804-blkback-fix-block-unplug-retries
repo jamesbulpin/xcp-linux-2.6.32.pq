@@ -1,0 +1,43 @@
+diff -r 8aa8b71756d7 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Mon Mar 24 10:45:44 2008 -0700
++++ b/drivers/xen/blkback/xenbus.c	Mon Mar 24 16:18:27 2008 -0700
+@@ -310,6 +310,30 @@ void blkback_close(blkif_t *blkif)
+ 	blkif->xenblkd = NULL;
+ }
+ 
++static int xenbus_write_state(struct xenbus_device *dev,
++			      enum xenbus_state state)
++{
++	int err;
++	int current_state;
++
++	if (dev->state != state)
++		return xenbus_switch_state(dev, state);
++
++	err = xenbus_scanf(XBT_NIL, dev->nodename, "state", "%d",
++			   &current_state);
++	if (err != 1)
++		return 0;
++
++	err = xenbus_printf(XBT_NIL, dev->nodename, "state", "%d", state);
++	if (err) {
++		if (state != XenbusStateClosing) /* Avoid looping */
++			xenbus_dev_fatal(dev, err, "writing new state");
++		return err;
++	}
++
++	return 0;
++}
++
+ static void start_shutdown(struct xenbus_watch *watch,
+ 			   const char **vec, unsigned int length)
+ {
+@@ -334,7 +358,7 @@ static void start_shutdown(struct xenbus
+ 		return;
+ 	}
+ 
+-	xenbus_switch_state(dev, XenbusStateClosing);
++	xenbus_write_state(dev, XenbusStateClosing);
+ 	
+ 	if (len == sizeof("force") - 1 && !memcmp(type, "force", len))
+ 		if (!kthread_remove(be))

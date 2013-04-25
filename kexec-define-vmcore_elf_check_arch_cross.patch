@@ -1,0 +1,12 @@
+diff -r 15cc4678e349 include/linux/crash_dump.h
+--- a/include/linux/crash_dump.h	Fri May 15 16:21:27 2009 +0100
++++ b/include/linux/crash_dump.h	Wed Jun 03 17:33:31 2009 +0100
+@@ -6,6 +6,8 @@
+ #include <linux/smp_lock.h>
+ #include <linux/device.h>
+ #include <linux/proc_fs.h>
++
++#include <asm/kexec.h>
+ 
+ #define ELFCORE_ADDR_MAX	(-1ULL)
+ 

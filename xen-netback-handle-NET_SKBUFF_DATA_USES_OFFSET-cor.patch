@@ -1,0 +1,30 @@
+From abcab17f7ca94e2078cc8cdf25cd61cb71e670e0 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 11 Jun 2010 10:51:01 +0100
+Subject: [PATCH] xen: netback: handle NET_SKBUFF_DATA_USES_OFFSET correctly
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Cc: Jan Beulich <JBeulich@novell.com>
+---
+ drivers/xen/netback/netback.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 9e4793f..8cd7875 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -218,7 +218,11 @@ static struct sk_buff *netbk_copy_skb(struct sk_buff *skb)
+ 		len -= copy;
+ 	}
+ 
++#ifdef NET_SKBUFF_DATA_USES_OFFSET
++	offset = 0;
++#else
+ 	offset = nskb->data - skb->data;
++#endif
+ 
+ 	nskb->transport_header = skb->transport_header + offset;
+ 	nskb->network_header = skb->network_header + offset;
+-- 
+1.5.6.5
+

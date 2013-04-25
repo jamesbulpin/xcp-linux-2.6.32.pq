@@ -1,0 +1,53 @@
+Make sure that newly forked threads don't have TS_USEDFPU set, 
+since they clearly can't have any FPU state yet. 
+
+This avoids a kernel deadlock where, when scheduling _away_ from a new
+thread for the first time, we:
+ - turn off interrupts;
+ - take the runqueue lock;
+ - see TS_USEDFPU and try to save the FPU regs;
+ - take an #NP exception because CR0.TS is still set;
+ - turn on interrupts in the #NP handler while we allocate FPU space; (!)
+ - take an interrupt;
+ - try to wake a task that's waiting for that interrupt;
+ - try to take the runqueue lock, which we already have.
+
+This deadlock can be triggered from user space by using the FPU and then
+forking, and not using the FPU after the fork.
+
+Signed-off-by: Tim Deegan <Tim.Deegan@citrix.com>
+
+diff -r 36031e0895b1 include/asm-x86/thread_info.h
+--- a/arch/x86/include/asm/thread_info.h	Tue Sep 15 14:26:00 2009 +0100
++++ b/arch/x86/include/asm/thread_info.h	Fri Sep 18 11:48:45 2009 +0100
+@@ -257,6 +257,11 @@
+ 
+ #define tsk_is_polling(t) (task_thread_info(t)->status & TS_POLLING)
+ 
++/* A new thread can't possibly have FPU state in any CPU. */
++#define arch_setup_thread_stack(thread)                 \
++	do { (thread)->status &= ~TS_USEDFPU; } while (0)
++
++
+ #ifndef __ASSEMBLY__
+ #define HAVE_SET_RESTORE_SIGMASK	1
+ static inline void set_restore_sigmask(void)
+diff -r 36031e0895b1 include/linux/sched.h
+--- a/include/linux/sched.h	Tue Sep 15 14:26:00 2009 +0100
++++ b/include/linux/sched.h	Fri Sep 18 11:48:45 2009 +0100
+@@ -1977,10 +1977,15 @@
+ #define task_thread_info(task)	((struct thread_info *)(task)->stack)
+ #define task_stack_page(task)	((task)->stack)
+ 
++#ifndef arch_setup_thread_stack
++#define arch_setup_thread_stack(thread) do {} while(0)
++#endif
++
+ static inline void setup_thread_stack(struct task_struct *p, struct task_struct *org)
+ {
+ 	*task_thread_info(p) = *task_thread_info(org);
+ 	task_thread_info(p)->task = p;
++	arch_setup_thread_stack(task_thread_info(p));
+ }
+ 
+ static inline unsigned long *end_of_stack(struct task_struct *p)

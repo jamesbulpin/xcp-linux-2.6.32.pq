@@ -1,0 +1,74 @@
+diff -r 69d892d41b94 mm/oom_kill.c
+--- a/mm/oom_kill.c	Mon Jan 28 14:24:18 2008 +0000
++++ b/mm/oom_kill.c	Mon Jan 28 15:00:21 2008 +0000
+@@ -49,6 +49,8 @@ unsigned long badness(struct task_struct
+ unsigned long badness(struct task_struct *p, unsigned long uptime)
+ {
+ 	unsigned long points, cpu_time, run_time;
++	unsigned long nr_children = 0, child_points = 0;
++	int is_nice = 0, is_super = 0, is_rawio = 0;
+ 	struct mm_struct *mm;
+ 	struct task_struct *child;
+ 	int oom_adj = p->signal->oom_adj;
+@@ -86,9 +88,13 @@ unsigned long badness(struct task_struct
+ 	list_for_each_entry(child, &p->children, sibling) {
+ 		task_lock(child);
+ 		if (child->mm != mm && child->mm)
+-			points += child->mm->total_vm/2 + 1;
++		{
++			nr_children++;
++			child_points += child->mm->total_vm/2 + 1;
++		}
+ 		task_unlock(child);
+ 	}
++	points += child_points;
+ 
+ 	/*
+ 	 * CPU time is in tens of seconds and run time is in thousands
+@@ -115,7 +121,10 @@ unsigned long badness(struct task_struct
+ 	 * their badness points.
+ 	 */
+ 	if (task_nice(p) > 0)
++	{
++		is_nice = 1;
+ 		points *= 2;
++	}
+ 
+ 	/*
+ 	 * Superuser processes are usually more important, so we make it
+@@ -123,7 +132,10 @@ unsigned long badness(struct task_struct
+ 	 */
+ 	if (has_capability_noaudit(p, CAP_SYS_ADMIN) ||
+ 	    has_capability_noaudit(p, CAP_SYS_RESOURCE))
++	{
++		is_super = 1;
+ 		points /= 4;
++	}
+ 
+ 	/*
+ 	 * We don't want to kill a process with direct hardware access.
+@@ -132,7 +144,10 @@ unsigned long badness(struct task_struct
+ 	 * of as important.
+ 	 */
+ 	if (has_capability_noaudit(p, CAP_SYS_RAWIO))
++	{
++		is_rawio = 1;
+ 		points /= 4;
++	}
+ 
+ 	/*
+ 	 * If p's nodes don't overlap ours, it may still help to kill p
+@@ -153,8 +168,11 @@ unsigned long badness(struct task_struct
+ 	}
+ 
+ #ifdef DEBUG
+-	printk(KERN_INFO "OOMkill: task %d (%s) got %lu points\n",
+-	p->pid, p->comm, points);
++	printk(KERN_INFO "OOMkill: task %d (%s) got %lu points "
++	       "(base total_vm %ld, %ld children gave %ld points, cpu_time %ld, runtime %ld, "
++	       "is_nice %s, is_super %s, is_rawio %s, adj %d)\n",
++	       p->pid, p->comm, points, mm->total_vm, nr_children, child_points, cpu_time, run_time,
++	       is_nice?"yes":"no", is_super?"yes":"no", is_rawio?"yes":"no", oom_adj);
+ #endif
+ 	return points;
+ }

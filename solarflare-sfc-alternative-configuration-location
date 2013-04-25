@@ -1,0 +1,75 @@
+Add second location for acceleration config option for XenServer
+
+diff -r 2b5cc22ab406 drivers/xen/netback/accel.c
+--- a/drivers/xen/netback/accel.c
++++ b/drivers/xen/netback/accel.c
+@@ -64,16 +64,32 @@ static int match_accelerator(struct xenb
+ 	char *eth_name = xenbus_read(XBT_NIL, xendev->nodename, "accel", NULL);
+ 	
+ 	if (IS_ERR(eth_name)) {
+-		/* Probably means not present */
+-		DPRINTK("%s: no match due to xenbus_read accel error %ld\n",
+-			__FUNCTION__, PTR_ERR(eth_name));
+-		return 0;
+-	} else {
+-		if (!strcmp(eth_name, accelerator->eth_name))
+-			rc = 1;
+-		kfree(eth_name);
+-		return rc;
++		int dom, vif;
++		char *nodename;
++
++		/* Try alternate configuration location */
++		sscanf(xendev->nodename, "backend/vif/%d/%d", &dom, &vif);
++		nodename = kasprintf(GFP_NOIO | __GFP_HIGH, 
++				     "/local/domain/%d/vm-data/device/vif/%d", 
++				     dom, vif);
++		if (!nodename)
++			return 0;
++
++		eth_name = xenbus_read(XBT_NIL, nodename, "accel", NULL);
++
++		kfree(nodename);
++
++		if (IS_ERR(eth_name)) {
++			/* Probably means not present */
++			DPRINTK("%s: no match due to xenbus_read accel err %ld\n",
++				__FUNCTION__, PTR_ERR(eth_name));
++			return 0;
++		}
+ 	}
++	if (!strcmp(eth_name, accelerator->eth_name))
++		rc = 1;
++	kfree(eth_name);
++	return rc;
+ }
+ 
+ 
+diff -r 2b5cc22ab406 drivers/xen/sfc_netback/accel_xenbus.c
+--- a/drivers/xen/sfc_netback/accel_xenbus.c
++++ b/drivers/xen/sfc_netback/accel_xenbus.c
+@@ -332,8 +332,22 @@ static int read_nicname(struct xenbus_de
+ 
+ 	/* nic name used to select interface used for acceleration */
+ 	bend->nicname = xenbus_read(XBT_NIL, dev->nodename, "accel", &len);
+-	if (IS_ERR(bend->nicname))
+-		return PTR_ERR(bend->nicname);
++	if (IS_ERR(bend->nicname)) {
++		/* Try looking in the XenServer5 place */
++		char *nodename = 
++			kasprintf(GFP_NOIO | __GFP_HIGH, 
++				  "/local/domain/%d/vm-data/device/vif/%d", 
++				  bend->far_end, bend->vif_num);
++
++		if (!nodename)
++			return -ENOMEM;
++
++		bend->nicname = xenbus_read(XBT_NIL, nodename, "accel", &len);
++		kfree(nodename);
++
++		if (IS_ERR(bend->nicname))
++			return PTR_ERR(bend->nicname);
++	}
+ 
+ 	return 0;
+ }

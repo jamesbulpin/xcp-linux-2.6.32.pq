@@ -1,0 +1,93 @@
+ext4: Lock i_aio_dio_complete_list on 2.6.32.
+
+Functional subset of 2.6 commit 744692dc. Add a lock to prevent
+potential list corruption when dio->end_io is called in interrupt
+context.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Acked-by: Jiaying Zhang <jiayingz@google.com>
+
+diff --git a/fs/ext4/ext4.h b/fs/ext4/ext4.h
+index c91398b..9947a6f 100644
+--- a/fs/ext4/ext4.h
++++ b/fs/ext4/ext4.h
+@@ -707,6 +707,8 @@ struct ext4_inode_info {
+ 
+ 	/* completed async DIOs that might need unwritten extents handling */
+ 	struct list_head i_aio_dio_complete_list;
++	spinlock_t i_aio_dio_complete_lock;
++
+ 	/* current io_end structure for async DIO write*/
+ 	ext4_io_end_t *cur_aio_dio;
+ 
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 00275b5..5ff9774 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -3589,8 +3589,12 @@ static void ext4_end_aio_dio_work(struct work_struct *work)
+ 	mutex_lock(&inode->i_mutex);
+ 	ret = ext4_end_aio_dio_nolock(io);
+ 	if (ret >= 0) {
+-		if (!list_empty(&io->list))
++		if (!list_empty(&io->list)) {
++			struct ext4_inode_info *ei = EXT4_I(inode);
++			spin_lock_irq(&ei->i_aio_dio_complete_lock);
+ 			list_del_init(&io->list);
++			spin_unlock_irq(&ei->i_aio_dio_complete_lock);
++		}
+ 		ext4_free_io_end(io);
+ 	}
+ 	mutex_unlock(&inode->i_mutex);
+@@ -3608,6 +3612,7 @@ static void ext4_end_aio_dio_work(struct work_struct *work)
+  */
+ int flush_aio_dio_completed_IO(struct inode *inode)
+ {
++	struct ext4_inode_info *ei = EXT4_I(inode);
+ 	ext4_io_end_t *io;
+ 	int ret = 0;
+ 	int ret2 = 0;
+@@ -3636,8 +3641,11 @@ int flush_aio_dio_completed_IO(struct inode *inode)
+ 		ret = ext4_end_aio_dio_nolock(io);
+ 		if (ret < 0)
+ 			ret2 = ret;
+-		else
++		else {
++			spin_lock_irq(&ei->i_aio_dio_complete_lock);
+ 			list_del_init(&io->list);
++			spin_unlock_irq(&ei->i_aio_dio_complete_lock);
++		}
+ 	}
+ 	return (ret2 < 0) ? ret2 : 0;
+ }
+@@ -3668,8 +3676,10 @@ static void ext4_end_io_dio(struct kiocb *iocb, loff_t offset,
+ 			    ssize_t size, void *private, int ret,
+ 			    bool is_async)
+ {
++	struct ext4_inode_info *ei;
+         ext4_io_end_t *io_end = iocb->private;
+ 	struct workqueue_struct *wq;
++	unsigned long flags;
+ 
+ 	/* if not async direct IO or dio with 0 bytes write, just return */
+ 	if (!io_end || !size)
+@@ -3704,4 +3711,7 @@
+ 	/* Add the io_end to per-inode completed aio dio list*/
++	ei = EXT4_I(io_end->inode);
++	spin_lock_irqsave(&ei->i_aio_dio_complete_lock, flags);
+ 	list_add_tail(&io_end->list,
+-		 &EXT4_I(io_end->inode)->i_aio_dio_complete_list);
++		      &ei->i_aio_dio_complete_list);
++	spin_unlock_irqrestore(&ei->i_aio_dio_complete_lock, flags);
+ 	iocb->private = NULL;
+diff --git a/fs/ext4/super.c b/fs/ext4/super.c
+index 6835ab2..053484e 100644
+--- a/fs/ext4/super.c
++++ b/fs/ext4/super.c
+@@ -709,6 +709,7 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
+ 	ei->i_reserved_quota = 0;
+ #endif
+ 	INIT_LIST_HEAD(&ei->i_aio_dio_complete_list);
++	spin_lock_init(&ei->i_aio_dio_complete_lock);
+ 	ei->cur_aio_dio = NULL;
+ 	ei->i_sync_tid = 0;
+ 	ei->i_datasync_tid = 0;

@@ -1,0 +1,23 @@
+CA-46095: Fix blkback thread exit racing the final bio end_io.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r f90d10bc8287 -r 94a961a85a1c drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Sep 30 01:28:59 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Sep 30 03:16:33 2010 -0700
+@@ -501,8 +501,13 @@
+ 
+ 		free_req(pending_req);
+ 
+-		if (atomic_dec_and_test(&blkif->requests_pending))
+-			wake_up_process(blkif->xenblkd);
++		if (atomic_dec_and_test(&blkif->requests_pending)) {
++			unsigned long flags;
++			spin_lock_irqsave(&blkif->xenblkd_lock, flags);
++			if (blkif->xenblkd)
++				wake_up_process(blkif->xenblkd);
++			spin_unlock_irqrestore(&blkif->xenblkd_lock, flags);
++		}
+ 	}
+ }
+ 

@@ -1,0 +1,82 @@
+# HG changeset patch
+# Parent f2167026a0561e2759b5a2152620caee2f129127
+CA-44322: More direct-io hacks.
+
+Synchronous dio has the habit of just queuing completed bios for
+deferred processing. This affects preallocation writes, we won't pool
+that many objects to guarantee we'll issue the entire write in one
+go. Free bios right after completion, like AIO does.
+
+Ensure progress is made on FS dio with a minimum amount of bios
+pinned. Reduces per-tapdisk pool min to 2 bios. One for direct-io, the
+second one for get_block on file systems.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r f2167026a056 drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Wed Oct 20 12:13:27 2010 -0700
++++ b/drivers/xen/blktap2/blktap.h	Wed Oct 20 14:41:36 2010 -0700
+@@ -44,7 +44,7 @@
+ #define BLKTAP_REQUEST_FREE          0
+ #define BLKTAP_REQUEST_PENDING       1
+ 
+-#define BLKTAP2_BIO_POOL_SIZE        32
++#define BLKTAP2_BIO_POOL_SIZE        2
+ 
+ /*
+  * The maximum number of requests that can be outstanding at any time
+diff -r f2167026a056 fs/direct-io.c
+--- a/fs/direct-io.c	Wed Oct 20 12:13:27 2010 -0700
++++ b/fs/direct-io.c	Wed Oct 20 14:41:36 2010 -0700
+@@ -36,6 +36,7 @@
+ #include <linux/rwsem.h>
+ #include <linux/uio.h>
+ #include <asm/atomic.h>
++#include <linux/iocontext.h>
+ 
+ /*
+  * How many user pages to map in one call to get_user_pages().  This determines
+@@ -66,6 +67,7 @@
+ 	/* BIO submission state */
+ 	struct bio *bio;		/* bio under assembly */
+ 	struct inode *inode;
++	struct special_io_context *sioc;
+ 	int rw;
+ 	loff_t i_size;			/* i_size when submitted */
+ 	int lock_type;			/* doesn't change */
+@@ -292,9 +294,16 @@
+ 	struct dio *dio = bio->bi_private;
+ 	unsigned long flags;
+ 
++	if (dio->sioc) {
++		dio_bio_complete(dio, bio);
++		bio = NULL;
++	}
++
+ 	spin_lock_irqsave(&dio->bio_lock, flags);
+-	bio->bi_private = dio->bio_list;
+-	dio->bio_list = bio;
++	if (bio) {
++		bio->bi_private = dio->bio_list;
++		dio->bio_list = bio;
++	}
+ 	if (--dio->refcount == 1 && dio->waiter)
+ 		wake_up_process(dio->waiter);
+ 	spin_unlock_irqrestore(&dio->bio_lock, flags);
+@@ -403,7 +412,7 @@
+ 	if (!uptodate)
+ 		dio->io_error = -EIO;
+ 
+-	if (dio->is_async && dio->rw == READ) {
++	if ((dio->sioc || dio->is_async) && dio->rw == READ) {
+ 		bio_check_pages_dirty(bio);	/* transfers ownership */
+ 	} else {
+ 		for (page_no = 0; page_no < bio->bi_vcnt; page_no++) {
+@@ -957,6 +966,7 @@
+ 
+ 	spin_lock_init(&dio->bio_lock);
+ 	dio->refcount = 1;
++	dio->sioc = task_ioc_special(current);
+ 
+ 	/*
+ 	 * In case of non-aligned buffers, we may need 2 more

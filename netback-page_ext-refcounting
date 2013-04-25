@@ -1,0 +1,438 @@
+Add a reference count associated with foreign pages.
+
+When we acquire a page_ext for a foreign page bump a reference
+count to stop the page from being unmapped and replaced under
+our feet. We need to do this since we may have set up grant copies
+or transitively granted that page.
+
+diff -r fc97a7b91b00 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Fri Mar 18 09:10:50 2011 +0000
++++ b/drivers/xen/netback/common.h	Fri Mar 18 09:11:04 2011 +0000
+@@ -70,11 +70,29 @@ struct xen_comms {
+ #define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
+ #define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
+ 
++/* extra field used in struct page */
++struct page_ext {
++#if BITS_PER_LONG < 64
++#define IDX_WIDTH   8
++#define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH - 1)
++	unsigned int reserved:1;
++	unsigned int group:GROUP_WIDTH;
++	unsigned int idx:IDX_WIDTH;
++#else
++#define GROUP_WIDTH (BITS_PER_LONG - 1)
++	unsigned int reserved:1;
++	unsigned int group:GROUP_WIDTH;
++	unsigned int idx;
++#endif
++};
++
+ struct netbk_tag {
+ 	struct netbk_tag *next;
+ 	unsigned short id;
+ 	struct sk_buff *skb;
+ 	grant_ref_t gref;
++	int foreign;
++	struct page_ext ext;
+ };
+ 
+ #define	NETBK_MIN_RX_PROTOCOL 0
+@@ -255,25 +273,10 @@ int netif_xenbus_init(void);
+ #define netif_schedulable(netif)				\
+ 	(netif_running((netif)->dev) && netback_carrier_ok(netif))
+ 
+-/* extra field used in struct page */
+-struct page_ext {
+-#if BITS_PER_LONG < 64
+-#define IDX_WIDTH   8
+-#define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH - 1)
+-	unsigned int reserved:1;
+-	unsigned int group:GROUP_WIDTH;
+-	unsigned int idx:IDX_WIDTH;
+-#else
+-#define GROUP_WIDTH (BITS_PER_LONG - 1)
+-	unsigned int reserved:1;
+-	unsigned int group:GROUP_WIDTH;
+-	unsigned int idx;
+-#endif
+-};
+-
+ void netif_schedule_work(struct xen_netif *netif);
+ void netif_deschedule_work(struct xen_netif *netif);
+ int netif_get_page_ext(struct page *pg, struct page_ext *ext);
++void netif_put_page_ext(struct page_ext *ext);
+ 
+ int netbk_p0_queue_full(struct xen_netif *netif);
+ void netbk_p0_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
+@@ -347,7 +350,9 @@ struct xen_netbk {
+ 	struct timer_list net_timer;
+ 	struct timer_list netbk_tx_pending_timer;
+ 
++	rwlock_t mmap_lock;
+ 	struct page **mmap_pages;
++	atomic_t mmap_ref[MAX_PENDING_REQS];
+ 
+ 	pending_ring_idx_t pending_prod;
+ 	pending_ring_idx_t pending_cons;
+@@ -380,6 +385,7 @@ struct xen_netbk {
+ 	unsigned char rx_notify[NR_IRQS];
+ 	u16 notify_list[NET_RX_RING_SIZE];
+ 	struct netbk_rx_meta meta[2*NET_RX_RING_SIZE];
++	struct page_ext ext[2*NET_RX_RING_SIZE];
+ };
+ 
+ extern struct xen_netbk *xen_netbk;
+diff -r fc97a7b91b00 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Mar 18 09:10:50 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Mar 18 09:11:04 2011 +0000
+@@ -72,24 +72,11 @@ static inline unsigned long idx_to_kaddr
+ 	return (unsigned long)pfn_to_kaddr(idx_to_pfn(netbk, idx));
+ }
+ 
+-/* extra field used in struct page */
+-static inline void netif_set_page_ext(struct page *pg, struct page_ext *ext)
+-{
+-	union page_mapping_overlay ovl;
+-
+-	ovl.ext = *ext;
+-
+-	/* Make syre pg->mapping never evaluates to NULL */
+-	ovl.ext.reserved = 1;
+-
+-	BUILD_BUG_ON(sizeof(ovl.ext) > sizeof(ovl.mapping));
+-	pg->mapping = ovl.mapping;
+-}
+-
+ int netif_get_page_ext(struct page *pg, struct page_ext *ext)
+ {
+ 	union page_mapping_overlay ovl;
+ 	struct xen_netbk *netbk;
++	unsigned long flags;
+ 
+ 	if (!PageForeign(pg))
+ 		return 0;
+@@ -108,10 +95,57 @@ int netif_get_page_ext(struct page *pg, 
+ 	if ((ext->idx < 0) || (ext->idx >= MAX_PENDING_REQS))
+ 		return 0;
+ 
+-	if (netbk->mmap_pages[ext->idx] != pg)
++	read_lock_irqsave(&netbk->mmap_lock, flags);
++	if (netbk->mmap_pages[ext->idx] != pg) {
++		read_unlock_irqrestore(&netbk->mmap_lock, flags);
+ 		return 0;
++	}
++
++	atomic_inc(&netbk->mmap_ref[ext->idx]);
++	read_unlock_irqrestore(&netbk->mmap_lock, flags);
+ 
+ 	return 1;
++}
++
++void netif_put_page_ext(struct page_ext *ext)
++{
++	struct xen_netbk *netbk;
++
++	netbk = &xen_netbk[ext->group];
++	atomic_dec(&netbk->mmap_ref[ext->idx]);
++}
++
++static void netif_page_release(struct page *pg, unsigned int order)
++{
++	union page_mapping_overlay ovl;
++	struct page_ext ext;
++	struct xen_netbk *netbk;
++
++	BUG_ON(!PageForeign(pg));
++	BUG_ON(order);
++
++	ovl.mapping = pg->mapping;
++	ext = ovl.ext;
++
++	netbk = &xen_netbk[ext.group];
++	BUG_ON(netbk->mmap_pages[ext.idx] != pg);
++
++	netif_idx_release(netbk, ext.idx);
++}
++
++static inline void netif_set_page_ext(struct page *pg, struct page_ext *ext)
++{
++	union page_mapping_overlay ovl;
++
++	ovl.ext = *ext;
++
++	/* Make syre pg->mapping never evaluates to NULL */
++	ovl.ext.reserved = 1;
++
++	BUILD_BUG_ON(sizeof(ovl.ext) > sizeof(ovl.mapping));
++	pg->mapping = ovl.mapping;
++
++	SetPageForeign(pg, netif_page_release);
+ }
+ 
+ /*
+@@ -177,8 +211,10 @@ struct netrx_pending_operations {
+ struct netrx_pending_operations {
+ 	unsigned copy_prod, copy_cons;
+ 	unsigned meta_prod, meta_cons;
++	unsigned ext_prod, ext_cons;
+ 	struct gnttab_copy *copy;
+ 	struct netbk_rx_meta *meta;
++	struct page_ext *ext;
+ 	int copy_off;
+ 	grant_ref_t copy_gref;
+ };
+@@ -194,12 +230,16 @@ static void netbk_gop_frag_copy(struct x
+ 	struct netbk_protocol0 *p0 = &netif->rx.p0;
+ 	struct gnttab_copy *copy_gop;
+ 	struct netbk_rx_meta *meta;
+-	struct page_ext ext;
+-	int foreign = netif_get_page_ext(page, &ext);
++	struct page_ext *ext = npo->ext + npo->ext_prod;
++	int foreign = netif_get_page_ext(page, ext);
+ 	unsigned long bytes;
+ 
+ 	/* Data must not cross a page boundary. */
+ 	BUG_ON(size + offset > PAGE_SIZE);
++
++	/* Save page_ext for release */
++	if (foreign)
++		npo->ext_prod++;
+ 
+ 	meta = npo->meta + npo->meta_prod - 1;
+ 
+@@ -253,11 +293,13 @@ static void netbk_gop_frag_copy(struct x
+ 
+ 		copy_gop = npo->copy + npo->copy_prod++;
+ 		copy_gop->flags = GNTCOPY_dest_gref;
++
+ 		if (foreign) {
+-			struct xen_netbk *netbk = &xen_netbk[ext.group];
++			struct xen_netbk *netbk;
+ 			struct pending_tx_info *src_pend;
+ 
+-			src_pend = &netbk->pending_tx_info[ext.idx];
++			netbk = &xen_netbk[ext->group];
++			src_pend = &netbk->pending_tx_info[ext->idx];
+ 
+ 			copy_gop->source.domid = src_pend->netif->domid;
+ 			copy_gop->source.u.ref = src_pend->req.gref;
+@@ -285,6 +327,7 @@ struct skb_cb_overlay {
+ struct skb_cb_overlay {
+ 	int copy_slots_used;
+ 	int meta_slots_used;
++	int ext_slots_used;
+ };
+ 
+ /* Prepare an SKB to be transmitted to the frontend.  This is
+@@ -305,10 +348,12 @@ static void netbk_gop_skb(struct sk_buff
+ 	struct netbk_rx_meta *meta;
+ 	int old_copy_prod;
+ 	int old_meta_prod;
++	int old_ext_prod;
+ 	struct skb_cb_overlay *sco;
+ 
+ 	old_copy_prod = npo->copy_prod;
+ 	old_meta_prod = npo->meta_prod;
++	old_ext_prod = npo->ext_prod;
+ 
+ 	BUG_ON(skb_shinfo(skb)->gso_size &&
+ 	       netif->gso_mode == NETBK_GSO_INVALID);
+@@ -356,6 +401,7 @@ static void netbk_gop_skb(struct sk_buff
+ 	sco = (struct skb_cb_overlay *)skb->cb;
+ 	sco->copy_slots_used = npo->copy_prod - old_copy_prod;
+ 	sco->meta_slots_used = npo->meta_prod - old_meta_prod;
++	sco->ext_slots_used = npo->ext_prod - old_ext_prod;
+ }
+ 
+ /* This is a twin to netbk_gop_skb.  Assume that netbk_gop_skb was
+@@ -379,6 +425,18 @@ static int netbk_check_gop(int nr_copy_s
+ 	}
+ 
+ 	return status;
++}
++
++static void netbk_put_page_ext(int nr_ext_slots,
++			       struct netrx_pending_operations *npo)
++{
++	struct page_ext *ext;
++	int i;
++
++	for (i = 0; i < nr_ext_slots; i++) {
++		ext = npo->ext + npo->ext_cons++;
++		netif_put_page_ext(ext);
++	}
+ }
+ 
+ static void netbk_add_frag_responses(struct xen_netif *netif, int status,
+@@ -419,6 +477,7 @@ static void net_rx_action(unsigned long 
+ 	struct netrx_pending_operations npo = {
+ 		.copy  = netbk->grant_copy_op,
+ 		.meta  = netbk->meta,
++		.ext  = netbk->ext,
+ 	};
+ 
+ 	skb_queue_head_init(&rxq);
+@@ -481,6 +540,8 @@ static void net_rx_action(unsigned long 
+ 
+ 		status = netbk_check_gop(sco->copy_slots_used,
+ 					 netif->domid, &npo);
++
++		netbk_put_page_ext(sco->ext_slots_used, &npo);
+ 
+ 		if (sco->meta_slots_used == 1)
+ 			flags = 0;
+@@ -552,6 +613,7 @@ static void net_rx_action(unsigned long 
+ 	}
+ 	BUG_ON(npo.copy_cons != npo.copy_prod);
+ 	BUG_ON(npo.meta_cons != npo.meta_prod);
++	BUG_ON(npo.ext_cons != npo.ext_prod);
+ 
+ 	while (notify_nr != 0) {
+ 		irq = netbk->notify_list[--notify_nr];
+@@ -692,9 +754,22 @@ static inline int copy_pending_req(struc
+ static inline int copy_pending_req(struct xen_netbk *netbk,
+ 				   pending_ring_idx_t pending_idx)
+ {
+-	return gnttab_copy_grant_page(
++	int rc;
++
++	write_lock_irq(&netbk->mmap_lock);
++
++	if (atomic_read(&netbk->mmap_ref[pending_idx]) != 0) {
++		rc = -EAGAIN;
++		goto out;
++	}
++
++	rc = gnttab_copy_grant_page(
+ 			netbk->grant_tx_handle[pending_idx],
+ 			&netbk->mmap_pages[pending_idx]);
++
++out:
++	write_unlock_irq(&netbk->mmap_lock);
++	return rc;
+ }
+ 
+ static void permute_dealloc_ring(PEND_RING_IDX dc, PEND_RING_IDX dp)
+@@ -770,7 +845,6 @@ static inline void net_tx_action_dealloc
+ 		gop - netbk->tx_unmap_ops);
+ 	BUG_ON(ret);
+ 
+-#if 0
+ 	/*
+ 	 * Copy any entries that have been pending for too long
+ 	 */
+@@ -795,34 +869,20 @@ static inline void net_tx_action_dealloc
+ 			case -EBUSY:
+ 				list_del_init(&inuse->list);
+ 				continue;
++			case -EAGAIN:
++				if (!inuse->warned) {
++					inuse->warned = 1;
++					printk(KERN_CRIT
++					       "txp %d pending grant_copy?\n",
++					       pending_idx);
++				}
++				continue;
+ 			case -ENOENT:
+ 				continue;
+ 			}
+ 
+ 			break;
+ 		}
+-	}
+-#endif
+-
+-	list_for_each_entry_safe(inuse, n,
+-			&netbk->pending_inuse_head, list) {
+-		struct pending_tx_info *pending_tx_info;
+-
+-		pending_tx_info = netbk->pending_tx_info;
+-		pending_idx = inuse - netbk->pending_inuse;
+-
+-		if (time_after(inuse->alloc_time + HZ / 2, jiffies))
+-			break;
+-
+-		if (inuse->warned)
+-			continue;
+-
+-		netif = pending_tx_info[pending_idx].netif;
+-
+-		inuse->warned = 1;
+-		printk(KERN_CRIT "domain %u txp %u stuck?\n",
+-		       netif->domid,
+-		       pending_tx_info[pending_idx].req.id);
+ 	}
+ 
+ 	list_for_each_entry_safe(inuse, n, &list, list) {
+@@ -1409,17 +1469,6 @@ static void netif_idx_release(struct xen
+ 	xen_netbk_bh_handler(netbk, 0);
+ }
+ 
+-static void netif_page_release(struct page *page, unsigned int order)
+-{
+-	struct page_ext ext;
+-	int foreign = netif_get_page_ext(page, &ext);
+-
+-	BUG_ON(!foreign);
+-	BUG_ON(order);
+-
+-	netif_idx_release(&xen_netbk[ext.group], ext.idx);
+-}
+-
+ static void make_tx_response(struct xen_netif *netif,
+ 			     struct xen_netif_tx_request *txp,
+ 			     s8       st)
+@@ -1607,6 +1656,7 @@ static int __init netback_init(void)
+ 		netbk->netbk_tx_pending_timer.function =
+ 			netbk_tx_pending_timeout;
+ 
++		rwlock_init(&netbk->mmap_lock);
+ 		netbk->mmap_pages =
+ 			alloc_empty_pages_and_pagevec(MAX_PENDING_REQS);
+ 		if (!netbk->mmap_pages) {
+@@ -1620,7 +1670,6 @@ static int __init netback_init(void)
+ 		for (i = 0; i < MAX_PENDING_REQS; i++) {
+ 			struct page_ext ext = { .group = group, .idx = i };
+ 			page = netbk->mmap_pages[i];
+-			SetPageForeign(page, netif_page_release);
+ 			netif_set_page_ext(page, &ext);
+ 			INIT_LIST_HEAD(&netbk->pending_inuse[i].list);
+ 		}
+diff -r fc97a7b91b00 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Fri Mar 18 09:10:50 2011 +0000
++++ b/drivers/xen/netback/tx.c	Fri Mar 18 09:11:04 2011 +0000
+@@ -308,18 +308,17 @@ static void grant_tag(struct xen_netif *
+ static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct page *page,
+ 		      int offset, int len)
+ {
+-	struct page_ext ext;
+-	int foreign = netif_get_page_ext(page, &ext);
+-
+ 	BUG_ON(offset > PAGE_SIZE);
+ 	BUG_ON(offset + len > PAGE_SIZE);
+ 
+-	if (foreign) {
++	tag->foreign = netif_get_page_ext(page, &tag->ext);
++
++	if (tag->foreign) {
+ 		struct xen_netbk *netbk;
+ 		struct pending_tx_info *info;
+ 
+-		netbk = &xen_netbk[ext.group];
+-		info = &netbk->pending_tx_info[ext.idx];
++		netbk = &xen_netbk[tag->ext.group];
++		info = &netbk->pending_tx_info[tag->ext.idx];
+ 
+ 		gnttab_grant_foreign_access_ref_trans(tag->gref, netif->domid,
+ 						      GTF_readonly, info->netif->domid,
+@@ -337,6 +336,9 @@ static void ungrant_tag(struct netbk_tag
+ 
+ 	rc = gnttab_end_foreign_access_ref(tag->gref);
+ 	BUG_ON(rc == 0); /* FIXME */
++
++	if (tag->foreign)
++		netif_put_page_ext(&tag->ext);
+ }
+ 
+ static int slot_available(struct xen_netif *netif)

@@ -1,0 +1,20 @@
+diff -r 69bd2176baf9 net/sunrpc/xprtsock.c
+--- a/net/sunrpc/xprtsock.c	Mon Nov 07 13:00:06 2011 +0000
++++ b/net/sunrpc/xprtsock.c	Tue Nov 22 13:05:26 2011 +0000
+@@ -492,7 +492,7 @@ static int xs_nospace(struct rpc_task *t
+ 	struct rpc_rqst *req = task->tk_rqstp;
+ 	struct rpc_xprt *xprt = req->rq_xprt;
+ 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
+-	int ret = 0;
++	int ret = -EAGAIN;
+ 
+ 	dprintk("RPC: %5u xmit incomplete (%u left of %u)\n",
+ 			task->tk_pid, req->rq_slen - req->rq_bytes_sent,
+@@ -504,7 +504,6 @@ static int xs_nospace(struct rpc_task *t
+ 	/* Don't race with disconnect */
+ 	if (xprt_connected(xprt)) {
+ 		if (test_bit(SOCK_ASYNC_NOSPACE, &transport->sock->flags)) {
+-			ret = -EAGAIN;
+ 			/*
+ 			 * Notify TCP that we're limited by the application
+ 			 * window size

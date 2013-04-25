@@ -1,0 +1,12 @@
+diff -r 0804c105e679 Makefile
+--- a/Makefile	Fri Aug 27 09:20:05 2010 +0100
++++ b/Makefile	Fri Aug 27 16:03:19 2010 +0100
+@@ -1102,7 +1102,7 @@
+ 
+ # ---------------------------------------------------------------------------
+ # Firmware install
+-INSTALL_FW_PATH=$(INSTALL_MOD_PATH)/lib/firmware/$(KERNELRELEASE)
++INSTALL_FW_PATH=$(INSTALL_MOD_PATH)/lib/firmware
+ export INSTALL_FW_PATH
+ 
+ PHONY += firmware_install

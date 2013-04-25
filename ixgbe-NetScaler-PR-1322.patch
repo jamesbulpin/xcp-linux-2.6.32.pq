@@ -1,0 +1,250 @@
+PR-1322 Sysfs support for enabling/disabling per-interface VLAN filtering
+
+diff -r 42f9648345e3 drivers/net/ixgbe/ixgbe.h
+--- a/drivers/net/ixgbe/ixgbe.h
++++ b/drivers/net/ixgbe/ixgbe.h
+@@ -734,6 +734,7 @@ struct ixgbe_adapter {
+ 	u32 vferr_refcount;
+ #endif
+ 	struct ixgbe_mac_addr *mac_table;
++	int xsnsvlanfilt; /* Citrix NetScaler VLAN filtering enabled */
+ #ifdef IXGBE_SYSFS
+ 	struct kobject *info_kobj;
+ 	struct kobject *therm_kobj[IXGBE_MAX_SENSORS];
+diff -r 42f9648345e3 drivers/net/ixgbe/ixgbe_main.c
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -4561,10 +4561,16 @@ void ixgbe_set_rx_mode(struct net_device
+ 		IXGBE_WRITE_REG(hw, IXGBE_VMOLR(adapter->num_vfs), vmolr);
+ 	}
+ 
++	/* Citrix NetScaler: enable VLAN filtering if configured */
+ 	if (ixgbe_xsnsmode_get()) {
+-		/* VLAN filtering enabled for Citrix NetScaler */
+-		printk(KERN_INFO "ixgbe: Enabling NetScaler mode IXGBE_VLNCTRL_VFE\n");
+-		vlnctrl |= IXGBE_VLNCTRL_VFE;
++		if (adapter->xsnsvlanfilt) {
++			printk(KERN_INFO "ixgbe: %s enabling VLAN filtering for NetScaler\n", netdev->name);
++			vlnctrl |= IXGBE_VLNCTRL_VFE;
++		}
++		else {
++			printk(KERN_INFO "ixgbe: %s disabling VLAN filtering for NetScaler\n", netdev->name);
++			vlnctrl &= ~IXGBE_VLNCTRL_VFE;
++		}
+ 	}
+ 
+ 	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlnctrl);
+@@ -9328,8 +9334,6 @@ static const struct net_device_ops ixgbe
+ 
+ #endif /* HAVE_NET_DEVICE_OPS */
+ 
+-
+-
+ void ixgbe_assign_netdev_ops(struct net_device *dev)
+ {
+ #ifdef HAVE_NET_DEVICE_OPS
+@@ -9503,6 +9507,13 @@ static int __devinit ixgbe_probe(struct 
+ 
+ 	adapter->netdev = netdev;
+ 	adapter->pdev = pdev;
++
++	/*
++         * Record the apapter structure in the dev's devdata so we can
++         * get it in the sysfs handlers.
++         */
++	dev_set_drvdata(&(adapter->netdev)->dev, adapter);
++
+ 	hw = &adapter->hw;
+ 	hw->back = adapter;
+ 	adapter->msg_enable = (1 << DEFAULT_DEBUG_LEVEL_SHIFT) - 1;
+diff -r 42f9648345e3 drivers/net/ixgbe/ixgbe_param.c
+--- a/drivers/net/ixgbe/ixgbe_param.c
++++ b/drivers/net/ixgbe/ixgbe_param.c
+@@ -85,6 +85,11 @@ IXGBE_PARAM(XSNSMode, "Change XenServer 
+ #define IXGBE_XSNS_MODE                       1
+ #define IXGBE_DEFAULT_XSNS        IXGBE_XSNS_STD
+ 
++IXGBE_PARAM(XSNSVLANFiltering, "Enable/disable VLAN filtering for NetScaler (0=Disabled, 1=Enabled)");
++#define IXGBE_XSNS_VLAN_FILT_DIS         0
++#define IXGBE_XSNS_VLAN_FILT_EN          1
++#define IXGBE_DEFAULT_XSNS_VLAN_FILT     IXGBE_XSNS_VLAN_FILT_DIS
++
+ /* IntMode (Interrupt Mode)
+  *
+  * Valid Range: 0-2
+@@ -1221,5 +1226,28 @@ no_fdir_sample:
+ #endif
+ 		ixgbe_xsnsmode_set((bool)xsnsmode);
+         }
++        { /* XenServer NetScaler VLAN Filtering enable/disable */
++		static struct ixgbe_option opt = {
++			.type = range_option,
++			.name = "XenServer VLAN Filtering",
++			.err  = "using default of "
++				__MODULE_STRING(IXGBE_DEFAULT_XSNS_VLAN_FILT),
++			.def  = IXGBE_DEFAULT_XSNS_VLAN_FILT,
++			.arg  = { .r = { .min = IXGBE_XSNS_VLAN_FILT_DIS,
++					 .max = IXGBE_XSNS_VLAN_FILT_EN }}
++		};
++		u32 xsnsvlanfilt = opt.def;
++#ifdef module_param_array
++		if (num_XSNSVLANFiltering > bd) {
++#endif
++			xsnsvlanfilt = XSNSVLANFiltering[bd];
++			ixgbe_validate_option(&xsnsvlanfilt, &opt);
++#ifdef module_param_array
++		} else {
++			xsnsvlanfilt = opt.def;
++		}
++#endif
++		adapter->xsnsvlanfilt = xsnsvlanfilt;
++	}
+ }
+ 
+diff -r 42f9648345e3 drivers/net/ixgbe/ixgbe_sriov.c
+--- a/drivers/net/ixgbe/ixgbe_sriov.c
++++ b/drivers/net/ixgbe/ixgbe_sriov.c
+@@ -278,6 +278,33 @@ void ixgbe_restore_vf_multicasts(struct 
+ 
+ int ixgbe_set_vf_vlan(struct ixgbe_adapter *adapter, int add, int vid, u32 vf)
+ {
++	/*
++	 * NetScaler: PR-1322. If the VF has a VLAN set the guest VLAN
++	 * config is disallowed, indicated by the pf_vlan field - honour this
++	 * by silently ignoring a request from the guest to filter on
++	 * the VLAN currently configured or to reject a request to
++	 * filter on a different VLAN. This applies whether or not
++	 * VLAN filtering is enabled or disabled. If no VLAN is set
++	 * and filtering is disabled then silently ignore the request by
++	 * returning 0. With no VLAN set and filtering enabled go ahead
++	 * and try to add a VLAN to the filter returning whatever status
++	 * ixgbe_set_vfta returns.
++	 */
++	if (ixgbe_xsnsmode_get()) {
++		if (adapter->vfinfo[vf].pf_vlan) {
++			if (adapter->vfinfo[vf].pf_vlan == vid) {
++				/* no op */
++				return 0;
++			} else {
++				/* dont allow */
++				return -1;
++			}
++		}
++		if (!adapter->xsnsvlanfilt) {
++			return 0;
++		}
++	}
++
+ 	return ixgbe_set_vfta(&adapter->hw, vid, vf, (bool)add);
+ }
+ 
+@@ -610,6 +637,14 @@ static int ixgbe_rcv_msg_from_vf(struct 
+ 		add = (msgbuf[0] & IXGBE_VT_MSGINFO_MASK)
+ 					>> IXGBE_VT_MSGINFO_SHIFT;
+ 		vid = (msgbuf[1] & IXGBE_VLVF_VLANID_MASK);
++		/*
++		 * NetScaler: defer the decision about how to
++		 * handle this request to ixgbe_set_vf_vlan in
++		 * all cases.
++		 */
++		if (ixgbe_xsnsmode_get()) {
++			retval = ixgbe_set_vf_vlan(adapter, add, vid, vf);
++		} else {
+ 		if (adapter->vfinfo[vf].pf_vlan) {
+ 			e_warn(drv, "VF %d attempted to override "
+ 			       "administratively set VLAN configuration\n"
+@@ -626,6 +661,7 @@ static int ixgbe_rcv_msg_from_vf(struct 
+ 				hw->mac.ops.set_vlan_anti_spoofing(hw,
+ 								true, vf);
+ 		}
++		}
+ 		break;
+ 	case IXGBE_VF_SET_MACVLAN:
+ 		index = (msgbuf[0] & IXGBE_VT_MSGINFO_MASK) >>
+diff -r 42f9648345e3 drivers/net/ixgbe/ixgbe_sysfs.c
+--- a/drivers/net/ixgbe/ixgbe_sysfs.c
++++ b/drivers/net/ixgbe/ixgbe_sysfs.c
+@@ -43,6 +43,7 @@
+  * driver.  The information presented is READ-ONLY.
+  */
+ 
++
+ static struct net_device_stats *sysfs_get_stats(struct net_device *netdev)
+ {
+ #ifndef HAVE_NETDEV_STATS_IN_NETDEV
+@@ -124,6 +125,54 @@ static int ixgbe_name_to_idx(const char 
+ 	return ((int)(*c - '0'));
+ }
+ 
++
++#define IXGBE_XSNS_CTRL
++#ifdef IXGBE_XSNS_CTRL
++/* Dynamic control of VLAN filtering for Citrix NetScaler
++ */
++static ssize_t ixgbe_xsns_show_vlan_filtering(struct kobject *kobj,
++					      struct kobj_attribute *attr, char *buf)
++{
++	struct ixgbe_adapter *adapter = ixgbe_get_adapter(kobj);
++	struct ixgbe_hw *hw;
++	u32 vlnctrl;
++
++	hw = &adapter->hw;
++
++	vlnctrl = IXGBE_READ_REG(hw, IXGBE_VLNCTRL);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", (vlnctrl & IXGBE_VLNCTRL_VFE)?1:0);
++}
++
++static ssize_t ixgbe_xsns_set_vlan_filtering(struct kobject *kobj,
++					     struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        struct ixgbe_adapter *adapter = ixgbe_get_adapter(kobj);
++        struct ixgbe_hw *hw;
++        u32 vlnctrl;
++
++	int v;
++
++	if (sscanf(buf, "%d", &v) != 1)
++		return -EINVAL;
++
++        hw = &adapter->hw;
++        if (!hw) return -EIO;
++
++	vlnctrl = IXGBE_READ_REG(hw, IXGBE_VLNCTRL);
++	if (v)
++		vlnctrl |= IXGBE_VLNCTRL_VFE;
++	else
++		vlnctrl &= ~IXGBE_VLNCTRL_VFE;
++	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlnctrl);
++	adapter->xsnsvlanfilt = v;
++	printk(KERN_INFO "ixgbe: NetScaler VLAN filtering %s enabled=%d\n", adapter->netdev->name, v);
++
++	return count;
++}
++
++#endif /* IXGBE_XSNS_CTRL */
++
++
+ static ssize_t ixgbe_fwbanner(struct kobject *kobj,
+ 			      struct kobj_attribute *attr, char *buf)
+ {
+@@ -876,6 +925,10 @@ static struct kobj_attribute ixgbe_sysfs
+ 	__ATTR(funcnbr, 0444, ixgbe_funcnbr, NULL);
+ static struct kobj_attribute ixgbe_sysfs_pciebnbr_attr =
+ 	__ATTR(pciebnbr, 0444, ixgbe_pciebnbr, NULL);
++#ifdef IXGBE_XSNS_CTRL
++static struct kobj_attribute ixgbe_sysfs_xs_vlan_filter =
++	__ATTR(vlan-filtering, 0644, ixgbe_xsns_show_vlan_filtering, ixgbe_xsns_set_vlan_filtering);
++#endif
+ 
+ /* Add the attributes into an array, to be added to a group */
+ static struct attribute *therm_attrs[] = {
+@@ -923,6 +976,9 @@ static struct attribute *attrs[] = {
+ 	&ixgbe_sysfs_iovotype_attr.attr,
+ 	&ixgbe_sysfs_funcnbr_attr.attr,
+ 	&ixgbe_sysfs_pciebnbr_attr.attr,
++#ifdef IXGBE_XSNS_CTRL
++	&ixgbe_sysfs_xs_vlan_filter.attr,
++#endif
+ 	NULL
+ };
+ 

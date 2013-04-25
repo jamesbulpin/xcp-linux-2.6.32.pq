@@ -1,0 +1,715 @@
+From da22857fb883e993513a71e9d60207d30f5409b8 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <Ian.Campbell@citrix.com>
+Date: Fri, 27 Mar 2009 09:37:37 +0000
+Subject: [PATCH 04/23] Port blktap2 from 2.6.18 to tip.
+
+---
+ arch/x86/mm/pgtable.c        |    3 +
+ arch/x86/xen/mmu.c           |    7 +++
+ drivers/xen/blktap2/blktap.h  |   13 +++---
+ drivers/xen/blktap2/control.c |    3 +
+ drivers/xen/blktap2/device.c  |   70 +++++++++++++++++----------------
+ drivers/xen/blktap2/request.c |    1 +
+ drivers/xen/blktap2/ring.c    |   30 +++++++--------
+ drivers/xen/blktap2/sysfs.c   |   88 +++++++++++++++++++++++------------------
+ include/xen/blkif.h          |    1 +
+ 9 files changed, 121 insertions(+), 95 deletions(-)
+
+# diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+# index 8e43bdd..9b29f06 100644
+# --- a/arch/x86/mm/pgtable.c
+# +++ b/arch/x86/mm/pgtable.c
+# @@ -267,6 +267,9 @@ out:
+#  
+#  void pgd_free(struct mm_struct *mm, pgd_t *pgd)
+#  {
+# +	/* EEW */
+# +	extern void xen_late_unpin_pgd(struct mm_struct *mm, pgd_t *pgd);
+# +	xen_late_unpin_pgd(mm, pgd);
+#  	pgd_mop_up_pmds(mm, pgd);
+#  	pgd_dtor(pgd);
+#  	paravirt_pgd_free(mm, pgd);
+# diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
+# index 3aa5b09..74ce3c3 100644
+# --- a/arch/x86/xen/mmu.c
+# +++ b/arch/x86/xen/mmu.c
+# @@ -1506,6 +1506,13 @@ static int xen_pgd_alloc(struct mm_struct *mm)
+#  	return ret;
+#  }
+#  
+# +void xen_late_unpin_pgd(struct mm_struct *mm, pgd_t *pgd)
+# +{
+# +	if (xen_page_pinned(pgd))
+# +		__xen_pgd_unpin(mm, pgd);
+# +
+# +}
+# +
+#  static void xen_pgd_free(struct mm_struct *mm, pgd_t *pgd)
+#  {
+#  #ifdef CONFIG_X86_64
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index b1b022d..98dc205 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -1,11 +1,11 @@
+ #ifndef _BLKTAP_H_
+ #define _BLKTAP_H_
+ 
++#include <linux/mm.h>
+ #include <linux/fs.h>
+-#include <linux/poll.h>
+ #include <linux/cdev.h>
+ #include <xen/blkif.h>
+-#include <xen/gnttab.h>
++#include <xen/grant_table.h>
+ 
+ //#define ENABLE_PASSTHROUGH
+ 
+@@ -29,7 +29,6 @@ extern int blktap_debug_level;
+ #define BLKTAP_RING_FD               2
+ #define BLKTAP_RING_VMA              3
+ #define BLKTAP_DEVICE                4
+-#define BLKTAP_SYSFS                 5
+ #define BLKTAP_PAUSE_REQUESTED       6
+ #define BLKTAP_PAUSED                7
+ #define BLKTAP_SHUTDOWN_REQUESTED    8
+@@ -67,7 +66,7 @@ extern int blktap_debug_level;
+  * mmap_alloc is initialised to 2 and should be adjustable on the fly via
+  * sysfs.
+  */
+-#define BLK_RING_SIZE		__RING_SIZE((blkif_sring_t *)0, PAGE_SIZE)
++#define BLK_RING_SIZE		__RING_SIZE((struct blkif_sring *)0, PAGE_SIZE)
+ #define MAX_DYNAMIC_MEM		BLK_RING_SIZE
+ #define MAX_PENDING_REQS	BLK_RING_SIZE
+ #define MMAP_PAGES (MAX_PENDING_REQS * BLKIF_MAX_SEGMENTS_PER_REQUEST)
+@@ -115,7 +114,7 @@ struct blktap_device {
+ 
+ struct blktap_ring {
+ 	struct vm_area_struct         *vma;
+-	blkif_front_ring_t             ring;
++	struct blkif_front_ring             ring;
+ 	struct vm_foreign_map          foreign_map;
+ 	unsigned long                  ring_vstart;
+ 	unsigned long                  user_vstart;
+@@ -125,7 +124,7 @@ struct blktap_ring {
+ 	wait_queue_head_t              poll_wait;
+ 
+ 	dev_t                          devno;
+-	struct class_device           *dev;
++	struct device                 *dev;
+ 	atomic_t                       sysfs_refcnt;
+ 	struct mutex                   sysfs_mutex;
+ };
+@@ -222,7 +221,7 @@ int blktap_device_pause(struct blktap *);
+ int blktap_device_resume(struct blktap *);
+ void blktap_device_restart(struct blktap *);
+ void blktap_device_finish_request(struct blktap *,
+-				  blkif_response_t *,
++				  struct blkif_response *,
+ 				  struct blktap_request *);
+ void blktap_device_fail_pending_requests(struct blktap *);
+ #ifdef ENABLE_PASSTHROUGH
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 6aa625b..1575816 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -1,6 +1,9 @@
+ #include <linux/module.h>
++#include <linux/sched.h>
+ #include <linux/miscdevice.h>
+ 
++#include <asm/uaccess.h>
++
+ #include "blktap.h"
+ 
+ static DEFINE_SPINLOCK(blktap_control_lock);
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 7c5974c..c3b715e 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -1,3 +1,4 @@
++#include <linux/version.h> /* XXX Remove uses of VERSION instead. */
+ #include <linux/fs.h>
+ #include <linux/blkdev.h>
+ #include <linux/cdrom.h>
+@@ -10,6 +11,9 @@
+ #include <xen/xenbus.h>
+ #include <xen/interface/io/blkif.h>
+ 
++#include <asm/xen/page.h>
++#include <asm/xen/hypercall.h>
++
+ #include "blktap.h"
+ 
+ #ifdef CONFIG_XEN_BLKDEV_BACKEND
+@@ -39,10 +43,10 @@ dev_to_blktap(struct blktap_device *dev)
+ }
+ 
+ static int
+-blktap_device_open(struct inode *inode, struct file *filep)
++blktap_device_open(struct block_device * bd, fmode_t mode)
+ {
+ 	struct blktap *tap;
+-	struct blktap_device *dev = inode->i_bdev->bd_disk->private_data;
++	struct blktap_device *dev = bd->bd_disk->private_data;
+ 
+ 	if (!dev)
+ 		return -ENOENT;
+@@ -58,9 +62,9 @@ blktap_device_open(struct inode *inode, struct file *filep)
+ }
+ 
+ static int
+-blktap_device_release(struct inode *inode, struct file *filep)
++blktap_device_release(struct gendisk *gd, fmode_t mode)
+ {
+-	struct blktap_device *dev = inode->i_bdev->bd_disk->private_data;
++	struct blktap_device *dev = gd->private_data;
+ 	struct blktap *tap = dev_to_blktap(dev);
+ 
+ 	dev->users--;
+@@ -88,7 +92,7 @@ blktap_device_getgeo(struct block_device *bd, struct hd_geometry *hg)
+ }
+ 
+ static int
+-blktap_device_ioctl(struct inode *inode, struct file *filep,
++blktap_device_ioctl(struct block_device *bd, fmode_t mode,
+ 		    unsigned command, unsigned long argument)
+ {
+ 	int i;
+@@ -99,7 +103,6 @@ blktap_device_ioctl(struct inode *inode, struct file *filep,
+ 	switch (command) {
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
+ 	case HDIO_GETGEO: {
+-		struct block_device *bd = inode->i_bdev;
+ 		struct hd_geometry geo;
+ 		int ret;
+ 
+@@ -163,7 +166,7 @@ blktap_map_uaddr_fn(pte_t *ptep, struct page *pmd_page,
+ 
+ 	BTDBG("ptep %p -> %012llx\n", ptep, pte_val(*pte));
+ 	set_pte(ptep, *pte);
+-	xen_invlpg(addr);
++	__flush_tlb_single(addr);
+ 	return 0;
+ }
+ 
+@@ -182,7 +185,7 @@ blktap_umap_uaddr_fn(pte_t *ptep, struct page *pmd_page,
+ 
+ 	BTDBG("ptep %p\n", ptep);
+ 	pte_clear(mm, addr, ptep);
+-	xen_invlpg(addr);
++	__flush_tlb_single(addr);
+ 	return 0;
+ }
+ 
+@@ -195,16 +198,18 @@ blktap_umap_uaddr(struct mm_struct *mm, unsigned long address)
+ 
+ static void
+ blktap_device_end_dequeued_request(struct blktap_device *dev,
+-				   struct request *req, int uptodate)
++				   struct request *req, int error)
+ {
++	unsigned long flags;
+ 	int ret;
+ 
+-	ret = end_that_request_first(req, uptodate, req->hard_nr_sectors);
+-	BUG_ON(ret);
++	//spin_lock_irq(&dev->lock);
++	spin_lock_irqsave(dev->gd->queue->queue_lock, flags);
++	ret = __blk_end_request(req, error, blk_rq_bytes(req));
++	spin_unlock_irqrestore(dev->gd->queue->queue_lock, flags);
++	//spin_unlock_irq(&dev->lock);
+ 
+-	spin_lock_irq(&dev->lock);
+-	end_that_request_last(req, uptodate);
+-	spin_unlock_irq(&dev->lock);
++	BUG_ON(ret);
+ }
+ 
+ /*
+@@ -361,7 +366,7 @@ blktap_device_fail_pending_requests(struct blktap *tap)
+ 
+ 		blktap_unmap(tap, request);
+ 		req = (struct request *)(unsigned long)request->id;
+-		blktap_device_end_dequeued_request(dev, req, 0);
++		blktap_device_end_dequeued_request(dev, req, -EIO);
+ 		blktap_request_free(tap, request);
+ 	}
+ 
+@@ -381,10 +386,10 @@ blktap_device_fail_pending_requests(struct blktap *tap)
+  */
+ void
+ blktap_device_finish_request(struct blktap *tap,
+-			     blkif_response_t *res,
++			     struct blkif_response *res,
+ 			     struct blktap_request *request)
+ {
+-	int uptodate;
++	int ret;
+ 	struct request *req;
+ 	struct blktap_device *dev;
+ 
+@@ -393,7 +398,7 @@ blktap_device_finish_request(struct blktap *tap,
+ 	blktap_unmap(tap, request);
+ 
+ 	req = (struct request *)(unsigned long)request->id;
+-	uptodate = (res->status == BLKIF_RSP_OKAY);
++	ret = res->status == BLKIF_RSP_OKAY ? 0 : -EIO;
+ 
+ 	BTDBG("req %p res status %d operation %d/%d id %lld\n", req,
+ 		res->status, res->operation, request->operation, res->id);
+@@ -404,7 +409,7 @@ blktap_device_finish_request(struct blktap *tap,
+ 		if (unlikely(res->status != BLKIF_RSP_OKAY))
+ 			BTERR("Bad return from device data "
+ 				"request: %x\n", res->status);
+-		blktap_device_end_dequeued_request(dev, req, uptodate);
++		blktap_device_end_dequeued_request(dev, req, ret);
+ 		break;
+ 	default:
+ 		BUG();
+@@ -416,7 +421,7 @@ blktap_device_finish_request(struct blktap *tap,
+ static int
+ blktap_prep_foreign(struct blktap *tap,
+ 		    struct blktap_request *request,
+-		    blkif_request_t *blkif_req,
++		    struct blkif_request *blkif_req,
+ 		    unsigned int seg, struct page *page,
+ 		    struct blktap_grant_table *table)
+ {
+@@ -464,7 +469,7 @@ blktap_prep_foreign(struct blktap *tap,
+ static int
+ blktap_map_foreign(struct blktap *tap,
+ 		   struct blktap_request *request,
+-		   blkif_request_t *blkif_req,
++		   struct blkif_request *blkif_req,
+ 		   struct blktap_grant_table *table)
+ {
+ 	struct page *page;
+@@ -567,10 +572,10 @@ blktap_device_process_request(struct blktap *tap,
+ 			      struct blktap_request *request,
+ 			      struct request *req)
+ {
+-	struct bio *bio;
+ 	struct page *page;
+ 	struct bio_vec *bvec;
+-	int idx, usr_idx, err;
++	int usr_idx, err;
++	struct req_iterator iter;
+ 	struct blktap_ring *ring;
+ 	struct blktap_grant_table table;
+ 	unsigned int fsect, lsect, nr_sects;
+@@ -599,8 +604,7 @@ blktap_device_process_request(struct blktap *tap,
+ 	nr_sects = 0;
+ 	request->nr_pages = 0;
+ 	blkif_req.nr_segments = 0;
+-	rq_for_each_bio(bio, req) {
+-		bio_for_each_segment(bvec, bio, idx) {
++	rq_for_each_segment(bvec, req, iter) {
+ 			BUG_ON(blkif_req.nr_segments ==
+ 			       BLKIF_MAX_SEGMENTS_PER_REQUEST);
+ 
+@@ -649,7 +653,6 @@ blktap_device_process_request(struct blktap *tap,
+ 
+ 			blkif_req.nr_segments++;
+ 			request->nr_pages++;
+-		}
+ 	}
+ 
+ 	if (blktap_map_foreign(tap, request, &blkif_req, &table))
+@@ -777,7 +780,7 @@ static void
+ blktap_device_run_queue(struct blktap *tap)
+ {
+ 	int queued, err;
+-	request_queue_t *rq;
++	struct request_queue *rq;
+ 	struct request *req;
+ 	struct blktap_ring *ring;
+ 	struct blktap_device *dev;
+@@ -825,7 +828,8 @@ blktap_device_run_queue(struct blktap *tap)
+ 
+ 		BTDBG("req %p: dev %d cmd %p, sec 0x%llx, (0x%x/0x%lx) "
+ 		      "buffer:%p [%s], pending: %p\n", req, tap->minor,
+-		      req->cmd, req->sector, req->current_nr_sectors,
++		      req->cmd, (unsigned long long)req->sector,
++		      req->current_nr_sectors,
+ 		      req->nr_sectors, req->buffer,
+ 		      rq_data_dir(req) ? "write" : "read", request);
+ 
+@@ -838,7 +842,7 @@ blktap_device_run_queue(struct blktap *tap)
+ 		if (!err)
+ 			queued++;
+ 		else {
+-			blktap_device_end_dequeued_request(dev, req, 0);
++			blktap_device_end_dequeued_request(dev, req, -EIO);
+ 			blktap_request_free(tap, request);
+ 		}
+ 
+@@ -854,7 +858,7 @@ blktap_device_run_queue(struct blktap *tap)
+  * dev->lock held on entry
+  */
+ static void
+-blktap_device_do_request(request_queue_t *rq)
++blktap_device_do_request(struct request_queue *rq)
+ {
+ 	struct request *req;
+ 	struct blktap *tap;
+@@ -880,7 +884,8 @@ blktap_device_do_request(request_queue_t *rq)
+ fail:
+ 	while ((req = elv_next_request(rq))) {
+ 		BTERR("device closed: failing secs %llu - %llu\n",
+-		      req->sector, req->sector + req->nr_sectors);
++		      (unsigned long long)req->sector,
++		      (unsigned long long)req->sector + req->nr_sectors);
+ 		end_request(req, 0);
+ 	}
+ }
+@@ -1127,6 +1132,5 @@ void
+ blktap_device_free(void)
+ {
+ 	if (blktap_device_major)
+-		if (unregister_blkdev(blktap_device_major, "tapdev"))
+-			BTERR("blktap device unregister failed\n");
++		unregister_blkdev(blktap_device_major, "tapdev");
+ }
+diff --git a/drivers/xen/blktap2/request.c b/drivers/xen/blktap2/request.c
+index f48847c..ec1ed00 100644
+--- a/drivers/xen/blktap2/request.c
++++ b/drivers/xen/blktap2/request.c
+@@ -1,5 +1,6 @@
+ #include <linux/spinlock.h>
+ #include <xen/balloon.h>
++#include <linux/sched.h>
+ 
+ #include "blktap.h"
+ 
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index d6b5d42..b523fec 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -1,5 +1,10 @@
+ #include <linux/module.h>
+ #include <linux/signal.h>
++#include <linux/sched.h>
++#include <linux/poll.h>
++
++#include <asm/xen/page.h>
++#include <asm/xen/hypercall.h>
+ 
+ #include "blktap.h"
+ 
+@@ -25,7 +30,7 @@ blktap_read_ring(struct blktap *tap)
+ 	/* This is called to read responses from the ring. */
+ 	int usr_idx;
+ 	RING_IDX rc, rp;
+-	blkif_response_t res;
++	struct blkif_response res;
+ 	struct blktap_ring *ring;
+ 	struct blktap_request *request;
+ 
+@@ -66,16 +71,9 @@ blktap_read_ring(struct blktap *tap)
+ 	return 0;
+ }
+ 
+-static struct page *
+-blktap_ring_nopage(struct vm_area_struct *vma,
+-		   unsigned long address, int *type)
++static int blktap_ring_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ {
+-	/*
+-	 * if the page has not been mapped in by the driver then return
+-	 * NOPAGE_SIGBUS to the domain.
+-	 */
+-
+-	return NOPAGE_SIGBUS;
++	return VM_FAULT_SIGBUS;
+ }
+ 
+ static pte_t
+@@ -139,9 +137,9 @@ blktap_ring_clear_pte(struct vm_area_struct *vma,
+ 		BUG_ON(xen_feature(XENFEAT_auto_translated_physmap));
+ 
+ 		copy = *ptep;
+-		gnttab_set_unmap_op(&unmap[count], virt_to_machine(ptep), 
+-				    GNTMAP_host_map 
+-				    | GNTMAP_application_map 
++		gnttab_set_unmap_op(&unmap[count], virt_to_machine(ptep).maddr,
++				    GNTMAP_host_map
++				    | GNTMAP_application_map
+ 				    | GNTMAP_contains_pte,
+ 				    khandle->user);
+ 		count++;
+@@ -205,7 +203,7 @@ blktap_ring_vm_close(struct vm_area_struct *vma)
+ static struct vm_operations_struct blktap_ring_vm_operations = {
+ 	.close    = blktap_ring_vm_close,
+ 	.unmap    = blktap_ring_vm_unmap,
+-	.nopage   = blktap_ring_nopage,
++	.fault   = blktap_ring_fault,
+ 	.zap_pte  = blktap_ring_clear_pte,
+ };
+ 
+@@ -274,7 +272,7 @@ blktap_ring_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	int size, err;
+ 	struct page **map;
+ 	struct blktap *tap;
+-	blkif_sring_t *sring;
++	struct blkif_sring *sring;
+ 	struct blktap_ring *ring;
+ 
+ 	tap   = filp->private_data;
+@@ -293,7 +291,7 @@ blktap_ring_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	}
+ 
+ 	/* Allocate the fe ring. */
+-	sring = (blkif_sring_t *)get_zeroed_page(GFP_KERNEL);
++	sring = (struct blkif_sring *)get_zeroed_page(GFP_KERNEL);
+ 	if (!sring) {
+ 		BTERR("Couldn't alloc sring.\n");
+ 		goto fail_mem;
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 8b56c7e..070d77a 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -1,6 +1,7 @@
+ #include <linux/types.h>
+ #include <linux/device.h>
+ #include <linux/module.h>
++#include <linux/sched.h>
+ 
+ #include "blktap.h"
+ 
+@@ -36,16 +37,18 @@ blktap_sysfs_exit(struct blktap *tap)
+ 	blktap_sysfs_put(tap);
+ }
+ 
+-static ssize_t blktap_sysfs_pause_device(struct class_device *, const char *, size_t);
++#define CLASS_DEVICE_ATTR(a,b,c,d) DEVICE_ATTR(a,b,c,d)
++
++static ssize_t blktap_sysfs_pause_device(struct device *, struct device_attribute *, const char *, size_t);
+ CLASS_DEVICE_ATTR(pause, S_IWUSR, NULL, blktap_sysfs_pause_device);
+-static ssize_t blktap_sysfs_resume_device(struct class_device *, const char *, size_t);
++static ssize_t blktap_sysfs_resume_device(struct device *, struct device_attribute *, const char *, size_t);
+ CLASS_DEVICE_ATTR(resume, S_IWUSR, NULL, blktap_sysfs_resume_device);
+ 
+ static ssize_t
+-blktap_sysfs_set_name(struct class_device *dev, const char *buf, size_t size)
++blktap_sysfs_set_name(struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
+ {
+ 	int err;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	blktap_sysfs_enter(tap);
+ 
+@@ -79,10 +82,10 @@ out:
+ }
+ 
+ static ssize_t
+-blktap_sysfs_get_name(struct class_device *dev, char *buf)
++blktap_sysfs_get_name(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	ssize_t size;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	blktap_sysfs_enter(tap);
+ 
+@@ -101,11 +104,12 @@ CLASS_DEVICE_ATTR(name, S_IRUSR | S_IWUSR,
+ 		  blktap_sysfs_get_name, blktap_sysfs_set_name);
+ 
+ static ssize_t
+-blktap_sysfs_remove_device(struct class_device *dev,
++blktap_sysfs_remove_device(struct device *dev,
++			   struct device_attribute *attr,
+ 			   const char *buf, size_t size)
+ {
+ 	int err;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	if (!tap->ring.dev)
+ 		return size;
+@@ -120,11 +124,12 @@ blktap_sysfs_remove_device(struct class_device *dev,
+ CLASS_DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
+ 
+ static ssize_t
+-blktap_sysfs_pause_device(struct class_device *dev,
++blktap_sysfs_pause_device(struct device *dev,
++			  struct device_attribute *attr,
+ 			  const char *buf, size_t size)
+ {
+ 	int err;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	blktap_sysfs_enter(tap);
+ 
+@@ -149,8 +154,8 @@ blktap_sysfs_pause_device(struct class_device *dev,
+ 
+ 	err = blktap_device_pause(tap);
+ 	if (!err) {
+-		class_device_remove_file(dev, &class_device_attr_pause);
+-		class_device_create_file(dev, &class_device_attr_resume);
++		device_remove_file(dev, &dev_attr_pause);
++		device_create_file(dev, &dev_attr_resume);
+ 	}
+ 
+ out:
+@@ -160,11 +165,12 @@ out:
+ }
+ 
+ static ssize_t
+-blktap_sysfs_resume_device(struct class_device *dev,
++blktap_sysfs_resume_device(struct device *dev,
++			   struct device_attribute *attr,
+ 			   const char *buf, size_t size)
+ {
+ 	int err;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	blktap_sysfs_enter(tap);
+ 
+@@ -181,8 +187,8 @@ blktap_sysfs_resume_device(struct class_device *dev,
+ 
+ 	err = blktap_device_resume(tap);
+ 	if (!err) {
+-		class_device_remove_file(dev, &class_device_attr_resume);
+-		class_device_create_file(dev, &class_device_attr_pause);
++		device_remove_file(dev, &dev_attr_resume);
++		device_create_file(dev, &dev_attr_pause);
+ 	}
+ 
+ out:
+@@ -194,12 +200,12 @@ out:
+ 
+ #ifdef ENABLE_PASSTHROUGH
+ static ssize_t
+-blktap_sysfs_enable_passthrough(struct class_device *dev,
++blktap_sysfs_enable_passthrough(struct device *dev,
+ 				const char *buf, size_t size)
+ {
+ 	int err;
+ 	unsigned major, minor;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	BTINFO("passthrough request enabled\n");
+ 
+@@ -237,11 +243,11 @@ out:
+ #endif
+ 
+ static ssize_t
+-blktap_sysfs_debug_device(struct class_device *dev, char *buf)
++blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	char *tmp;
+ 	int i, ret;
+-	struct blktap *tap = (struct blktap *)dev->class_data;
++	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+ 
+ 	tmp = buf;
+ 	blktap_sysfs_get(tap);
+@@ -291,29 +297,27 @@ int
+ blktap_sysfs_create(struct blktap *tap)
+ {
+ 	struct blktap_ring *ring;
+-	struct class_device *dev;
++	struct device *dev;
+ 
+ 	if (!class)
+ 		return -ENODEV;
+ 
+ 	ring = &tap->ring;
+ 
+-	dev = class_device_create(class, NULL, ring->devno,
+-				  NULL, "blktap%d", tap->minor);
++	dev = device_create(class, NULL, ring->devno,
++			    tap, "blktap%d", tap->minor);
+ 	if (IS_ERR(dev))
+ 		return PTR_ERR(dev);
+ 
+ 	ring->dev       = dev;
+-	dev->class_data = tap;
+ 
+ 	mutex_init(&ring->sysfs_mutex);
+ 	atomic_set(&ring->sysfs_refcnt, 0);
+-	set_bit(BLKTAP_SYSFS, &tap->dev_inuse);
+ 
+-	class_device_create_file(dev, &class_device_attr_name);
+-	class_device_create_file(dev, &class_device_attr_remove);
+-	class_device_create_file(dev, &class_device_attr_pause);
+-	class_device_create_file(dev, &class_device_attr_debug);
++	device_create_file(dev, &dev_attr_name);
++	device_create_file(dev, &dev_attr_remove);
++	device_create_file(dev, &dev_attr_pause);
++	device_create_file(dev, &dev_attr_debug);
+ 
+ 	return 0;
+ }
+@@ -322,7 +326,7 @@ int
+ blktap_sysfs_destroy(struct blktap *tap)
+ {
+ 	struct blktap_ring *ring;
+-	struct class_device *dev;
++	struct device *dev;
+ 
+ 	ring = &tap->ring;
+ 	dev  = ring->dev;
+@@ -334,19 +338,23 @@ blktap_sysfs_destroy(struct blktap *tap)
+ 				     !atomic_read(&tap->ring.sysfs_refcnt)))
+ 		return -EAGAIN;
+ 
+-	/* XXX: is it safe to remove the class from a sysfs attribute? */
+-	class_device_remove_file(dev, &class_device_attr_name);
+-	class_device_remove_file(dev, &class_device_attr_remove);
+-	class_device_remove_file(dev, &class_device_attr_pause);
+-	class_device_remove_file(dev, &class_device_attr_resume);
+-	class_device_remove_file(dev, &class_device_attr_debug);
+-	class_device_destroy(class, ring->devno);
+-
+-	clear_bit(BLKTAP_SYSFS, &tap->dev_inuse);
++	printk(KERN_CRIT "%s: putting dev %p\n", __func__, dev);
++	put_device(dev);
+ 
+ 	return 0;
+ }
+ 
++static void
++blktap_sysfs_device_release(struct device *dev)
++{
++	printk(KERN_CRIT "%s: removing attributes for dev %p\n", __func__, dev);
++	device_remove_file(dev, &dev_attr_name);
++	device_remove_file(dev, &dev_attr_remove);
++	device_remove_file(dev, &dev_attr_pause);
++	device_remove_file(dev, &dev_attr_resume);
++	device_remove_file(dev, &dev_attr_debug);
++//	device_destroy(class, ring->devno);
++}
+ static ssize_t
+ blktap_sysfs_show_verbosity(struct class *class, char *buf)
+ {
+@@ -417,6 +425,8 @@ blktap_sysfs_init(void)
+ 	if (IS_ERR(cls))
+ 		return PTR_ERR(cls);
+ 
++	cls->dev_release = blktap_sysfs_device_release;
++
+ 	class_create_file(cls, &class_attr_verbosity);
+ 	class_create_file(cls, &class_attr_devices);
+ 
+diff --git a/include/xen/blkif.h b/include/xen/blkif.h
+index d274280..7172081 100644
+--- a/include/xen/blkif.h
++++ b/include/xen/blkif.h
+@@ -21,6 +21,7 @@
+ #ifndef __XEN_BLKIF_H__
+ #define __XEN_BLKIF_H__
+ 
++#include <xen/interface/xen.h>
+ #include <xen/interface/io/ring.h>
+ #include <xen/interface/io/blkif.h>
+ #include <xen/interface/io/protocols.h>
+-- 
+1.7.0.4
+

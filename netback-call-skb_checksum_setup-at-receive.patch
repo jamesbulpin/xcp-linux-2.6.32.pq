@@ -1,0 +1,113 @@
+Ensure that every skb which is passed to the generic network stack has
+the checksum fields correctly set. This avoids the need to patch
+generic code.
+
+diff -r 8a57936f5555 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/drivers/xen/netback/netback.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -1421,6 +1421,18 @@
+ 		netif->stats.rx_bytes += skb->len;
+ 		netif->stats.rx_packets++;
+ 
++		if (skb->ip_summed == CHECKSUM_PARTIAL) {
++			if (skb_checksum_setup(skb)) {
++				DPRINTK("Can't setup checksum in net_tx_action\n");
++				kfree_skb(skb);
++				continue;
++			}
++		} else if (skb_is_gso(skb)) {
++			DPRINTK("Dropping GSO but not CHECKSUM_PARTIAL skb\n");
++			kfree_skb(skb);
++			continue;
++		}
++
+ 		if (unlikely(netbk_copy_skb_mode == NETBK_ALWAYS_COPY_SKB) &&
+ 		    unlikely(skb_linearize(skb))) {
+ 			DPRINTK("Can't linearize skb in net_tx_action.\n");
+diff -r 8a57936f5555 drivers/xen/netfront/netfront.c
+--- a/drivers/xen/netfront/netfront.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/drivers/xen/netfront/netfront.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -1479,6 +1479,18 @@
+ 		/* Ethernet work: Delayed to here as it peeks the header. */
+ 		skb->protocol = eth_type_trans(skb, dev);
+ 
++		if (skb->ip_summed == CHECKSUM_PARTIAL) {
++			if (skb_checksum_setup(skb)) {
++				kfree_skb(skb);
++				dev->stats.rx_errors++;
++				continue;
++			}
++		} else if (skb_is_gso(skb)) {
++			kfree_skb(skb);
++			dev->stats.rx_errors++;
++			continue;
++		}
++
+ 		/* Pass it up. */
+ 		netif_receive_skb(skb);
+ 		dev->last_rx = jiffies;
+diff -r 8a57936f5555 net/core/dev.c
+--- a/net/core/dev.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/net/core/dev.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -1762,8 +1762,8 @@
+ 	if (skb->protocol != htons(ETH_P_IP))
+ 		goto out;
+ 
+-	iph = ip_hdr(skb);
+-	th = skb_network_header(skb) + 4 * iph->ihl;
++	iph = (void *)skb->data;
++	th = skb->data + 4 * iph->ihl;
+ 	if (th >= skb_tail_pointer(skb))
+ 		goto out;
+ 
+@@ -1829,12 +1829,6 @@
+ 	struct netdev_queue *txq;
+ 	struct Qdisc *q;
+ 	int rc = -ENOMEM;
+-
+- 	/* If a checksum-deferred packet is forwarded to a device that needs a
+- 	 * checksum, correct the pointers and force checksumming.
+- 	 */
+- 	if (skb_checksum_setup(skb))
+- 		goto out_kfree_skb;
+ 
+ 	/* GSO will handle the following emulations directly. */
+ 	if (netif_needs_gso(dev, skb))
+diff -r 8a57936f5555 net/ipv4/netfilter/nf_nat_proto_tcp.c
+--- a/net/ipv4/netfilter/nf_nat_proto_tcp.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/net/ipv4/netfilter/nf_nat_proto_tcp.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -75,9 +75,6 @@
+ 	if (hdrsize < sizeof(*hdr))
+ 		return true;
+ 
+-	if (skb_checksum_setup(skb))
+-		return false;
+-
+ 	inet_proto_csum_replace4(&hdr->check, skb, oldip, newip, 1);
+ 	inet_proto_csum_replace2(&hdr->check, skb, oldport, newport, 0);
+ 	return true;
+diff -r 8a57936f5555 net/ipv4/netfilter/nf_nat_proto_udp.c
+--- a/net/ipv4/netfilter/nf_nat_proto_udp.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/net/ipv4/netfilter/nf_nat_proto_udp.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -61,9 +61,6 @@
+ 		portptr = &hdr->dest;
+ 	}
+ 
+-	if (skb_checksum_setup(skb))
+-		return false;
+-
+ 	if (hdr->check || skb->ip_summed == CHECKSUM_PARTIAL) {
+ 		inet_proto_csum_replace4(&hdr->check, skb, oldip, newip, 1);
+ 		inet_proto_csum_replace2(&hdr->check, skb, *portptr, newport,
+diff -r 8a57936f5555 net/ipv4/xfrm4_output.c
+--- a/net/ipv4/xfrm4_output.c	Fri Aug 07 11:43:25 2009 +0100
++++ b/net/ipv4/xfrm4_output.c	Fri Aug 07 11:44:50 2009 +0100
+@@ -81,7 +81,7 @@
+ #endif
+ 
+ 	skb->protocol = htons(ETH_P_IP);
+-	return skb_checksum_setup(skb) ?: xfrm_output(skb);
++	return xfrm_output(skb);
+ }
+ 
+ int xfrm4_output(struct sk_buff *skb)

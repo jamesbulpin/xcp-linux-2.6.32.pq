@@ -1,0 +1,29 @@
+diff -r d0bf5b4297d0 drivers/xen/pciback/pciback_ops.c
+--- a/drivers/xen/pciback/pciback_ops.c	Thu Aug 20 11:46:16 2009 +0100
++++ b/drivers/xen/pciback/pciback_ops.c	Mon Aug 24 15:22:09 2009 +0100
+@@ -472,7 +472,13 @@
+ 			pciback_do_pci_flr(dev, dev_data->af_flr_offset, 1);
+ 			break;
+ 		}
+-		
++                /* Quirk for the VF of Intel 82599 10GbE Controller */
++                if (dev->vendor == PCIBACK_VENDOR_INTEL &&
++                        dev->device == PCI_DEVICE_ID_INTEL_82599) {
++                        pciback_do_pcie_flr(dev, dev_data->exp_flr_offset); 
++                        break;
++                }
++
+ 		/* Next for integrated devices on the host bus 0, try some other methods */
+ 		if (dev->bus->number == 0) {
+ 			err = pciback_do_vendor_specific_reset(dev);
+diff -r d0bf5b4297d0 include/linux/pci_ids.h
+--- a/include/linux/pci_ids.h	Thu Aug 20 11:46:16 2009 +0100
++++ b/include/linux/pci_ids.h	Mon Aug 24 15:22:09 2009 +0100
+@@ -2506,6 +2506,7 @@
+ #define PCI_DEVICE_ID_INTEL_MCHP45  0x2e20
+ #define PCI_DEVICE_ID_INTEL_GMCHG41 0x2e30
+ #define PCI_DEVICE_ID_INTEL_GMCHGM45 0x2a40
++#define PCI_DEVICE_ID_INTEL_82599 0x10ed
+ 
+ #define PCI_DEVICE_ID_INTEL_GMCHG41 0x2e30
+ 

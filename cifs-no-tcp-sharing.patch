@@ -1,0 +1,36 @@
+diff -r 230345595286 fs/cifs/connect.c
+--- a/fs/cifs/connect.c	Mon May 17 16:51:37 2010 -0700
++++ b/fs/cifs/connect.c	Mon May 17 17:04:41 2010 -0700
+@@ -49,6 +49,7 @@
+ 
+ #define CIFS_PORT 445
+ #define RFC1001_PORT 139
++#define TCPSESS_NOSHARING 1
+ 
+ extern void SMBNTencrypt(unsigned char *passwd, unsigned char *c8,
+ 			 unsigned char *p24);
+@@ -1349,6 +1350,16 @@
+ 	return 0;
+ }
+ 
++#ifdef TCPSESS_NOSHARING
++/* not sharing existing TCP connections */
++static inline struct TCP_Server_Info *
++cifs_find_tcp_session(struct sockaddr_storage *addr, unsigned short int port)
++{
++        return NULL;
++}
++
++#else
++
+ static struct TCP_Server_Info *
+ cifs_find_tcp_session(struct sockaddr_storage *addr, unsigned short int port)
+ {
+@@ -1410,6 +1421,7 @@
+ 	write_unlock(&cifs_tcp_ses_lock);
+ 	return NULL;
+ }
++#endif //TCPSESS_NOSHARING
+ 
+ static void
+ cifs_put_tcp_session(struct TCP_Server_Info *server)

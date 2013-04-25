@@ -1,0 +1,183 @@
+blkfront: Clean up vbd release
+
+ * Current blkfront_closing is rather a xlvbd_release_gendisk.
+   Renamed in preparation of later patches (need the name again).
+
+ * Removed the misleading comment -- this only applied to the backend
+   switch handler, and the queue is already flushed btw.
+
+ * Break out the xenbus call, callers know better when to switch
+   frontend state.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+diff -r b4f793ff1e09 drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c	Sat May 22 16:28:11 2010 -0700
++++ b/drivers/xen/blkfront/blkfront.c	Sat May 22 16:39:30 2010 -0700
+@@ -63,7 +63,6 @@
+ #define GRANT_INVALID_REF	0
+ 
+ static void connect(struct blkfront_info *);
+-static void blkfront_closing(struct blkfront_info *);
+ static int blkfront_remove(struct xenbus_device *);
+ static int talk_to_backend(struct xenbus_device *, struct blkfront_info *);
+ static int setup_blkring(struct xenbus_device *, struct blkfront_info *);
+@@ -293,21 +292,15 @@
+ 		if (bd == NULL)
+ 			xenbus_dev_fatal(dev, -ENODEV, "bdget failed");
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
+-		down(&bd->bd_sem);
+-#else
+ 		mutex_lock(&bd->bd_mutex);
+-#endif
+ 		if (info->users > 0)
+ 			xenbus_dev_error(dev, -EBUSY,
+ 					 "Device in use; refusing to close");
+-		else
+-			blkfront_closing(info);
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
+-		up(&bd->bd_sem);
+-#else
++		else {
++			xlvbd_release_gendisk(info);
++			xenbus_frontend_closed(info->xbdev);
++		}
+ 		mutex_unlock(&bd->bd_mutex);
+-#endif
+ 		bdput(bd);
+ 		break;
+ 	}
+@@ -379,41 +372,6 @@
+ 	info->is_ready = 1;
+ }
+ 
+-/**
+- * Handle the change of state of the backend to Closing.  We must delete our
+- * device-layer structures now, to ensure that writes are flushed through to
+- * the backend.  Once is this done, we can switch to Closed in
+- * acknowledgement.
+- */
+-static void blkfront_closing(struct blkfront_info *info)
+-{
+-	unsigned long flags;
+-
+-	DPRINTK("blkfront_closing: %d removed\n", info->vdevice);
+-
+-	if (info->rq == NULL)
+-		goto out;
+-
+-	spin_lock_irqsave(&blkif_io_lock, flags);
+-	/* No more blkif_request(). */
+-	blk_stop_queue(info->rq);
+-	/* No more gnttab callback work. */
+-	gnttab_cancel_free_callback(&info->callback);
+-	spin_unlock_irqrestore(&blkif_io_lock, flags);
+-
+-	/* Flush gnttab callback work. Must be done with no locks held. */
+-	flush_scheduled_work();
+-
+-	xlvbd_sysfs_delif(info);
+-
+-	xlvbd_del(info);
+-
+- out:
+-	if (info->xbdev)
+-		xenbus_frontend_closed(info->xbdev);
+-}
+-
+-
+ static int blkfront_remove(struct xenbus_device *dev)
+ {
+ 	struct blkfront_info *info = dev->dev.driver_data;
+@@ -506,11 +464,13 @@
+ 		struct xenbus_device * dev = info->xbdev;
+ 
+ 		if (!dev) {
+-			blkfront_closing(info);
++			xlvbd_release_gendisk(info);
+ 			kfree(info);
+ 		} else if (xenbus_read_driver_state(dev->otherend)
+-			   == XenbusStateClosing && info->is_ready)
+-			blkfront_closing(info);
++			   == XenbusStateClosing && info->is_ready) {
++			xlvbd_release_gendisk(info);
++			xenbus_frontend_closed(dev);
++		}
+ 	}
+ 	return 0;
+ }
+diff -r b4f793ff1e09 drivers/xen/blkfront/block.h
+--- a/drivers/xen/blkfront/block.h	Sat May 22 16:28:11 2010 -0700
++++ b/drivers/xen/blkfront/block.h	Sat May 22 16:39:30 2010 -0700
+@@ -144,6 +144,8 @@
+ #ifdef CONFIG_SYSFS
+ int xlvbd_sysfs_addif(struct blkfront_info *info);
+ void xlvbd_sysfs_delif(struct blkfront_info *info);
++void xlvbd_release_gendisk(struct blkfront_info *info);
++
+ #else
+ static inline int xlvbd_sysfs_addif(struct blkfront_info *info)
+ {
+diff -r b4f793ff1e09 drivers/xen/blkfront/vbd.c
+--- a/drivers/xen/blkfront/vbd.c	Sat May 22 16:28:11 2010 -0700
++++ b/drivers/xen/blkfront/vbd.c	Sat May 22 16:39:30 2010 -0700
+@@ -451,16 +451,12 @@
+ {
+ 	unsigned int minor, nr_minors;
+ 
+-	if (info->mi == NULL)
+-		return;
++	BUG_ON(info->gd == NULL);
++	del_gendisk(info->gd);
+ 
+-	BUG_ON(info->gd == NULL);
++	BUG_ON(info->mi == NULL);
+ 	minor = info->gd->first_minor;
+ 	nr_minors = info->gd->minors;
+-	del_gendisk(info->gd);
+-	put_disk(info->gd);
+-	info->gd = NULL;
+-
+ 	xlbd_release_minors(info->mi, minor, nr_minors);
+ 	xlbd_put_major_info(info->mi);
+ 	info->mi = NULL;
+@@ -468,8 +464,37 @@
+ 	BUG_ON(info->rq == NULL);
+ 	blk_cleanup_queue(info->rq);
+ 	info->rq = NULL;
++
++	put_disk(info->gd);
++	info->gd = NULL;
+ }
+ 
++void
++xlvbd_release_gendisk(struct blkfront_info *info)
++{
++	unsigned long flags;
++
++	if (info->rq == NULL)
++		return;
++
++	spin_lock_irqsave(&blkif_io_lock, flags);
++
++	/* No more blkif_request(). */
++	blk_stop_queue(info->rq);
++
++	/* No more gnttab callback work. */
++	gnttab_cancel_free_callback(&info->callback);
++	spin_unlock_irqrestore(&blkif_io_lock, flags);
++
++	/* Flush gnttab callback work. Must be done with no locks held. */
++	flush_scheduled_work();
++
++	xlvbd_sysfs_delif(info);
++
++	xlvbd_del(info);
++}
++
++
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+ int
+ xlvbd_barrier(struct blkfront_info *info)

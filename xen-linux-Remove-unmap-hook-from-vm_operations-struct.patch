@@ -1,0 +1,76 @@
+From 114e65304224d232f8db3b05d163233dd00beb70 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Thu, 3 Jun 2010 03:12:34 +0000
+Subject: [PATCH 2/7] linux: Remove unmap hook from vm_operations struct
+
+linux: Remove unmap hook from vm_operations struct.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ include/linux/mm.h |    4 ----
+ mm/mmap.c          |   12 +-----------
+ 2 files changed, 1 insertions(+), 15 deletions(-)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 8cee297..e7f6e9c 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -206,10 +206,6 @@ struct vm_operations_struct {
+ 	 * original value of @ptep. */
+ 	pte_t (*zap_pte)(struct vm_area_struct *vma, 
+ 			 unsigned long addr, pte_t *ptep, int is_fullmm);
+-
+-	/* called before close() to indicate no more pages should be mapped */
+-	void (*unmap)(struct vm_area_struct *area);
+-
+ #ifdef CONFIG_NUMA
+ 	/*
+ 	 * set_policy() op must add a reference to any non-NULL @new mempolicy
+diff --git a/mm/mmap.c b/mm/mmap.c
+index e0c196d..34579b2 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1788,12 +1788,6 @@ static void unmap_region(struct mm_struct *mm,
+ 	tlb_finish_mmu(tlb, start, end);
+ }
+ 
+-static inline void unmap_vma(struct vm_area_struct *vma)
+-{
+-	if (unlikely(vma->vm_ops && vma->vm_ops->unmap))
+-		vma->vm_ops->unmap(vma);
+-}
+-
+ /*
+  * Create a list of vma's touched by the unmap, removing them from the mm's
+  * vma list as we go..
+@@ -1809,7 +1803,6 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	insertion_point = (prev ? &prev->vm_next : &mm->mmap);
+ 	do {
+ 		rb_erase(&vma->vm_rb, &mm->mm_rb);
+-		unmap_vma(vma);
+ 		mm->map_count--;
+ 		tail_vma = vma;
+ 		vma = vma->vm_next;
+@@ -2092,7 +2085,7 @@ EXPORT_SYMBOL(do_brk);
+ void exit_mmap(struct mm_struct *mm)
+ {
+ 	struct mmu_gather *tlb;
+-	struct vm_area_struct *vma, *vma_tmp;
++	struct vm_area_struct *vma;
+ 	unsigned long nr_accounted = 0;
+ 	unsigned long end;
+ 
+@@ -2114,9 +2107,6 @@ void exit_mmap(struct mm_struct *mm)
+ 	if (!vma)	/* Can happen if dup_mmap() received an OOM */
+ 		return;
+ 
+-	for (vma_tmp = mm->mmap; vma_tmp; vma_tmp = vma_tmp->vm_next)
+-		unmap_vma(vma_tmp);
+-
+ 	lru_add_drain();
+ 	flush_cache_mm(mm);
+ 	tlb = tlb_gather_mmu(mm, 1);
+-- 
+1.7.0.4
+

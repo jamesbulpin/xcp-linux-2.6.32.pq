@@ -1,0 +1,1738 @@
+Create a guest receive side 'protocol 1'.
+
+This means that we need to use a jump table through the netif
+for start_xmit and a few other functions. The new code is in
+the module drivers/xen/netback/tx.c. This patch will need some
+sanitizing before it can go upstream.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+* * *
+* * *
+
+diff -r 917285fe312b drivers/xen/netback/Makefile
+--- a/drivers/xen/netback/Makefile	Fri Feb 03 17:02:31 2012 +0000
++++ b/drivers/xen/netback/Makefile	Mon Feb 06 10:46:46 2012 +0000
+@@ -1,3 +1,3 @@
+ obj-$(CONFIG_XEN_NETDEV_BACKEND) := xen-netback.o
+ 
+-xen-netback-y := netback.o xenbus.o interface.o accel.o
++xen-netback-y := netback.o xenbus.o interface.o accel.o tx.o
+diff -r 917285fe312b drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Fri Feb 03 17:02:31 2012 +0000
++++ b/drivers/xen/netback/common.h	Mon Feb 06 10:46:46 2012 +0000
+@@ -61,6 +61,39 @@ enum {
+ 	NETBK_GSO_PREFIX
+ };
+ 
++struct xen_comms {
++	struct vm_struct		*ring_area;
++	grant_ref_t			shmem_ref;
++	grant_handle_t			shmem_handle;
++};
++
++#define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
++#define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
++
++struct netbk_tag {
++	struct netbk_tag *next;
++	unsigned short id;
++	struct sk_buff *skb;
++	grant_ref_t gref;
++};
++
++#define	NETBK_MIN_RX_PROTOCOL 0
++#define	NETBK_MAX_RX_PROTOCOL 1
++
++struct netbk_protocol0 {
++	struct xen_netif_rx_back_ring back;
++	RING_IDX rx_req_cons_peek;
++};
++
++struct netbk_protocol1 {
++	struct xen_netif_tx_front_ring front;
++	spinlock_t lock;
++	grant_ref_t gref_head;
++	struct netbk_tag tag[NET_TX_RING_SIZE];
++	struct netbk_tag *tag_freelist;
++	struct tasklet_struct tasklet;
++};
++
+ struct xen_netif {
+ 	/* Unique identifier for this interface. */
+ 	domid_t          domid;
+@@ -69,19 +102,18 @@ struct xen_netif {
+ 
+ 	u8               fe_dev_addr[6];
+ 
+-	/* Physical parameters of the comms window. */
+-	grant_handle_t   tx_shmem_handle;
+-	grant_ref_t      tx_shmem_ref;
+-	grant_handle_t   rx_shmem_handle;
+-	grant_ref_t      rx_shmem_ref;
++	struct xen_comms	rx_comms;
++	struct xen_comms	tx_comms;
++
++	union {
++		struct netbk_protocol0	p0;
++		struct netbk_protocol1	p1;
++	} rx;
++
++	struct xen_netif_tx_back_ring	tx;
++
+ 	unsigned int     irq;
+ 
+-	/* The shared rings and indexes. */
+-	struct xen_netif_tx_back_ring tx;
+-	struct xen_netif_rx_back_ring rx;
+-	struct vm_struct *tx_comms_area;
+-	struct vm_struct *rx_comms_area;
+-
+ 	/* Flags that must not be set in dev->features */
+ 	int features_disabled;
+ 
+@@ -99,20 +131,12 @@ struct xen_netif {
+ 	 * in an extra segment? */
+ 	int gso_mode;
+ 
+-	/* Allow netif_be_start_xmit() to peek ahead in the rx request
+-	 * ring.  This is a prediction of what rx_req_cons will be once
+-	 * all queued skbs are put on the ring. */
+-	RING_IDX rx_req_cons_peek;
+-
+ 	/* Transmit shaping: allow 'credit_bytes' every 'credit_usec'. */
+ 	unsigned long   credit_bytes;
+ 	unsigned long   credit_usec;
+ 	unsigned long   remaining_credit;
+ 	struct timer_list credit_timeout;
+ 
+-	/* Enforce draining of the transmit queue. */
+-	struct timer_list tx_queue_timeout;
+-
+ 	/* Statistics */
+ 	int nr_copied_skbs;
+ 
+@@ -125,6 +149,11 @@ struct xen_netif {
+ 	unsigned int carrier;
+ 
+ 	wait_queue_head_t waiting_to_free;
++
++	void (*setup)(struct xen_netif *);
++	void (*start_xmit)(struct xen_netif *, struct sk_buff *);
++	void (*teardown)(struct xen_netif *);
++	void (*event)(struct xen_netif *);
+ };
+ 
+ /*
+@@ -203,16 +232,12 @@ void netback_remove_accelerators(struct 
+ extern
+ void netif_accel_init(void);
+ 
+-
+-#define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
+-#define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
+-
+ void netif_disconnect(struct xen_netif *netif);
+ 
+ void netif_set_features(struct xen_netif *netif);
+ struct xen_netif *netif_alloc(struct device *parent, domid_t domid, unsigned int handle);
+-int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref,
+-	      unsigned long rx_ring_ref, unsigned int evtchn);
++int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref, unsigned long rx_ring_ref,
++	      unsigned int evtchn, int rx_protocol);
+ 
+ static inline void netif_get(struct xen_netif *netif)
+ {
+@@ -232,8 +257,19 @@ int netif_xenbus_init(void);
+ 
+ void netif_schedule_work(struct xen_netif *netif);
+ void netif_deschedule_work(struct xen_netif *netif);
++int netif_get_page_ext(struct page *pg, unsigned int *_group, unsigned int *_idx);
+ 
+-int netif_be_start_xmit(struct sk_buff *skb, struct net_device *dev);
++int netbk_p0_queue_full(struct xen_netif *netif);
++void netbk_p0_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
++void netbk_p0_setup(struct xen_netif *netif);
++void netbk_p0_teardown(struct xen_netif *netif);
++void netbk_p0_event(struct xen_netif *netif);
++
++void netbk_p1_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
++void netbk_p1_setup(struct xen_netif *netif);
++void netbk_p1_teardown(struct xen_netif *netif);
++void netbk_p1_event(struct xen_netif *netif);
++
+ struct net_device_stats *netif_be_get_stats(struct net_device *dev);
+ irqreturn_t netif_be_int(int irq, void *dev_id);
+ 
+@@ -264,6 +300,7 @@ struct netbk_rx_meta {
+ struct netbk_tx_pending_inuse {
+ 	struct list_head list;
+ 	unsigned long alloc_time;
++	int warned;
+ };
+ 
+ #define MAX_PENDING_REQS 256
+@@ -341,5 +378,8 @@ struct xen_netbk {
+ 
+ extern struct xen_netbk *xen_netbk;
+ extern int xen_netbk_group_nr;
++extern unsigned int MODPARM_netback_max_rx_protocol;
++
++void xen_netbk_bh_handler(struct xen_netbk *netbk, int dir);
+ 
+ #endif /* __NETIF__BACKEND__COMMON_H__ */
+diff -r 917285fe312b drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Fri Feb 03 17:02:31 2012 +0000
++++ b/drivers/xen/netback/interface.c	Mon Feb 06 10:46:46 2012 +0000
+@@ -240,6 +240,39 @@ static void netbk_get_strings(struct net
+ 	}
+ }
+ 
++static int netbk_start_xmit(struct sk_buff *skb, struct net_device *dev)
++{
++	struct xen_netif *netif;
++
++	netif = netdev_priv(dev);
++
++	if (netif->start_xmit == NULL)
++		goto drop;
++
++	netif->start_xmit(netif, skb);
++	return NETDEV_TX_OK;
++
++drop:
++	netif->stats.tx_dropped++;
++	dev_kfree_skb(skb);
++	return NETDEV_TX_OK;
++}
++
++static irqreturn_t netbk_int(int irq, void *dev_id)
++{
++	struct xen_netif *netif = dev_id;
++
++	if (netif->group == -1)
++		return IRQ_NONE;
++
++	netif_schedule_work(netif);
++
++	if (netif->event != NULL)
++		netif->event(netif);
++
++	return IRQ_HANDLED;
++}
++
+ static const struct ethtool_ops network_ethtool_ops =
+ {
+ 	.get_drvinfo = netbk_get_drvinfo,
+@@ -257,10 +290,10 @@ static const struct ethtool_ops network_
+ 	.get_strings = netbk_get_strings,
+ };
+ 
+-static const struct net_device_ops netif_be_netdev_ops = {
++static const struct net_device_ops netbk_netdev_ops = {
+ 	.ndo_open               = net_open,
+ 	.ndo_stop               = net_close,
+-	.ndo_start_xmit         = netif_be_start_xmit,
++	.ndo_start_xmit         = netbk_start_xmit,
+ 	.ndo_change_mtu	        = netbk_change_mtu,
+ 	.ndo_get_stats          = netif_be_get_stats,
+ };
+@@ -301,7 +334,7 @@ struct xen_netif *netif_alloc(struct dev
+ 	/* Initialize 'expires' now: it's used to track the credit window. */
+ 	netif->credit_timeout.expires = jiffies;
+ 
+-	dev->netdev_ops = &netif_be_netdev_ops;
++	dev->netdev_ops = &netbk_netdev_ops;
+ 	netif_set_features(netif);
+ 
+ 	SET_ETHTOOL_OPS(dev, &network_ethtool_ops);
+@@ -327,109 +360,100 @@ struct xen_netif *netif_alloc(struct dev
+ 		return ERR_PTR(err);
+ 	}
+ 
+-	DPRINTK("Successfully created netif\n");
+ 	return netif;
+ }
+ 
+-static int map_frontend_pages(
+-	struct xen_netif *netif, grant_ref_t tx_ring_ref, grant_ref_t rx_ring_ref)
++static int map_frontend_pages(struct xen_comms *comms, domid_t domid, grant_ref_t ring_ref)
+ {
+ 	struct gnttab_map_grant_ref op;
+ 
+-	gnttab_set_map_op(&op, (unsigned long)netif->tx_comms_area->addr,
+-			  GNTMAP_host_map, tx_ring_ref, netif->domid);
++	comms->ring_area = alloc_vm_area(PAGE_SIZE);
++	if (comms->ring_area == NULL)
++		return -ENOMEM;
++
++	gnttab_set_map_op(&op, (unsigned long)comms->ring_area->addr,
++			  GNTMAP_host_map, ring_ref, domid);
+     
+ 	if (HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref, &op, 1))
+ 		BUG();
+ 
+ 	if (op.status) {
+-		DPRINTK(" Gnttab failure mapping tx_ring_ref!\n");
++		DPRINTK(" Gnttab failure mapping ring_ref!\n");
++		free_vm_area(comms->ring_area);
+ 		return op.status;
+ 	}
+ 
+-	netif->tx_shmem_ref    = tx_ring_ref;
+-	netif->tx_shmem_handle = op.handle;
+-
+-	gnttab_set_map_op(&op, (unsigned long)netif->rx_comms_area->addr,
+-			  GNTMAP_host_map, rx_ring_ref, netif->domid);
+-
+-	if (HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref, &op, 1))
+-		BUG();
+-
+-	if (op.status) {
+-		struct gnttab_unmap_grant_ref unop;
+-
+-		gnttab_set_unmap_op(&unop,
+-				    (unsigned long)netif->tx_comms_area->addr,
+-				    GNTMAP_host_map, netif->tx_shmem_handle);
+-		VOID(HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
+-					       &unop, 1));
+-		DPRINTK(" Gnttab failure mapping rx_ring_ref!\n");
+-		return op.status;
+-	}
+-
+-	netif->rx_shmem_ref    = rx_ring_ref;
+-	netif->rx_shmem_handle = op.handle;
++	comms->shmem_ref    = ring_ref;
++	comms->shmem_handle = op.handle;
+ 
+ 	return 0;
+ }
+ 
+-static void unmap_frontend_pages(struct xen_netif *netif)
++static void unmap_frontend_pages(struct xen_comms *comms)
+ {
+ 	struct gnttab_unmap_grant_ref op;
+ 
+-	gnttab_set_unmap_op(&op, (unsigned long)netif->tx_comms_area->addr,
+-			    GNTMAP_host_map, netif->tx_shmem_handle);
++	gnttab_set_unmap_op(&op, (unsigned long)comms->ring_area->addr,
++			    GNTMAP_host_map, comms->shmem_handle);
+ 
+ 	if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref, &op, 1))
+ 		BUG();
+ 
+-	gnttab_set_unmap_op(&op, (unsigned long)netif->rx_comms_area->addr,
+-			    GNTMAP_host_map, netif->rx_shmem_handle);
+-
+-	if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref, &op, 1))
+-		BUG();
++	free_vm_area(comms->ring_area);
+ }
+ 
+-int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref,
+-	      unsigned long rx_ring_ref, unsigned int evtchn)
++int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref, unsigned long rx_ring_ref,
++	      unsigned int evtchn, int rx_protocol)
+ {
+ 	int err = -ENOMEM;
+ 	struct xen_netif_tx_sring *txs;
+-	struct xen_netif_rx_sring *rxs;
+ 
+ 	/* Already connected through? */
+ 	if (netif->irq)
+ 		return 0;
+ 
+-	netif->tx_comms_area = alloc_vm_area(PAGE_SIZE);
+-	if (netif->tx_comms_area == NULL)
+-		return -ENOMEM;
+-	netif->rx_comms_area = alloc_vm_area(PAGE_SIZE);
+-	if (netif->rx_comms_area == NULL)
+-		goto err_rx;
++	err = map_frontend_pages(&netif->tx_comms, netif->domid, tx_ring_ref);
++	if (err)
++		goto err_tx_map;
+ 
+-	err = map_frontend_pages(netif, tx_ring_ref, rx_ring_ref);
++	txs = (struct xen_netif_tx_sring *)netif->tx_comms.ring_area->addr;
++	BACK_RING_INIT(&netif->tx, txs, PAGE_SIZE);
++
++	err = map_frontend_pages(&netif->rx_comms, netif->domid, rx_ring_ref);
+ 	if (err)
+-		goto err_map;
++		goto err_rx_map;
++
++	switch (rx_protocol) {
++	case 0:
++		netif->setup = netbk_p0_setup;
++		netif->start_xmit = netbk_p0_start_xmit;
++		netif->teardown = netbk_p0_teardown;
++		netif->event = netbk_p0_event;
++		break;
++
++	case 1: {
++		netif->setup = netbk_p1_setup;
++		netif->start_xmit = netbk_p1_start_xmit;
++		netif->teardown = netbk_p1_teardown;
++		netif->event = netbk_p1_event;
++		break;
++	}
++	default:
++		err = -EOPNOTSUPP;
++		goto err_rx_protocol;
++	}
++
++	netif->setup(netif);
+ 
+ 	err = bind_interdomain_evtchn_to_irqhandler(
+-		netif->domid, evtchn, netif_be_int, 0,
++		netif->domid, evtchn, netbk_int, 0,
+ 		netif->dev->name, netif);
+ 	if (err < 0)
+ 		goto err_hypervisor;
++
+ 	netif->irq = err;
+ 	disable_irq(netif->irq);
+ 
+-	txs = (struct xen_netif_tx_sring *)netif->tx_comms_area->addr;
+-	BACK_RING_INIT(&netif->tx, txs, PAGE_SIZE);
+-
+-	rxs = (struct xen_netif_rx_sring *)
+-		((char *)netif->rx_comms_area->addr);
+-	BACK_RING_INIT(&netif->rx, rxs, PAGE_SIZE);
+-
+-	netif->rx_req_cons_peek = 0;
+-
+ 	netif_get(netif);
+ 
+ 	rtnl_lock();
+@@ -439,12 +463,15 @@ int netif_map(struct xen_netif *netif, u
+ 	rtnl_unlock();
+ 
+ 	return 0;
++
+ err_hypervisor:
+-	unmap_frontend_pages(netif);
+-err_map:
+-	free_vm_area(netif->rx_comms_area);
+-err_rx:
+-	free_vm_area(netif->tx_comms_area);
++err_rx_protocol:
++	unmap_frontend_pages(&netif->rx_comms);
++
++err_rx_map:
++	unmap_frontend_pages(&netif->tx_comms);
++
++err_tx_map:
+ 	return err;
+ }
+ 
+@@ -471,10 +498,12 @@ void netif_disconnect(struct xen_netif *
+ 	unregister_netdev(netif->dev);
+ 
+ 	if (netif->tx.sring) {
+-		unmap_frontend_pages(netif);
+-		free_vm_area(netif->tx_comms_area);
+-		free_vm_area(netif->rx_comms_area);
++		unmap_frontend_pages(&netif->rx_comms);
++		unmap_frontend_pages(&netif->tx_comms);
+ 	}
+ 
++	if (netif->teardown != NULL)
++		netif->teardown(netif);
++
+ 	free_netdev(netif->dev);
+ }
+diff -r 917285fe312b drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Feb 03 17:02:31 2012 +0000
++++ b/drivers/xen/netback/netback.c	Mon Feb 06 10:46:46 2012 +0000
+@@ -82,7 +82,7 @@ static inline void netif_set_page_ext(st
+ 	pg->mapping = ext.mapping;
+ }
+ 
+-static inline int netif_get_page_ext(struct page *pg, unsigned int *_group, unsigned int *_idx)
++int netif_get_page_ext(struct page *pg, unsigned int *_group, unsigned int *_idx)
+ {
+ 	union page_ext ext = { .mapping = pg->mapping };
+ 	struct xen_netbk *netbk;
+@@ -148,12 +148,16 @@ static int MODPARM_netback_kthread;
+ module_param_named(netback_kthread, MODPARM_netback_kthread, bool, 0);
+ MODULE_PARM_DESC(netback_kthread, "Use kernel thread to replace tasklet");
+ 
++unsigned int MODPARM_netback_max_rx_protocol = NETBK_MAX_RX_PROTOCOL;
++module_param_named(netback_max_rx_protocol, MODPARM_netback_max_rx_protocol, uint, 0);
++MODULE_PARM_DESC(netback_max_rx_protocol, "Maximum supported receiver protocol version");
++
+ /*
+  * Netback bottom half handler.
+  * dir indicates the data direction.
+  * rx: 1, tx: 0.
+  */
+-static inline void xen_netbk_bh_handler(struct xen_netbk *netbk, int dir)
++void xen_netbk_bh_handler(struct xen_netbk *netbk, int dir)
+ {
+ 	if (MODPARM_netback_kthread)
+ 		wake_up(&netbk->kthread.netbk_action_wq);
+@@ -163,7 +167,7 @@ static inline void xen_netbk_bh_handler(
+ 		tasklet_schedule(&netbk->tasklet.net_tx_tasklet);
+ }
+ 
+-static inline void maybe_schedule_tx_action(struct xen_netbk *netbk)
++void maybe_schedule_tx_action(struct xen_netbk *netbk)
+ {
+ 	smp_mb();
+ 	if ((nr_pending_reqs(netbk) < (MAX_PENDING_REQS/2)) &&
+@@ -171,209 +175,6 @@ static inline void maybe_schedule_tx_act
+ 		xen_netbk_bh_handler(netbk, 0);
+ }
+ 
+-static struct sk_buff *netbk_copy_skb(struct sk_buff *skb)
+-{
+-	struct skb_shared_info *ninfo;
+-	struct sk_buff *nskb;
+-	unsigned long offset;
+-	int ret;
+-	int len;
+-	int headlen;
+-
+-	BUG_ON(skb_shinfo(skb)->frag_list != NULL);
+-
+-	nskb = alloc_skb(SKB_MAX_HEAD(0), GFP_ATOMIC | __GFP_NOWARN);
+-	if (unlikely(!nskb))
+-		goto err;
+-
+-	skb_reserve(nskb, NET_SKB_PAD + NET_IP_ALIGN);
+-	headlen = skb_end_pointer(nskb) - nskb->data;
+-	if (headlen > skb_headlen(skb))
+-		headlen = skb_headlen(skb);
+-	ret = skb_copy_bits(skb, 0, __skb_put(nskb, headlen), headlen);
+-	BUG_ON(ret);
+-
+-	ninfo = skb_shinfo(nskb);
+-	ninfo->gso_size = skb_shinfo(skb)->gso_size;
+-	ninfo->gso_type = skb_shinfo(skb)->gso_type;
+-
+-	offset = headlen;
+-	len = skb->len - headlen;
+-
+-	nskb->len = skb->len;
+-	nskb->data_len = len;
+-	nskb->truesize += len;
+-
+-	while (len) {
+-		struct page *page;
+-		int copy;
+-		int zero;
+-
+-		if (unlikely(ninfo->nr_frags >= MAX_SKB_FRAGS)) {
+-			dump_stack();
+-			goto err_free;
+-		}
+-
+-		copy = len >= PAGE_SIZE ? PAGE_SIZE : len;
+-		zero = len >= PAGE_SIZE ? 0 : __GFP_ZERO;
+-
+-		page = alloc_page(GFP_ATOMIC | __GFP_NOWARN | zero);
+-		if (unlikely(!page))
+-			goto err_free;
+-
+-		ret = skb_copy_bits(skb, offset, page_address(page), copy);
+-		BUG_ON(ret);
+-
+-		ninfo->frags[ninfo->nr_frags].page = page;
+-		ninfo->frags[ninfo->nr_frags].page_offset = 0;
+-		ninfo->frags[ninfo->nr_frags].size = copy;
+-		ninfo->nr_frags++;
+-
+-		offset += copy;
+-		len -= copy;
+-	}
+-
+-#ifdef NET_SKBUFF_DATA_USES_OFFSET
+-	offset = 0;
+-#else
+-	offset = nskb->data - skb->data;
+-#endif
+-
+-	nskb->transport_header = skb->transport_header + offset;
+-	nskb->network_header = skb->network_header + offset;
+-	nskb->mac_header = skb->mac_header + offset;
+-
+-	return nskb;
+-
+- err_free:
+-	kfree_skb(nskb);
+- err:
+-	return NULL;
+-}
+-
+-static inline int netbk_max_required_rx_slots(struct xen_netif *netif)
+-{
+-	if (netif->can_sg)
+-		return MAX_SKB_FRAGS + 2; /* header + extra_info + frags */
+-	return 1; /* all in one */
+-}
+-
+-static inline int netbk_queue_full(struct xen_netif *netif)
+-{
+-	RING_IDX peek   = netif->rx_req_cons_peek;
+-	RING_IDX needed = netbk_max_required_rx_slots(netif);
+-
+-	return ((netif->rx.sring->req_prod - peek) < needed) ||
+-	       ((netif->rx.rsp_prod_pvt + NET_RX_RING_SIZE - peek) < needed);
+-}
+-
+-/* Figure out how many ring slots we're going to need to send @skb to
+-   the guest. */
+-static unsigned count_skb_slots(struct sk_buff *skb, struct xen_netif *netif)
+-{
+-	unsigned count;
+-	unsigned copy_off;
+-	unsigned i;
+-
+-	copy_off = 0;
+-	count = 1;
+-
+-	BUG_ON(offset_in_page(skb->data) + skb_headlen(skb) > MAX_BUFFER_OFFSET);
+-
+-	copy_off = skb_headlen(skb);
+-
+-	if (skb_shinfo(skb)->gso_size)
+-		count++;
+-
+-	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+-		unsigned long size = skb_shinfo(skb)->frags[i].size;
+-		unsigned long bytes;
+-		while (size > 0) {
+-			BUG_ON(copy_off > MAX_BUFFER_OFFSET);
+-
+-			/* These checks are the same as in netbk_gop_frag_copy */
+-			if (copy_off == MAX_BUFFER_OFFSET
+-			    || ((copy_off + size > MAX_BUFFER_OFFSET) && (size <= MAX_BUFFER_OFFSET) && copy_off)) {
+-				count++;
+-				copy_off = 0;
+-			}
+-
+-			bytes = size;
+-			if (copy_off + bytes > MAX_BUFFER_OFFSET)
+-				bytes = MAX_BUFFER_OFFSET - copy_off;
+-
+-			copy_off += bytes;
+-			size -= bytes;
+-		}
+-	}
+-	return count;
+-}
+-
+-int netif_be_start_xmit(struct sk_buff *skb, struct net_device *dev)
+-{
+-	struct xen_netif *netif = netdev_priv(dev);
+-	struct xen_netbk *netbk;
+-
+-	BUG_ON(skb->dev != dev);
+-
+-	if (netif->group == -1)
+-		goto drop;
+-
+-	netbk = &xen_netbk[netif->group];
+-
+-	/* Drop the packet if the netif is not up or there is no carrier. */
+-	if (unlikely(!netif_schedulable(netif)))
+-		goto drop;
+-
+-	/* Drop the packet if the target domain has no receive buffers. */
+-	if (unlikely(netbk_queue_full(netif))) {
+-		printk(KERN_WARNING "%s dropping packet (shared ring full)\n",
+-			   __func__);
+-		goto drop;
+-	}
+-
+-	/*
+-	 * XXX For now we also copy skbuffs whose head crosses a page
+-	 * boundary, because netbk_gop_skb can't handle them.
+-	 */
+-	if ((skb_headlen(skb) + offset_in_page(skb->data)) >= PAGE_SIZE) {
+-		struct sk_buff *nskb = netbk_copy_skb(skb);
+-		if (unlikely(nskb == NULL)) {
+-			printk(KERN_WARNING "%s dropping packet (failed to copy header)\n",
+-				   __func__);
+-			goto drop;
+-		}
+-		/* Copy only the header fields we use in this driver. */
+-		nskb->dev = skb->dev;
+-		nskb->ip_summed = skb->ip_summed;
+-		dev_kfree_skb(skb);
+-		skb = nskb;
+-	}
+-
+-	/* Reserve ring slots for the worst-case number of
+-	 * fragments. */
+-	netif->rx_req_cons_peek += count_skb_slots(skb, netif);
+-	netif_get(netif);
+-
+-	if (netbk_can_queue(dev) && netbk_queue_full(netif)) {
+-		netif->rx.sring->req_event = netif->rx_req_cons_peek +
+-			netbk_max_required_rx_slots(netif);
+-		mb(); /* request notification /then/ check & stop the queue */
+-		if (netbk_queue_full(netif))
+-			netif_stop_queue(dev);
+-	}
+-	skb_queue_tail(&netbk->rx_queue, skb);
+-
+-	xen_netbk_bh_handler(netbk, 1);
+-
+-	return NETDEV_TX_OK;
+-
+- drop:
+-	netif->stats.tx_dropped++;
+-	dev_kfree_skb(skb);
+-	return NETDEV_TX_OK;
+-}
+-
+ struct netrx_pending_operations {
+ 	unsigned copy_prod, copy_cons;
+ 	unsigned meta_prod, meta_cons;
+@@ -391,6 +192,7 @@ static void netbk_gop_frag_copy(struct x
+ 				struct page *page, unsigned long size,
+ 				unsigned long offset, int head)
+ {
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
+ 	struct gnttab_copy *copy_gop;
+ 	struct netbk_rx_meta *meta;
+ 	/*
+@@ -441,7 +243,7 @@ static void netbk_gop_frag_copy(struct x
+ 
+ 			BUG_ON(head); /* Netfront requires there to be some data in the head buffer. */
+ 			/* Overflowed this request, go to the next one */
+-			req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
++			req = RING_GET_REQUEST(&p0->back, p0->back.req_cons++);
+ 			meta = npo->meta + npo->meta_prod++;
+ 			meta->gso_size = 0;
+ 			meta->size = 0;
+@@ -496,6 +298,7 @@ static int netbk_gop_skb(struct sk_buff 
+ 			 struct netrx_pending_operations *npo)
+ {
+ 	struct xen_netif *netif = netdev_priv(skb->dev);
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
+ 	int nr_frags = skb_shinfo(skb)->nr_frags;
+ 	int i;
+ 	struct xen_netif_rx_request *req;
+@@ -509,14 +312,14 @@ static int netbk_gop_skb(struct sk_buff 
+ 
+ 	/* Set up a GSO prefix descriptor, if necessary */
+ 	if (skb_shinfo(skb)->gso_size && netif->gso_mode == NETBK_GSO_PREFIX) {
+-		req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
++		req = RING_GET_REQUEST(&p0->back, p0->back.req_cons++);
+ 		meta = npo->meta + npo->meta_prod++;
+ 		meta->gso_size = skb_shinfo(skb)->gso_size;
+ 		meta->size = 0;
+ 		meta->id = req->id;
+ 	}
+ 
+-	req = RING_GET_REQUEST(&netif->rx, netif->rx.req_cons++);
++	req = RING_GET_REQUEST(&p0->back, p0->back.req_cons++);
+ 	meta = npo->meta + npo->meta_prod++;
+ 
+ 	if (netif->gso_mode == NETBK_GSO_STANDARD)
+@@ -536,7 +339,7 @@ static int netbk_gop_skb(struct sk_buff 
+ 
+ 	/* Leave a gap for the GSO descriptor. */
+ 	if (skb_shinfo(skb)->gso_size && netif->gso_mode == NETBK_GSO_STANDARD)
+-		netif->rx.req_cons++;
++		p0->back.req_cons++;
+ 
+ 	for (i = 0; i < nr_frags; i++) {
+ 		netbk_gop_frag_copy(netif, npo,
+@@ -623,6 +426,7 @@ static void net_rx_action(unsigned long 
+ 
+ 	while ((skb = skb_dequeue(&netbk->rx_queue)) != NULL) {
+ 		netif = netdev_priv(skb->dev);
++
+ 		nr_frags = skb_shinfo(skb)->nr_frags;
+ 
+ 		sco = (struct skb_cb_overlay *)skb->cb;
+@@ -648,14 +452,17 @@ static void net_rx_action(unsigned long 
+ 	BUG_ON(ret != 0);
+ 
+ 	while ((skb = __skb_dequeue(&rxq)) != NULL) {
++		struct netbk_protocol0 *p0;
++
+ 		sco = (struct skb_cb_overlay *)skb->cb;
+ 
+ 		netif = netdev_priv(skb->dev);
++		p0 = &netif->rx.p0;
+ 
+ 		if (netbk->meta[npo.meta_cons].gso_size &&
+ 		    netif->gso_mode == NETBK_GSO_PREFIX) {
+-			resp = RING_GET_RESPONSE(&netif->rx,
+-						netif->rx.rsp_prod_pvt++);
++			resp = RING_GET_RESPONSE(&p0->back,
++						 p0->back.rsp_prod_pvt++);
+ 
+ 			resp->flags = NETRXF_gso_prefix | NETRXF_more_data;
+ 
+@@ -695,8 +502,8 @@ static void net_rx_action(unsigned long 
+ 		    netif->gso_mode == NETBK_GSO_STANDARD) {
+ 			struct xen_netif_extra_info *gso =
+ 				(struct xen_netif_extra_info *)
+-				RING_GET_RESPONSE(&netif->rx,
+-						  netif->rx.rsp_prod_pvt++);
++				RING_GET_RESPONSE(&p0->back,
++						  p0->back.rsp_prod_pvt++);
+ 
+ 			resp->flags |= NETRXF_extra_info;
+ 
+@@ -715,7 +522,7 @@ static void net_rx_action(unsigned long 
+ 						 sco->meta_slots_used - 1);
+ 		}
+ 
+-		RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&netif->rx, ret);
++		RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&p0->back, ret);
+ 		irq = netif->irq;
+ 		if (ret && !netbk->rx_notify[irq] &&
+ 				(netif->smart_poll != 1)) {
+@@ -725,7 +532,7 @@ static void net_rx_action(unsigned long 
+ 
+ 		if (netif_queue_stopped(netif->dev) &&
+ 		    netif_schedulable(netif) &&
+-		    !netbk_queue_full(netif))
++		    !netbk_p0_queue_full(netif))
+ 			netif_wake_queue(netif->dev);
+ 
+ 		/*
+@@ -733,9 +540,9 @@ static void net_rx_action(unsigned long 
+ 		 * netfront timer is active.
+ 		 */
+ 		if ((netif->smart_poll == 1) &&
+-		    !(netif->rx.sring->private.netif.smartpoll_active)) {
++		    !(p0->back.sring->private.netif.smartpoll_active)) {
+ 			notify_remote_via_irq(irq);
+-			netif->rx.sring->private.netif.smartpoll_active = 1;
++			p0->back.sring->private.netif.smartpoll_active = 1;
+ 		}
+ 
+ 		netif_put(netif);
+@@ -808,7 +615,7 @@ out:
+ 	return netif;
+ }
+ 
+-static void add_to_net_schedule_list_tail(struct xen_netif *netif)
++void add_to_net_schedule_list_tail(struct xen_netif *netif)
+ {
+ 	unsigned long flags;
+ 
+@@ -830,6 +637,8 @@ void netif_schedule_work(struct xen_neti
+ 	struct xen_netbk *netbk = &xen_netbk[netif->group];
+ 	int more_to_do;
+ 
++	BUG_ON(netif->group < 0);
++
+ 	RING_FINAL_CHECK_FOR_REQUESTS(&netif->tx, more_to_do);
+ 
+ 	if (more_to_do) {
+@@ -841,6 +650,9 @@ void netif_schedule_work(struct xen_neti
+ void netif_deschedule_work(struct xen_netif *netif)
+ {
+ 	struct xen_netbk *netbk = &xen_netbk[netif->group];
++
++	BUG_ON(netif->group < 0);
++
+ 	spin_lock_irq(&netbk->net_schedule_list_lock);
+ 	remove_from_net_schedule_list(netif);
+ 	spin_unlock_irq(&netbk->net_schedule_list_lock);
+@@ -955,6 +767,7 @@ static inline void net_tx_action_dealloc
+ 		gop - netbk->tx_unmap_ops);
+ 	BUG_ON(ret);
+ 
++#if 0
+ 	/*
+ 	 * Copy any entries that have been pending for too long
+ 	 */
+@@ -986,6 +799,28 @@ static inline void net_tx_action_dealloc
+ 			break;
+ 		}
+ 	}
++#endif
++
++	list_for_each_entry_safe(inuse, n,
++			&netbk->pending_inuse_head, list) {
++		struct pending_tx_info *pending_tx_info;
++
++		pending_tx_info = netbk->pending_tx_info;
++		pending_idx = inuse - netbk->pending_inuse;
++
++		if (time_after(inuse->alloc_time + HZ / 2, jiffies))
++			break;
++
++		if (inuse->warned)
++			continue;
++
++		netif = pending_tx_info[pending_idx].netif;
++
++		inuse->warned = 1;
++		printk(KERN_CRIT "domain %u txp %u stuck?\n",
++		       netif->domid,
++		       pending_tx_info[pending_idx].req.id);
++	}
+ 
+ 	list_for_each_entry_safe(inuse, n, &list, list) {
+ 		struct pending_tx_info *pending_tx_info;
+@@ -1194,6 +1029,7 @@ static void netbk_fill_frags(struct xen_
+ 
+ 		pending_idx = (unsigned long)frag->page;
+ 
++		netbk->pending_inuse[pending_idx].warned = 0;
+ 		netbk->pending_inuse[pending_idx].alloc_time = jiffies;
+ 		list_add_tail(&netbk->pending_inuse[pending_idx].list,
+ 			      &netbk->pending_inuse_head);
+@@ -1381,7 +1217,7 @@ static unsigned net_tx_build_mops(struct
+ 		skb = alloc_skb(data_len + NET_SKB_PAD + NET_IP_ALIGN,
+ 				GFP_ATOMIC | __GFP_NOWARN);
+ 		if (unlikely(skb == NULL)) {
+-			DPRINTK("Can't allocate a skb in start_xmit.\n");
++			DPRINTK("Can't allocate a skb.\n");
+ 			netbk_tx_err(netif, &txreq, idx);
+ 			break;
+ 		}
+@@ -1581,25 +1417,6 @@ static void netif_page_release(struct pa
+ 	netif_idx_release(&xen_netbk[group], idx);
+ }
+ 
+-irqreturn_t netif_be_int(int irq, void *dev_id)
+-{
+-	struct xen_netif *netif = dev_id;
+-	struct xen_netbk *netbk;
+-
+-	if (netif->group == -1)
+-		return IRQ_NONE;
+-
+-	netbk = &xen_netbk[netif->group];
+-
+-	add_to_net_schedule_list_tail(netif);
+-	maybe_schedule_tx_action(netbk);
+-
+-	if (netif_schedulable(netif) && !netbk_queue_full(netif))
+-		netif_wake_queue(netif->dev);
+-
+-	return IRQ_HANDLED;
+-}
+-
+ static void make_tx_response(struct xen_netif *netif,
+ 			     struct xen_netif_tx_request *txp,
+ 			     s8       st)
+@@ -1623,9 +1440,9 @@ static void make_tx_response(struct xen_
+ 	 * is active.
+ 	 */
+ 	if ((netif->smart_poll == 1)) {
+-		if (!(netif->rx.sring->private.netif.smartpoll_active)) {
++		if (!(netif->tx.sring->private.netif.smartpoll_active)) {
+ 			notify_remote_via_irq(netif->irq);
+-			netif->rx.sring->private.netif.smartpoll_active = 1;
++			netif->tx.sring->private.netif.smartpoll_active = 1;
+ 		}
+ 	} else if (notify)
+ 		notify_remote_via_irq(netif->irq);
+@@ -1638,10 +1455,11 @@ static struct xen_netif_rx_response *mak
+ 					     u16      size,
+ 					     u16      flags)
+ {
+-	RING_IDX i = netif->rx.rsp_prod_pvt;
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
++	RING_IDX i = p0->back.rsp_prod_pvt;
+ 	struct xen_netif_rx_response *resp;
+ 
+-	resp = RING_GET_RESPONSE(&netif->rx, i);
++	resp = RING_GET_RESPONSE(&p0->back, i);
+ 	resp->offset     = offset;
+ 	resp->flags      = flags;
+ 	resp->id         = id;
+@@ -1649,7 +1467,7 @@ static struct xen_netif_rx_response *mak
+ 	if (st < 0)
+ 		resp->status = (s16)st;
+ 
+-	netif->rx.rsp_prod_pvt = ++i;
++	p0->back.rsp_prod_pvt = ++i;
+ 
+ 	return resp;
+ }
+@@ -1671,19 +1489,20 @@ static irqreturn_t netif_be_dbg(int irq,
+ 		list_for_each(ent, &netbk->net_schedule_list) {
+ 			netif = list_entry(ent, struct xen_netif, list);
+ 			printk(KERN_ALERT " %d: private(rx_req_cons=%08x "
+-				"rx_resp_prod=%08x\n",
+-				i, netif->rx.req_cons, netif->rx.rsp_prod_pvt);
++				"rx_resp_prod=%08x\n", i,
++				netif->rx.protocol0.req_cons,
++				netif->rx.protocol0.rsp_prod_pvt);
+ 			printk(KERN_ALERT
+ 				"   tx_req_cons=%08x, tx_resp_prod=%08x)\n",
+ 				netif->tx.req_cons, netif->tx.rsp_prod_pvt);
+ 			printk(KERN_ALERT
+ 				"   shared(rx_req_prod=%08x "
+ 				"rx_resp_prod=%08x\n",
+-				netif->rx.sring->req_prod,
+-				netif->rx.sring->rsp_prod);
++				netif->rx.protocol0.sring->req_prod,
++				netif->rx.protocol0.sring->rsp_prod);
+ 			printk(KERN_ALERT
+ 				"   rx_event=%08x, tx_req_prod=%08x\n",
+-				netif->rx.sring->rsp_event,
++				netif->rx.protocol0.sring->rsp_event,
+ 				netif->tx.sring->req_prod);
+ 			printk(KERN_ALERT
+ 				"   tx_resp_prod=%08x, tx_event=%08x)\n",
+diff -r 917285fe312b drivers/xen/netback/tx.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/drivers/xen/netback/tx.c	Mon Feb 06 10:46:46 2012 +0000
+@@ -0,0 +1,666 @@
++/******************************************************************************
++ *
++ * Copyright (c) 2011, Citrix Systems Inc.
++ *
++ * Author: Paul Durrant <paul.durrant@citrix.com>
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version 2
++ * as published by the Free Software Foundation; or, when distributed
++ * separately from the Linux kernel or incorporated into other
++ * software packages, subject to the following license:
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this source file (the "Software"), to deal in the Software without
++ * restriction, including without limitation the rights to use, copy, modify,
++ * merge, publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "common.h"
++
++static inline int max_skb_slots(struct xen_netif *netif)
++{
++	if (netif->can_sg)
++		return MAX_SKB_FRAGS + 2; /* header + extra_info + frags */
++	return 1; /* all in one */
++}
++
++/*
++ * Protocol 0
++ */
++
++int netbk_p0_queue_full(struct xen_netif *netif)
++{
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
++	RING_IDX peek = p0->rx_req_cons_peek;
++	RING_IDX needed = max_skb_slots(netif);
++
++	return ((p0->back.sring->req_prod - peek) < needed) ||
++	       ((p0->back.rsp_prod_pvt + NET_RX_RING_SIZE - peek) < needed);
++}
++
++/* Figure out how many ring slots we're going to need to send @skb to
++   the guest. */
++static unsigned count_skb_slots(struct sk_buff *skb)
++{
++	unsigned count;
++	unsigned copy_off;
++	unsigned i;
++
++	copy_off = 0;
++	count = 1;
++
++	BUG_ON(offset_in_page(skb->data) + skb_headlen(skb) > MAX_BUFFER_OFFSET);
++
++	copy_off = skb_headlen(skb);
++
++	if (skb_shinfo(skb)->gso_size)
++		count++;
++
++	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
++		unsigned long size = skb_shinfo(skb)->frags[i].size;
++		unsigned long bytes;
++		while (size > 0) {
++			BUG_ON(copy_off > MAX_BUFFER_OFFSET);
++
++			/* These checks are the same as in netbk_gop_frag_copy */
++			if (copy_off == MAX_BUFFER_OFFSET
++			    || ((copy_off + size > MAX_BUFFER_OFFSET) &&
++				(size <= MAX_BUFFER_OFFSET) && copy_off)) {
++				count++;
++				copy_off = 0;
++			}
++
++			bytes = size;
++			if (copy_off + bytes > MAX_BUFFER_OFFSET)
++				bytes = MAX_BUFFER_OFFSET - copy_off;
++
++			copy_off += bytes;
++			size -= bytes;
++		}
++	}
++	return count;
++}
++
++static struct sk_buff *copy_skb(struct sk_buff *skb)
++{
++	struct skb_shared_info *ninfo;
++	struct sk_buff *nskb;
++	unsigned long offset;
++	int ret;
++	int len;
++	int headlen;
++
++	BUG_ON(skb_shinfo(skb)->frag_list != NULL);
++
++	nskb = alloc_skb(SKB_MAX_HEAD(0), GFP_ATOMIC | __GFP_NOWARN);
++	if (unlikely(!nskb))
++		goto err;
++
++	skb_reserve(nskb, NET_SKB_PAD + NET_IP_ALIGN);
++	headlen = skb_end_pointer(nskb) - nskb->data;
++	if (headlen > skb_headlen(skb))
++		headlen = skb_headlen(skb);
++	ret = skb_copy_bits(skb, 0, __skb_put(nskb, headlen), headlen);
++	BUG_ON(ret);
++
++	ninfo = skb_shinfo(nskb);
++	ninfo->gso_size = skb_shinfo(skb)->gso_size;
++	ninfo->gso_type = skb_shinfo(skb)->gso_type;
++
++	offset = headlen;
++	len = skb->len - headlen;
++
++	nskb->len = skb->len;
++	nskb->data_len = len;
++	nskb->truesize += len;
++
++	while (len) {
++		struct page *page;
++		int copy;
++		int zero;
++
++		if (unlikely(ninfo->nr_frags >= MAX_SKB_FRAGS)) {
++			dump_stack();
++			goto err_free;
++		}
++
++		copy = len >= PAGE_SIZE ? PAGE_SIZE : len;
++		zero = len >= PAGE_SIZE ? 0 : __GFP_ZERO;
++
++		page = alloc_page(GFP_ATOMIC | __GFP_NOWARN | zero);
++		if (unlikely(!page))
++			goto err_free;
++
++		ret = skb_copy_bits(skb, offset, page_address(page), copy);
++		BUG_ON(ret);
++
++		ninfo->frags[ninfo->nr_frags].page = page;
++		ninfo->frags[ninfo->nr_frags].page_offset = 0;
++		ninfo->frags[ninfo->nr_frags].size = copy;
++		ninfo->nr_frags++;
++
++		offset += copy;
++		len -= copy;
++	}
++
++#ifdef NET_SKBUFF_DATA_USES_OFFSET
++	offset = 0;
++#else
++	offset = nskb->data - skb->data;
++#endif
++
++	nskb->transport_header = skb->transport_header + offset;
++	nskb->network_header = skb->network_header + offset;
++	nskb->mac_header = skb->mac_header + offset;
++
++	return nskb;
++
++ err_free:
++	kfree_skb(nskb);
++ err:
++	return NULL;
++}
++
++void netbk_p0_start_xmit(struct xen_netif *netif, struct sk_buff *skb)
++{
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
++	struct net_device *dev = netif->dev;
++	struct xen_netbk *netbk;
++
++	BUG_ON(skb->dev != dev);
++
++	if (netif->group == -1)
++		goto drop;
++
++	netbk = &xen_netbk[netif->group];
++
++	/* Drop the packet if the netif is not up or there is no carrier. */
++	if (unlikely(!netif_schedulable(netif)))
++		goto drop;
++
++	/* Drop the packet if the target domain has no receive buffers. */
++	if (unlikely(netbk_p0_queue_full(netif))) {
++		printk(KERN_WARNING "%s dropping packet (shared ring full)\n",
++			   __func__);
++		goto drop;
++	}
++
++	/*
++	 * XXX For now we also copy skbuffs whose head crosses a page
++	 * boundary, because netbk_gop_skb can't handle them.
++	 */
++	if ((skb_headlen(skb) + offset_in_page(skb->data)) >= PAGE_SIZE) {
++		struct sk_buff *nskb = copy_skb(skb);
++		if (unlikely(nskb == NULL)) {
++			printk(KERN_WARNING "%s dropping packet (failed to copy header)\n",
++				   __func__);
++			goto drop;
++		}
++		/* Copy only the header fields we use in this driver. */
++		nskb->dev = skb->dev;
++		nskb->ip_summed = skb->ip_summed;
++		dev_kfree_skb(skb);
++		skb = nskb;
++	}
++
++	/* Reserve ring slots for the worst-case number of
++	 * fragments. */
++	p0->rx_req_cons_peek += count_skb_slots(skb);
++	netif_get(netif);
++
++	if (netif->can_queue && netbk_p0_queue_full(netif)) {
++		p0->back.sring->req_event = p0->rx_req_cons_peek +
++			max_skb_slots(netif);
++		mb(); /* request notification /then/ check & stop the queue */
++		if (netbk_p0_queue_full(netif))
++			netif_stop_queue(dev);
++	}
++	skb_queue_tail(&netbk->rx_queue, skb);
++
++	xen_netbk_bh_handler(netbk, 1);
++	return;
++
++ drop:
++	netif->stats.tx_dropped++;
++	dev_kfree_skb(skb);
++}
++
++void netbk_p0_setup(struct xen_netif *netif)
++{
++	struct netbk_protocol0 *p0 = &netif->rx.p0;
++	struct xen_netif_rx_sring *sring;
++
++	p0->rx_req_cons_peek = 0;
++
++	sring = (struct xen_netif_rx_sring *)netif->rx_comms.ring_area->addr;
++	BACK_RING_INIT(&p0->back, sring, PAGE_SIZE);
++}
++
++void netbk_p0_teardown(struct xen_netif *netif)
++{
++}
++
++void netbk_p0_event(struct xen_netif *netif)
++{
++	if (netif_schedulable(netif) && !netbk_p0_queue_full(netif))
++		netif_wake_queue(netif->dev);
++}
++
++/*
++ * Protocol 1
++ */
++
++static void free_tag(struct xen_netif *netif, struct netbk_tag *tag)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++
++	tag->skb = NULL;
++
++	BUG_ON(tag->next != NULL);
++
++	tag->next = p1->tag_freelist;
++	p1->tag_freelist = tag;
++}
++
++static struct netbk_tag *allocate_tag(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct netbk_tag *tag;
++
++	tag = p1->tag_freelist;
++	if (tag == NULL)
++		return NULL;
++
++	p1->tag_freelist = tag->next;
++	BUG_ON(tag->skb != NULL);
++
++	tag->next = NULL;
++	return tag;
++}
++
++static struct netbk_tag *find_tag(struct xen_netif *netif, unsigned short id)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct netbk_tag *tag;
++
++	BUG_ON(id >= NET_TX_RING_SIZE);
++	tag = &p1->tag[id];
++
++	BUG_ON(tag->skb == NULL);
++	BUG_ON(tag->next != NULL);
++	return tag;
++}
++
++static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct page *page,
++		      int offset, int len)
++{
++	unsigned int group, idx;
++	int foreign = netif_get_page_ext(page, &group, &idx);
++
++	BUG_ON(offset > PAGE_SIZE);
++	BUG_ON(offset + len > PAGE_SIZE);
++
++	if (foreign) {
++		struct xen_netbk *netbk;
++		struct pending_tx_info *info;
++
++		netbk = &xen_netbk[group];
++		info = &netbk->pending_tx_info[idx];
++
++		gnttab_grant_foreign_access_ref_trans(tag->gref, netif->domid,
++						      GTF_readonly, info->netif->domid,
++						      info->req.gref);
++	} else {
++		gnttab_grant_foreign_access_ref_subpage(tag->gref, netif->domid,
++							virt_to_mfn(page_address(page)),
++						        GTF_readonly, offset, len);
++	}
++}
++
++static void ungrant_tag(struct netbk_tag *tag)
++{
++	int rc;
++
++	rc = gnttab_end_foreign_access_ref(tag->gref);
++	BUG_ON(rc == 0); /* FIXME */
++}
++
++static int slot_available(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	int avail;
++
++	avail = NET_TX_RING_SIZE - (p1->front.req_prod_pvt - p1->front.rsp_cons);
++
++	return (avail > max_skb_slots(netif));
++}
++
++static void xmit_complete(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct net_device *dev = netif->dev;
++
++	for (;;) {
++		RING_IDX cons, prod;
++
++		rmb();
++		prod = p1->front.sring->rsp_prod;
++		cons = p1->front.rsp_cons;
++
++		if (cons == prod)
++			break;
++
++		while (cons != prod) {
++			struct xen_netif_tx_response *rsp;
++			unsigned short id;
++			struct netbk_tag *tag;
++
++			rsp = RING_GET_RESPONSE(&p1->front, cons);
++			cons++;
++
++			if (rsp->status == NETIF_RSP_NULL) /* extra */
++				continue;
++
++			id = rsp->id;
++			tag = find_tag(netif, id);
++
++			ungrant_tag(tag);
++			dev_kfree_skb_irq(tag->skb);
++			free_tag(netif, tag);
++		}
++
++		p1->front.rsp_cons = cons;
++	}
++
++	if (unlikely(netif_queue_stopped(dev)) && slot_available(netif))
++		netif_wake_queue(dev);
++}
++
++static void make_frags(struct xen_netif *netif, struct sk_buff *skb,
++		       struct xen_netif_tx_request *req)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	RING_IDX prod;
++	struct netbk_tag *tag;
++	int i;
++
++	prod = p1->front.req_prod_pvt;
++
++	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
++		skb_frag_t *frag = skb_shinfo(skb)->frags + i;
++
++		/* Adjust previous request flags */
++		req->flags |= NETTXF_more_data;
++
++		tag = allocate_tag(netif);
++		BUG_ON(tag == NULL);
++
++		tag->skb = skb_get(skb);
++
++		req = RING_GET_REQUEST(&p1->front, prod);
++
++		req->id = tag->id;
++
++		grant_tag(netif, tag, frag->page, frag->page_offset, frag->size);
++
++		req->gref = tag->gref;
++		req->offset = frag->page_offset;
++		req->size = frag->size;
++		req->flags = 0;
++
++		prod++;
++	}
++
++	p1->front.req_prod_pvt = prod;
++}
++
++void netbk_p1_start_xmit(struct xen_netif *netif, struct sk_buff *skb)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct net_device *dev = netif->dev;
++	struct xen_netif_tx_request *req;
++	RING_IDX prod;
++	struct netbk_tag *tag;
++	int frags;
++	unsigned char *data;
++	unsigned int len;
++	unsigned int page_offset;
++	unsigned int frag_size;
++	int notify;
++
++	BUG_ON(skb->dev != dev);
++
++	spin_lock_irq(&p1->lock);
++
++	/* Drop the packet if the netif is not up or there is no carrier. */
++	if (unlikely(!netif_schedulable(netif)))
++		goto drop;
++
++	if (!slot_available(netif)) {
++		netif_stop_queue(dev);
++		goto drop;
++	}
++
++	prod = p1->front.req_prod_pvt;
++
++	data = skb->data;
++	len = skb_headlen(skb);
++	BUG_ON(len == 0);
++
++	page_offset = offset_in_page(data);
++	frag_size = min((unsigned int)PAGE_SIZE - page_offset, len);
++
++	frags = 1;
++	if (page_offset + len > PAGE_SIZE)
++		frags++;
++
++	frags += skb_shinfo(skb)->nr_frags;
++
++	if (unlikely(frags > MAX_SKB_FRAGS))
++		goto drop;
++
++	tag = allocate_tag(netif);
++	BUG_ON(tag == NULL);
++
++	tag->skb = skb; /* Don't bump the ref. count */
++
++	req = RING_GET_REQUEST(&p1->front, prod);
++
++	req->id = tag->id;
++
++	grant_tag(netif, tag, virt_to_page(data), page_offset, frag_size);
++
++	req->gref = tag->gref;
++	req->offset = page_offset;
++	req->size = skb->len;
++	req->flags = 0;
++
++	if (skb->ip_summed == CHECKSUM_PARTIAL)
++		/* local packet? */
++		req->flags |= NETTXF_csum_blank | NETTXF_data_validated;
++	else if (skb->ip_summed == CHECKSUM_UNNECESSARY)
++		/* remote but checksummed. */
++		req->flags |= NETTXF_data_validated;
++
++	prod++;
++
++	data += frag_size;
++	len -= frag_size;
++
++	if (skb_shinfo(skb)->gso_size) {
++		struct xen_netif_extra_info *gso;
++
++		/* Get a new request for the extra info */
++		gso = (struct xen_netif_extra_info *)
++		      RING_GET_REQUEST(&p1->front, prod);
++
++		/* Adjust initial request flags */
++		req->flags |= NETTXF_extra_info;
++
++		gso->u.gso.size = skb_shinfo(skb)->gso_size;
++		gso->u.gso.type = XEN_NETIF_GSO_TYPE_TCPV4;
++		gso->u.gso.pad = 0;
++		gso->u.gso.features = 0;
++
++		gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
++		gso->flags = 0;
++
++		prod++;
++	}
++
++	if (len != 0) {
++		BUG_ON(page_offset + frag_size != PAGE_SIZE);
++		BUG_ON(len > PAGE_SIZE);
++
++		/* Adjust initial request flags */
++		req->flags |= NETTXF_more_data;
++
++		page_offset = 0;
++		frag_size = len;
++
++		tag = allocate_tag(netif);
++		BUG_ON(tag == NULL);
++
++		tag->skb = skb_get(skb);
++
++		/* Get a new request for the remaining header */
++		req = RING_GET_REQUEST(&p1->front, prod);
++
++		req->id = tag->id;
++
++		grant_tag(netif, tag, virt_to_page(data), page_offset, frag_size);
++
++		req->gref = tag->gref;
++		req->offset = page_offset;
++		req->size = frag_size;
++		req->flags = 0;
++
++		prod++;
++	}
++
++	p1->front.req_prod_pvt = prod;
++
++	make_frags(netif, skb, req);
++
++	p1->front.sring->rsp_event = p1->front.req_prod_pvt;
++
++	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&p1->front, notify);
++	if (notify)
++      		notify_remote_via_irq(netif->irq);
++
++	netif->stats.tx_bytes += skb->len;
++	netif->stats.tx_packets++;
++
++	xmit_complete(netif);
++	if (!slot_available(netif))
++		netif_stop_queue(dev);
++
++	spin_unlock_irq(&p1->lock);
++	return;
++
++ drop:
++	dev->stats.tx_dropped++;
++	dev_kfree_skb(skb);
++
++	spin_unlock_irq(&p1->lock);
++}
++
++static void tasklet(unsigned long data)
++{
++	struct xen_netif *netif = (struct xen_netif *)data;
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	unsigned long flags;
++
++	spin_lock_irqsave(&p1->lock, flags);
++	xmit_complete(netif);
++	spin_unlock_irqrestore(&p1->lock, flags);
++}
++
++void netbk_p1_setup(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	struct xen_netif_tx_sring *sring;
++	int i;
++
++	sring = (struct xen_netif_tx_sring *)netif->rx_comms.ring_area->addr;
++	FRONT_RING_INIT(&p1->front, sring, PAGE_SIZE);
++	SHARED_RING_INIT(sring);
++
++	spin_lock_init(&p1->lock);
++
++	tasklet_init(&p1->tasklet,
++		     tasklet,
++		     (unsigned long)netif);
++
++	if (gnttab_alloc_grant_references(NET_TX_RING_SIZE,
++					  &p1->gref_head) < 0) {
++		BUG(); /* FIXME */
++	}
++
++	p1->tag_freelist = NULL;
++
++	for (i = 0; i < NET_TX_RING_SIZE; i++) {
++		struct netbk_tag *tag = &p1->tag[i];
++
++		tag->id = i;
++		tag->skb = NULL;
++
++		tag->gref = gnttab_claim_grant_reference(&p1->gref_head);
++		BUG_ON(tag->gref < 0);
++
++		tag->next = p1->tag_freelist;
++		p1->tag_freelist = tag;
++	}
++}
++
++void netbk_p1_teardown(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++	int i;
++
++	for (i = 0; i < NET_TX_RING_SIZE; i++) {
++		struct netbk_tag *tag = &p1->tag[i];
++
++		if (tag->skb == NULL)
++			continue;
++
++		ungrant_tag(tag);
++		dev_kfree_skb_irq(tag->skb);
++		free_tag(netif, tag);
++	}
++
++	i = 0;
++	while (p1->tag_freelist != NULL) {
++		struct netbk_tag *tag;
++
++		tag = p1->tag_freelist;
++		p1->tag_freelist = tag->next;
++
++		gnttab_release_grant_reference(&p1->gref_head, tag->gref);
++		i++;
++	}
++	BUG_ON(i != NET_TX_RING_SIZE);
++
++	gnttab_free_grant_references(p1->gref_head);	
++}
++
++void netbk_p1_event(struct xen_netif *netif)
++{
++	struct netbk_protocol1 *p1 = &netif->rx.p1;
++
++	tasklet_schedule(&p1->tasklet);
++}
+diff -r 917285fe312b drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Fri Feb 03 17:02:31 2012 +0000
++++ b/drivers/xen/netback/xenbus.c	Mon Feb 06 10:46:46 2012 +0000
+@@ -123,6 +123,21 @@ static int netback_probe(struct xenbus_d
+ 			goto abort_transaction;
+ 		}
+ 
++		/* Advertize the supported RX protocol range */
++		err = xenbus_printf(xbt, dev->nodename,
++				    "min-rx-protocol", "%u", NETBK_MIN_RX_PROTOCOL);
++		if (err) {
++			message = "writing min-rx-protocol";
++			goto abort_transaction;
++		}
++
++		err = xenbus_printf(xbt, dev->nodename,
++				    "max-rx-protocol", "%u", MODPARM_netback_max_rx_protocol);
++		if (err) {
++			message = "writing max-rx-protocol";
++			goto abort_transaction;
++		}
++
+ 		err = xenbus_transaction_end(xbt, 0);
+ 	} while (err == -EAGAIN);
+ 
+@@ -137,7 +152,6 @@ static int netback_probe(struct xenbus_d
+ 	if (err)
+ 		goto fail;
+ 
+-	/* This kicks hotplug scripts, so do it immediately. */
+ 	backend_create_netif(be);
+ 
+ 	return 0;
+@@ -233,7 +247,7 @@ static void frontend_changed(struct xenb
+ {
+ 	struct backend_info *be = dev_get_drvdata(&dev->dev);
+ 
+-	DPRINTK("%s", xenbus_strstate(frontend_state));
++	printk("%s: %s\n", dev->otherend, xenbus_strstate(frontend_state));
+ 
+ 	be->frontend_state = frontend_state;
+ 
+@@ -243,6 +257,7 @@ static void frontend_changed(struct xenb
+ 			printk(KERN_INFO "%s: %s: prepare for reconnect\n",
+ 			       __FUNCTION__, dev->nodename);
+ 			xenbus_switch_state(dev, XenbusStateInitWait);
++			backend_create_netif(be);
+ 		}
+ 		break;
+ 
+@@ -252,7 +267,6 @@ static void frontend_changed(struct xenb
+ 	case XenbusStateConnected:
+ 		if (dev->state == XenbusStateConnected)
+ 			break;
+-		backend_create_netif(be);
+ 		if (be->netif)
+ 			connect(be);
+ 		break;
+@@ -521,7 +535,7 @@ static int connect_rings(struct backend_
+ 	struct xen_netif *netif = be->netif;
+ 	struct xenbus_device *dev = be->dev;
+ 	unsigned long tx_ring_ref, rx_ring_ref;
+-	unsigned int evtchn, rx_copy;
++	unsigned int evtchn, rx_copy, rx_protocol;
+ 	int err;
+ 	int val;
+ 
+@@ -538,6 +552,10 @@ static int connect_rings(struct backend_
+ 		return err;
+ 	}
+ 
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "rx-protocol",
++			 "%d", &rx_protocol) < 0)
++		rx_protocol = NETBK_MIN_RX_PROTOCOL;
++
+ 	err = xenbus_scanf(XBT_NIL, dev->otherend, "request-rx-copy", "%u",
+ 			   &rx_copy);
+ 	if (err == -ENOENT) {
+@@ -588,7 +606,7 @@ static int connect_rings(struct backend_
+ 	netif_set_features(netif);
+ 
+ 	/* Map the shared frame, irq etc. */
+-	err = netif_map(netif, tx_ring_ref, rx_ring_ref, evtchn);
++	err = netif_map(netif, tx_ring_ref, rx_ring_ref, evtchn, rx_protocol);
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err,
+ 				 "mapping shared-frames %lu/%lu port %u",

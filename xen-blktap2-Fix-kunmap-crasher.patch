@@ -1,0 +1,28 @@
+From 2d7423db790bafb3dcfbad9c06ea2602b34a5463 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:33 -0700
+Subject: [PATCH 07/18] xen/blktap: Fix kunmap crasher.
+
+The VMA may be gone anytime, but the current mm is always right.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 925cdaa..c8bae32 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -294,7 +294,7 @@ blktap_unmap(struct blktap *tap, struct blktap_request *request)
+ 		      request->handles[i].user);
+ 
+ 		if (request->handles[i].kernel == INVALID_GRANT_HANDLE) {
+-			blktap_umap_uaddr(tap->ring.vma->vm_mm, kvaddr);
++			blktap_umap_uaddr(current->mm, kvaddr);
+ 			flush_tlb_kernel_page(kvaddr);
+ 			set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT,
+ 					    INVALID_P2M_ENTRY);
+-- 
+1.7.0.4
+

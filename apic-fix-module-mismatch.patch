@@ -1,0 +1,15 @@
+# HG changeset patch
+# Parent 654d08036dcb850b77b040b83988961ad134fb7c
+
+diff -r 654d08036dcb arch/x86/kernel/apic/probe_32.c
+--- a/arch/x86/kernel/apic/probe_32.c
++++ b/arch/x86/kernel/apic/probe_32.c
+@@ -52,7 +52,7 @@ static int __init print_ipi_mode(void)
+ }
+ late_initcall(print_ipi_mode);
+ 
+-void default_setup_apic_routing(void)
++void __init default_setup_apic_routing(void)
+ {
+ 	int version = apic_version[boot_cpu_physical_apicid];
+ 

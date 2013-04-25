@@ -1,0 +1,22 @@
+diff -r 5db45b60da0d drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jun 30 23:56:18 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Wed Jun 30 23:57:14 2010 -0700
+@@ -321,14 +321,14 @@
+ 		if (RING_REQUEST_CONS_OVERFLOW(&blk_rings->common, rc))
+ 			break;
+ 
+-		if (kthread_should_stop()) {
++		pending_req = alloc_req();
++		if (NULL == pending_req) {
++			blkif->st_oo_req++;
+ 			more_to_do = 1;
+ 			break;
+ 		}
+ 
+-		pending_req = alloc_req();
+-		if (NULL == pending_req) {
+-			blkif->st_oo_req++;
++		if (kthread_should_stop()) {
+ 			more_to_do = 1;
+ 			break;
+ 		}

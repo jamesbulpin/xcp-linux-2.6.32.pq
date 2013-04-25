@@ -1,0 +1,171 @@
+From 0ac10022ef34c7a5dbc3c646f09b53173329671a Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:33 -0700
+Subject: [PATCH 06/18] xen/blktap: Clean up ring and device majors stored.
+
+One extern int ought to be enough for anyone.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    8 +++++---
+ drivers/xen/blktap2/control.c |   13 +++++--------
+ drivers/xen/blktap2/device.c  |   10 +++++-----
+ drivers/xen/blktap2/ring.c    |    5 ++---
+ 4 files changed, 17 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index a303847..7ff4415 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -10,6 +10,8 @@
+ #include <xen/grant_table.h>
+ 
+ extern int blktap_debug_level;
++extern int blktap_ring_major;
++extern int blktap_device_major;
+ 
+ #define BTPRINTK(level, tag, force, _f, _a...)				\
+ 	do {								\
+@@ -178,7 +180,7 @@ blktap_active(struct blktap *tap)
+ 
+ int blktap_control_destroy_device(struct blktap *);
+ 
+-int blktap_ring_init(int *);
++int blktap_ring_init(void);
+ void blktap_ring_exit(void);
+ int blktap_ring_create(struct blktap *);
+ int blktap_ring_destroy(struct blktap *);
+@@ -189,8 +191,8 @@ void blktap_sysfs_free(void);
+ int blktap_sysfs_create(struct blktap *);
+ int blktap_sysfs_destroy(struct blktap *);
+ 
+-int blktap_device_init(int *);
+-void blktap_device_free(void);
++int blktap_device_init(void);
++void blktap_device_exit(void);
+ int blktap_device_create(struct blktap *, struct blktap_params *);
+ int blktap_device_destroy(struct blktap *);
+ int blktap_device_run_queue(struct blktap *);
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 4f3bdd2..4c955fa 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -11,9 +11,6 @@ DEFINE_MUTEX(blktap_lock);
+ struct blktap **blktaps;
+ int blktap_max_minor;
+ 
+-static int ring_major;
+-static int device_major;
+-
+ static struct blktap *
+ blktap_control_get_minor(void)
+ {
+@@ -140,8 +137,8 @@ blktap_control_ioctl(struct inode *inode, struct file *filp,
+ 		if (!tap)
+ 			return -ENOMEM;
+ 
+-		h.ring   = ring_major;
+-		h.device = device_major;
++		h.ring   = blktap_ring_major;
++		h.device = blktap_device_major;
+ 		h.minor  = tap->minor;
+ 
+ 		if (copy_to_user(ptr, &h, sizeof(h))) {
+@@ -252,7 +249,7 @@ blktap_exit(void)
+ 	blktap_control_exit();
+ 	blktap_ring_exit();
+ 	blktap_sysfs_free();
+-	blktap_device_free();
++	blktap_device_exit();
+ 	blktap_request_pool_free();
+ }
+ 
+@@ -268,11 +265,11 @@ blktap_init(void)
+ 	if (err)
+ 		return err;
+ 
+-	err = blktap_device_init(&device_major);
++	err = blktap_device_init();
+ 	if (err)
+ 		goto fail;
+ 
+-	err = blktap_ring_init(&ring_major);
++	err = blktap_ring_init();
+ 	if (err)
+ 		goto fail;
+ 
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 26027a8..925cdaa 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -30,7 +30,7 @@ struct blktap_grant_table {
+ 	struct gnttab_map_grant_ref grants[BLKIF_MAX_SEGMENTS_PER_REQUEST * 2];
+ };
+ 
+-static int blktap_device_major;
++int blktap_device_major;
+ 
+ static inline struct blktap *
+ dev_to_blktap(struct blktap_device *dev)
+@@ -941,7 +941,7 @@ fail:
+ }
+ 
+ int __init
+-blktap_device_init(int *maj)
++blktap_device_init()
+ {
+ 	int major;
+ 
+@@ -950,16 +950,16 @@ blktap_device_init(int *maj)
+ 	if (major < 0) {
+ 		BTERR("Couldn't register blktap device\n");
+ 		return -ENOMEM;
+-	}	
++	}
+ 
+-	blktap_device_major = *maj = major;
++	blktap_device_major = major;
+ 	BTINFO("blktap device major %d\n", major);
+ 
+ 	return 0;
+ }
+ 
+ void
+-blktap_device_free(void)
++blktap_device_exit(void)
+ {
+ 	if (blktap_device_major)
+ 		unregister_blkdev(blktap_device_major, "tapdev");
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 0695dbb..4f51087 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -14,7 +14,7 @@
+ #define blkback_pagemap_contains_page(page) 0
+ #endif
+ 
+-static int blktap_ring_major;
++int blktap_ring_major;
+ static struct cdev blktap_ring_cdev;
+ 
+ static inline struct blktap *
+@@ -442,7 +442,7 @@ blktap_ring_create(struct blktap *tap)
+ }
+ 
+ int __init
+-blktap_ring_init(int *major)
++blktap_ring_init(void)
+ {
+ 	dev_t dev = 0;
+ 	int err;
+@@ -465,7 +465,6 @@ blktap_ring_init(int *major)
+ 
+ 	blktap_ring_major = MAJOR(dev);
+ 	BTINFO("blktap ring major: %d\n", blktap_ring_major);
+-	*major = blktap_ring_major;
+ 
+ 	return 0;
+ }
+-- 
+1.7.0.4
+

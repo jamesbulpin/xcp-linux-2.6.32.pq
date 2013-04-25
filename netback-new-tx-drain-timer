@@ -1,0 +1,237 @@
+# HG changeset patch
+# Parent 0e09c779720d75069ee73f8d4bf314d092fc29ae
+
+Re-instate timer to drain transmit queue.
+
+This is necessary because some of the SKBs in the queue may contain
+pages that have been DMA mapped. DMA mapping a page prevents it from
+ever being grant-copied by the pending-inuse timer, hence the related
+TXP will never be completed unless we dev_kfree_skb() and if the guest
+is unresponsive that won't happen unless we forcibly drain the
+transmit queue from time to time.
+The original timer had a rather aggressive timeout of 500ms. The new
+timer is set at 5s.
+
+diff -r 0e09c779720d drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Tue Jul 12 10:26:45 2011 +0100
++++ b/drivers/xen/netback/common.h	Tue Jul 12 10:31:17 2011 +0100
+@@ -153,6 +153,8 @@ struct xen_netif {
+ 	/* Internal feature information. */
+ 	u8 can_queue:1;	    /* can queue packets for receiver? */
+ 
++	struct timer_list wake_queue;
++
+ 	/* Does the frontend end want the gso information prefixed, or
+ 	 * in an extra segment? */
+ 	int gso_mode;
+@@ -315,6 +317,7 @@ static inline int netbk_can_sg(struct ne
+ struct pending_tx_info {
+ 	struct xen_netif_tx_request req;
+ 	struct xen_netif *netif;
++	int mapped;
+ };
+ typedef unsigned int pending_ring_idx_t;
+ 
+@@ -339,6 +342,8 @@ union page_mapping_overlay {
+ };
+ 
+ struct xen_netbk {
++	int group;
++
+ 	union {
+ 		struct {
+ 			struct tasklet_struct net_tx_tasklet;
+@@ -360,6 +365,7 @@ struct xen_netbk {
+ 	rwlock_t mmap_lock;
+ 	struct page **mmap_pages;
+ 	atomic_t mmap_ref[MAX_PENDING_REQS];
++	unsigned int pending_mapped;
+ 
+ 	pending_ring_idx_t pending_prod;
+ 	pending_ring_idx_t pending_cons;
+diff -r 0e09c779720d drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Tue Jul 12 10:26:45 2011 +0100
++++ b/drivers/xen/netback/interface.c	Tue Jul 12 10:31:17 2011 +0100
+@@ -328,6 +328,8 @@ struct xen_netif *netif_alloc(struct dev
+ 
+ 	netback_carrier_off(netif);
+ 
++	init_timer(&netif->wake_queue);
++
+ 	netif->credit_bytes = netif->remaining_credit = ~0UL;
+ 	netif->credit_usec  = 0UL;
+ 	init_timer(&netif->credit_timeout);
+@@ -490,6 +492,7 @@ void netif_disconnect(struct xen_netif *
+ 	atomic_dec(&netif->refcnt);
+ 	wait_event(netif->waiting_to_free, atomic_read(&netif->refcnt) == 0);
+ 
++	del_timer_sync(&netif->wake_queue);
+ 	del_timer_sync(&netif->credit_timeout);
+ 
+ 	if (netif->irq)
+diff -r 0e09c779720d drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Tue Jul 12 10:26:45 2011 +0100
++++ b/drivers/xen/netback/netback.c	Tue Jul 12 10:31:17 2011 +0100
+@@ -112,7 +112,8 @@ void netif_put_page_ext(struct page_ext 
+ 	struct xen_netbk *netbk;
+ 
+ 	netbk = &xen_netbk[ext->group];
+-	atomic_dec(&netbk->mmap_ref[ext->idx]);
++	if (atomic_dec_and_test(&netbk->mmap_ref[ext->idx]))
++		xen_netbk_bh_handler(netbk, 0);
+ }
+ 
+ static void netif_page_release(struct page *pg, unsigned int order)
+@@ -866,6 +867,10 @@ static inline void net_tx_action_dealloc
+ 				list_move_tail(&inuse->list, &list);
+ 				continue;
+ 			case -EBUSY:
++				printk(KERN_INFO "netback[%d]: TXP%d is DMA mapped\n",
++				       netbk->group, pending_idx);
++				pending_tx_info[pending_idx].mapped = 1;
++				netbk->pending_mapped++;
+ 				list_del_init(&inuse->list);
+ 				continue;
+ 			case -EAGAIN:
+@@ -884,6 +889,14 @@ static inline void net_tx_action_dealloc
+ 		pending_tx_info = netbk->pending_tx_info;
+ 		pending_idx = inuse - netbk->pending_inuse;
+ 
++		if (pending_tx_info[pending_idx].mapped) {
++			printk(KERN_INFO "netback[%d]: DMA mapped TXP %d released\n",
++			       netbk->group, pending_idx);
++			pending_tx_info[pending_idx].mapped = 0;
++			BUG_ON(netbk->pending_mapped == 0);
++			--netbk->pending_mapped;
++		}
++
+ 		netif = pending_tx_info[pending_idx].netif;
+ 
+ 		make_tx_response(netif, &pending_tx_info[pending_idx].req,
+@@ -1635,6 +1648,9 @@ static int __init netback_init(void)
+ 
+ 	for (group = 0; group < xen_netbk_group_nr; group++) {
+ 		struct xen_netbk *netbk = &xen_netbk[group];
++
++		netbk->group = group;
++
+ 		skb_queue_head_init(&netbk->rx_queue);
+ 		skb_queue_head_init(&netbk->tx_queue);
+ 
+diff -r 0e09c779720d drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Tue Jul 12 10:26:45 2011 +0100
++++ b/drivers/xen/netback/tx.c	Tue Jul 12 10:31:17 2011 +0100
+@@ -38,6 +38,31 @@ static inline int max_skb_slots(struct x
+ 	return 1; /* all in one */
+ }
+ 
++static void netbk_wake_queue(struct xen_netif *netif)
++{
++	if (netif_schedulable(netif))
++		netif_wake_queue(netif->dev);
++}
++
++static void __netbk_wake_queue(unsigned long data)
++{
++	struct xen_netif *netif = (struct xen_netif *)data;
++
++	if (netif_queue_stopped(netif->dev)) {
++		printk("vif%u.%u: draining TX queue\n", netif->domid, netif->handle); 
++		netif_wake_queue(netif->dev);
++	}	
++}
++
++static void netbk_stop_queue(struct xen_netif *netif)
++{
++	netif->wake_queue.function = __netbk_wake_queue;
++	netif->wake_queue.data = (unsigned long)netif;
++
++	netif_stop_queue(netif->dev);
++	mod_timer(&netif->wake_queue, jiffies + (5 * HZ));
++}
++
+ /*
+  * Protocol 0
+  */
+@@ -193,11 +218,8 @@ void netbk_p0_start_xmit(struct xen_neti
+ 		goto drop;
+ 
+ 	/* Drop the packet if the target domain has no receive buffers. */
+-	if (unlikely(netbk_p0_queue_full(netif))) {
+-		printk(KERN_WARNING "%s dropping packet (shared ring full)\n",
+-			   __func__);
++	if (unlikely(netbk_p0_queue_full(netif)))
+ 		goto drop;
+-	}
+ 
+ 	/*
+ 	 * XXX For now we also copy skbuffs whose head crosses a page
+@@ -227,7 +249,7 @@ void netbk_p0_start_xmit(struct xen_neti
+ 			max_skb_slots(netif);
+ 		mb(); /* request notification /then/ check & stop the queue */
+ 		if (netbk_p0_queue_full(netif))
+-			netif_stop_queue(dev);
++			netbk_stop_queue(netif);
+ 	}
+ 	skb_queue_tail(&netbk->rx_queue, skb);
+ 
+@@ -256,8 +278,8 @@ void netbk_p0_teardown(struct xen_netif 
+ 
+ void netbk_p0_event(struct xen_netif *netif)
+ {
+-	if (netif_schedulable(netif) && !netbk_p0_queue_full(netif))
+-		netif_wake_queue(netif->dev);
++	if (!netbk_p0_queue_full(netif))
++		netbk_wake_queue(netif);
+ }
+ 
+ /*
+@@ -501,7 +523,6 @@ static int slot_available(struct xen_net
+ static void xmit_complete(struct xen_netif *netif)
+ {
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+-	struct net_device *dev = netif->dev;
+ 
+ 	for (;;) {
+ 		RING_IDX cons, prod;
+@@ -534,10 +555,9 @@ static void xmit_complete(struct xen_net
+ 		p1->front.rsp_cons = cons;
+ 	}
+ 
+-	if (unlikely(netif_queue_stopped(dev)) &&
+-            slot_available(netif) &&
++	if (slot_available(netif) &&
+ 	    gref_available(netif))
+-		netif_wake_queue(dev);
++		netbk_wake_queue(netif);
+ }
+ 
+ static void make_frags(struct xen_netif *netif, struct sk_buff *skb,
+@@ -598,10 +618,8 @@ void netbk_p1_start_xmit(struct xen_neti
+ 		goto drop;
+ 
+ 	if (!slot_available(netif) ||
+-	    !gref_available(netif)) {
+-		netif_stop_queue(dev);
++	    !gref_available(netif))
+ 		goto drop;
+-	}
+ 
+ 	prod = p1->front.req_prod_pvt;
+ 
+@@ -715,13 +733,13 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+ 	if (!slot_available(netif) ||
+ 	    !gref_available(netif))
+-		netif_stop_queue(dev);
++		netbk_stop_queue(netif);
+ 
+ 	spin_unlock_irq(&p1->lock);
+ 	return;
+ 
+  drop:
+-	dev->stats.tx_dropped++;
++	netif->stats.tx_dropped++;
+ 	dev_kfree_skb(skb);
+ 
+ 	spin_unlock_irq(&p1->lock);

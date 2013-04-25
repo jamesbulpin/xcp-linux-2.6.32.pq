@@ -1,0 +1,543 @@
+CA-42404: Memorize queue states.
+
+When driven by the frontend, reads of pause and shutdown keys from
+xenstore are racing. In the case at hand we reopened the bdev during a
+frontend connect, while a foregoing backend unpause was emitted but
+still pending.
+
+Fixed by reinstating the queue_state bit vector, congruent to
+queue_events, which now tracks both request and completion flags,
+resp.
+
+Code now uses asm/bitops.h macros, not C operators, for better
+readability.
+
+Pause and shutdown now take the backend mutex. This should not be
+needed with Xapi's built-in serialization, but might help avoid
+trouble on non-XCP platforms.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 31721b525d12 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Fri Jul 09 17:22:50 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jul 15 15:22:14 2010 -0700
+@@ -56,11 +56,11 @@
+ 		printk(KERN_WARNING "blk_back: " fmt, ##args);	\
+ } while(0)
+ 
+-#define QUEUE_RUNNING          (1<<0)
+-#define QUEUE_PAUSE_DONE       (1<<1)
+-#define QUEUE_SHUTDOWN_DONE    (1<<2)
+-#define QUEUE_PAUSE_REQUEST    (1<<3)
+-#define QUEUE_SHUTDOWN_REQUEST (1<<4)
++#define QUEUE_RUNNING          0
++#define QUEUE_PAUSE_DONE       1
++#define QUEUE_SHUTDOWN_DONE    2
++#define QUEUE_PAUSE_REQUEST    3
++#define QUEUE_SHUTDOWN_REQUEST 4
+ 
+ struct backend_info;
+ 
+diff -r 31721b525d12 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Fri Jul 09 17:22:50 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jul 15 15:22:14 2010 -0700
+@@ -20,6 +20,7 @@
+ #include <stdarg.h>
+ #include <linux/module.h>
+ #include <linux/kthread.h>
++#include <linux/bitops.h>
+ #include "common.h"
+ 
+ #undef DPRINTK
+@@ -36,7 +37,9 @@
+ 	struct xenbus_watch backend_watch;
+ 	struct xenbus_watch shutdown_watch;
+ 	struct xenbus_watch pause_watch;
+-	unsigned queue_events;
++	unsigned long queue_events;
++	unsigned long queue_state;
++	unsigned long pending_events;
+ 	unsigned major;
+ 	unsigned minor;
+ 	int group_added;
+@@ -48,7 +51,7 @@
+ static int connect_ring(struct backend_info *);
+ static void backend_changed(struct xenbus_watch *, const char **,
+ 			    unsigned int);
+-static int blkback_open_bdev(struct backend_info *);
++static void blkback_open_bdev(struct backend_info *);
+ 
+ /* Order of maximum shared ring size advertised to the front end. */
+ static int blkif_max_ring_page_order = 0;
+@@ -61,128 +64,93 @@
+  * to the hotplug scripts.
+  */
+ 
+-static int
+-blkback_user_write(struct backend_info *be,
+-		   const char *req, const char *ack, unsigned mask,
+-		   struct xenbus_transaction xbt)
++static inline void
++blkback_queue_set(struct backend_info *be, int flag)
++{
++	if (__test_and_set_bit(flag, &be->queue_state))
++		return;
++
++	if (test_bit(flag, &be->queue_events))
++		__set_bit(flag, &be->pending_events);
++}
++
++static inline void
++blkback_queue_clear(struct backend_info *be, int flag)
++{
++	if (!__test_and_clear_bit(flag, &be->queue_state))
++		return;
++
++	if (test_bit(flag, &be->queue_events))
++		__set_bit(flag, &be->pending_events);
++}
++
++static void
++blkback_signal_uevents(struct backend_info *be)
++{
++	if (be->pending_events) {
++		struct xenbus_device *xbdev = be->dev;
++		if (xbdev)
++			kobject_uevent(&xbdev->dev.kobj, KOBJ_CHANGE);
++
++		be->pending_events = 0;
++	}
++}
++
++static void
++blkback_set_user(struct backend_info *be, int flag,
++		   const char *ack, struct xenbus_transaction xbt)
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+ 	int err;
+ 
+-	if (!xenbus_exists(xbt, xbdev->nodename, req))
+-		return 0;
++	blkback_queue_set(be, flag);
+ 
+-	if (ack && xenbus_exists(xbt, xbdev->nodename, ack))
+-		return 0;
+-
+-	if (mask && (be->queue_events & mask))
+-		return 1;
++	if (!xbdev || test_bit(flag, &be->queue_events))
++		return;
+ 
+ 	err = xenbus_write(xbt, xbdev->nodename, ack, "");
+ 	if (err)
+ 		xenbus_dev_fatal(xbdev, err, "writing %s", ack);
+-
+-	return 0;
+ }
+ 
+-static int
+-blkback_user_rm(struct backend_info *be,
+-		const char *req, const char *ack, unsigned mask,
+-		struct xenbus_transaction xbt)
++static void
++blkback_clear_user(struct backend_info *be, int flag,
++		   const char *ack, struct xenbus_transaction xbt)
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+ 	int err;
+ 
+-	if (!xenbus_exists(xbt, xbdev->nodename, ack))
+-		return 0;
++	blkback_queue_clear(be, flag);
+ 
+-	if (req)
+-		WARN_ON(xenbus_exists(xbt, xbdev->nodename, req));
+-
+-	if (mask && (be->queue_events & mask))
+-		return 1;
++	if (!xbdev || test_bit(flag, &be->queue_events))
++		return;
+ 
+ 	err = xenbus_rm(xbt, xbdev->nodename, ack);
+ 	if (err)
+ 		xenbus_dev_fatal(xbdev, err, "removing %s", ack);
+-
+-	return 0;
+ }
+ 
+-static void
+-blkback_signal_queue_stop(struct backend_info *be,
+-			  struct xenbus_transaction xbt)
++static int
++blkback_close_requested(struct backend_info *be)
+ {
+-	struct xenbus_device *xbdev = be->dev;
+-	int err, event = 0;
+-
+-	err = xenbus_rm(xbt, xbdev->nodename, "kthread-pid");
+-	if (err &&
+-	    err != -ENOENT)
+-		xenbus_dev_fatal(xbdev, err, "removing kthread-pid");
+-
+-	event |= blkback_user_write(be, "pause", "pause-done",
+-				    QUEUE_PAUSE_DONE, xbt);
+-
+-	event |= blkback_user_write(be, "shutdown-request", "shutdown-done",
+-				    QUEUE_SHUTDOWN_DONE, xbt);
+-
+-	if (event)
+-		kobject_uevent(&xbdev->dev.kobj, KOBJ_CHANGE);
+-}
+-
+-static void
+-blkback_signal_queue_start(struct backend_info *be,
+-			   struct xenbus_transaction xbt)
+-{
+-	struct xenbus_device *xbdev = be->dev;
+-	int err, event = 0;
+-	const char *msg;
+-
+-	err = xenbus_printf(xbt, xbdev->nodename, "kthread-pid",
+-			    "%d", be->kthread_pid);
+-	if (err) {
+-		msg = "writing kthread-pid";
+-		goto fatal;
+-	}
+-
+-	event = blkback_user_rm(be, "shutdown-request", "shutdown-done",
+-				0, xbt);
+-	if (event) {
+-		err = -EPROTO;
+-		msg = "queue restart after shutdown";
+-		goto fatal;
+-	}
+-
+-	return;
+-
+-fatal:
+-	blkif_queue_stop(be->blkif);
+-	xenbus_dev_fatal(xbdev, err, msg);
+-}
+-
+-static void
+-blkback_signal_unpause(struct backend_info *be,
+-		       struct xenbus_transaction xbt)
+-{
+-	struct xenbus_device *xbdev = be->dev;
+-	int event;
+-
+-	event = blkback_user_rm(be, "pause", "pause-done",
+-				QUEUE_PAUSE_DONE, xbt);
+-	if (event)
+-		kobject_uevent(&xbdev->dev.kobj, KOBJ_CHANGE);
++	return
++		test_bit(QUEUE_PAUSE_REQUEST, &be->queue_state) ||
++		test_bit(QUEUE_SHUTDOWN_REQUEST, &be->queue_state);
+ }
+ 
+ /*
+  * Start the queue.
+  */
+ static void
+-blkback_queue_restart(struct backend_info *be)
++blkback_queue_start(struct backend_info *be)
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+ 	blkif_t *blkif = be->blkif;
+ 	pid_t pid;
++	int err;
++
++	WARN_ON(!mutex_is_locked(&be->mutex));
++	BUG_ON(be->kthread_pid);
+ 
+ 	if (!blkif->irq || !blkif->bdev)
+ 		return;
+@@ -195,8 +163,6 @@
+ 			return;
+ 	}
+ 
+-	BUG_ON(be->kthread_pid);
+-
+ 	pid = blkif_queue_start(blkif, be->devname);
+ 	if (pid < 0) {
+ 		xenbus_dev_fatal(xbdev, pid, "starting xenblkd");
+@@ -206,8 +172,12 @@
+ 
+ 	atomic_inc(&be->refcnt);
+ 	be->kthread_pid = pid;
++	blkback_queue_set(be, QUEUE_RUNNING);
+ 
+-	blkback_signal_queue_start(be, XBT_NIL);
++	err = xenbus_printf(XBT_NIL, xbdev->nodename, "kthread-pid",
++			    "%d", be->kthread_pid);
++	if (err)
++		xenbus_dev_error(xbdev, err, "writing kthread-pid");
+ }
+ 
+ /*
+@@ -219,11 +189,13 @@
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+ 	blkif_t *blkif = be->blkif;
++	int err;
+ 
+ 	WARN_ON(!mutex_is_locked(&be->mutex));
+ 	WARN_ON(be->kthread_pid);
+ 
+ 	blkif_bdev_close(blkif);
++	blkback_queue_clear(be, QUEUE_RUNNING);
+ 
+ 	if (!xbdev || xbdev->state == XenbusStateClosing) {
+ 		blkif_disconnect(blkif);
+@@ -232,8 +204,20 @@
+ 			xenbus_switch_state(xbdev, XenbusStateClosed);
+ 	}
+ 
+-	if (xbdev)
+-		blkback_signal_queue_stop(be, xbt);
++	if (xbdev) {
++		err = xenbus_rm(xbt, xbdev->nodename, "kthread-pid");
++		if (err &&
++		    err != -ENOENT)
++			xenbus_dev_fatal(xbdev, err, "removing kthread-pid");
++	}
++
++	if (test_bit(QUEUE_PAUSE_REQUEST, &be->queue_state))
++		blkback_set_user(be,
++				 QUEUE_PAUSE_DONE, "pause-done", xbt);
++
++	if (test_bit(QUEUE_SHUTDOWN_REQUEST, &be->queue_state))
++		blkback_set_user(be,
++				 QUEUE_SHUTDOWN_DONE, "shutdown-done", xbt);
+ }
+ 
+ /*
+@@ -246,7 +230,7 @@
+ 	blkif_t *blkif = be->blkif;
+ 	int stopped;
+ 
+-	mutex_lock(&be->mutex);
++	WARN_ON(!mutex_is_locked(&be->mutex));
+ 
+ 	stopped = xbdev->state == XenbusStateClosed;
+ 	WARN_ON(stopped && be->kthread_pid);
+@@ -261,8 +245,6 @@
+ 
+ 	if (stopped)
+ 		__blkback_queue_stopped(be, XBT_NIL);
+-
+-	mutex_unlock(&be->mutex);
+ }
+ 
+ /****************************************************************
+@@ -383,7 +365,7 @@
+ 			  char *buf)
+ {
+ 	struct backend_info *be = dev_get_drvdata(dev);
+-	return sprintf(buf, "%#x", be->queue_events);
++	return sprintf(buf, "%#lx", be->queue_events);
+ }
+ ssize_t store_queue_events(struct device *dev, struct device_attribute *attr,
+ 			   const char *buf, size_t count)
+@@ -506,6 +488,7 @@
+ 
+ 	be->kthread_pid = 0;
+ 	__blkback_queue_stopped(be, XBT_NIL);
++	blkback_signal_uevents(be);
+ 
+ 	mutex_unlock(&be->mutex);
+ 
+@@ -532,10 +515,13 @@
+ 	force = !strncmp(type, "force", len);
+ 	kfree(type);
+ 
+-	if (be->queue_events & QUEUE_SHUTDOWN_REQUEST)
+-		kobject_uevent(&xbdev->dev.kobj, KOBJ_CHANGE);
++	mutex_lock(&be->mutex);
+ 
++	blkback_queue_set(be, QUEUE_SHUTDOWN_REQUEST);
+ 	blkback_queue_stop(be, 1, force);
++	blkback_signal_uevents(be);
++
++	mutex_unlock(&be->mutex);
+ }
+ 
+ static void backend_pause(struct xenbus_watch *watch,
+@@ -544,27 +530,29 @@
+ 	struct backend_info *be
+ 		= container_of(watch, struct backend_info, pause_watch);
+ 	struct xenbus_device *xbdev = be->dev;
+-	int err;
++	int pausing, paused;
+ 
+-	if (xenbus_exists(XBT_NIL, xbdev->nodename, "pause")) {
++	pausing = xenbus_exists(XBT_NIL, xbdev->nodename, "pause");
++	paused  = test_bit(QUEUE_PAUSE_DONE, &be->queue_state);
+ 
+-		if (be->queue_events & QUEUE_PAUSE_REQUEST)
+-			kobject_uevent(&xbdev->dev.kobj, KOBJ_CHANGE);
++	mutex_lock(&be->mutex);
+ 
++	if (pausing) {
++
++		blkback_queue_set(be, QUEUE_PAUSE_REQUEST);
+ 		blkback_queue_stop(be, 0, 1);
+ 
+-		return;
++	} else if (paused) {
++
++		blkback_queue_clear(be, QUEUE_PAUSE_REQUEST);
++		blkback_clear_user(be, QUEUE_PAUSE_DONE, "pause-done", XBT_NIL);
++
++		blkback_open_bdev(be);
++		blkback_queue_start(be);
+ 	}
+ 
+-	if (xenbus_exists(XBT_NIL, xbdev->nodename, "pause-done")) {
+-		WARN_ON(be->kthread_pid);
+-
+-		blkback_signal_unpause(be, XBT_NIL);
+-
+-		err = blkback_open_bdev(be);
+-		if (!err)
+-			blkback_queue_restart(be);
+-	}
++	blkback_signal_uevents(be);
++	mutex_unlock(&be->mutex);
+ }
+ 
+ int blkback_barrier(struct xenbus_transaction xbt,
+@@ -658,19 +646,22 @@
+ 	return err;
+ }
+ 
+-static int blkback_open_bdev(struct backend_info *be)
++static void blkback_open_bdev(struct backend_info *be)
+ {
+ 	struct xenbus_device *dev = be->dev;
+ 	int err, mode, cdrom = 0;
+ 	unsigned major, minor;
+ 	char *s;
+ 
++	if (blkback_close_requested(be))
++		return;
++
+ 	err = xenbus_scanf(XBT_NIL, dev->nodename, "physical-device", "%x:%x",
+ 			   &major, &minor);
+ 	if (err != 2) {
+ 		err = err < 0 ? err : -EINVAL;
+ 		xenbus_dev_fatal(dev, err, "reading physical-device");
+-		return err;
++		return;
+ 	}
+ 
+ 	if ((be->major || be->minor) &&
+@@ -680,14 +671,14 @@
+ 		       "%x:%x) not supported.\n", be->major, be->minor,
+ 		       major, minor);
+ 		xenbus_dev_fatal(dev, err, "invalid physical-device change");
+-		return -EINVAL;
++		return;
+ 	}
+ 
+ 	s = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
+ 	if (IS_ERR(s)) {
+ 		err = PTR_ERR(s);
+ 		xenbus_dev_fatal(dev, err, "reading mode");
+-		return err;
++		return;
+ 	}
+ 	mode  = FMODE_READ;
+ 	mode |= strchr(s, 'w') ? FMODE_WRITE : 0;
+@@ -702,8 +693,6 @@
+ 	err = blkif_bdev_open(be->blkif, MKDEV(major, minor), mode, cdrom);
+ 	if (err)
+ 		xenbus_dev_fatal(dev, err, "opening device");
+-
+-	return 0;
+ }
+ 
+ static void
+@@ -716,7 +705,7 @@
+ 	if (blkif->bdev)
+ 		return;
+ 
+-	if (xenbus_exists(XBT_NIL, xbdev->nodename, "pause"))
++	if (blkback_close_requested(be))
+ 		return;
+ 
+ 	err = blkif_bdev_reopen(be->blkif);
+@@ -736,26 +725,20 @@
+ 		= container_of(watch, struct backend_info, backend_watch);
+ 	struct xenbus_device *xbdev = be->dev;
+ 	blkif_t *blkif = be->blkif;
+-	int err;
+ 
+ 	if (!xenbus_exists(XBT_NIL, xbdev->nodename, "physical-device")) {
+ 		blkif->dev = 0;
+ 		return;
+ 	}
+ 
+-	if (xenbus_exists(XBT_NIL, xbdev->nodename, "pause"))
+-		return;
++	mutex_lock(&be->mutex);
+ 
+-	err = blkback_open_bdev(be);
+-	if (err) {
+-		xenbus_dev_error(xbdev, err, "opening device");
+-		return;
+-	}
++	blkback_open_bdev(be);
++	blkback_queue_start(be);
+ 
+-	blkback_queue_restart(be);
++	mutex_unlock(&be->mutex);
+ }
+ 
+-
+ /**
+  * Callback received when the frontend's state changes.
+  */
+@@ -779,22 +762,24 @@
+ 
+ 	case XenbusStateInitialised:
+ 	case XenbusStateConnected:
++		mutex_lock(&be->mutex);
++
+ 		/* Ensure we connect even when two watches fire in 
+ 		   close successsion and we miss the intermediate value 
+ 		   of frontend_state. */
+ 		if (dev->state != XenbusStateConnected &&
+ 		    dev->state != XenbusStateClosing) {
+ 			err = connect_ring(be);
+-			if (err)
+-				break;
+-
+-			blkback_reopen_bdev(be);
+-			blkback_queue_restart(be);
++			if (!err) {
++				blkback_reopen_bdev(be);
++				blkback_queue_start(be);
++			}
+ 		}
+ 
+ 		if (dev->state == XenbusStateConnected)
+ 			blkif_notify_work(be->blkif);
+ 
++		mutex_unlock(&be->mutex);
+ 		break;
+ 
+ 	case XenbusStateClosing:
+@@ -807,7 +792,12 @@
+ 		break;
+ 
+ 	case XenbusStateClosed:
++		mutex_lock(&be->mutex);
++
+ 		blkback_queue_stop(be, 1, 1);
++		blkback_signal_uevents(be);
++
++		mutex_unlock(&be->mutex);
+ 		break;
+ 
+ 	case XenbusStateUnknown:

@@ -1,0 +1,22 @@
+diff -r 37469aa0e535 drivers/net/igb/igb_main.c
+--- a/drivers/net/igb/igb_main.c	Mon Aug 15 13:47:08 2011 +0100
++++ b/drivers/net/igb/igb_main.c	Mon Aug 15 13:56:21 2011 +0100
+@@ -3436,6 +3436,18 @@
+ 	if (hw->mac.type < e1000_82576)
+ 		return;
+ 
++	/*
++	 * Citrix NetScaler: we don't want high bandwidth VPX traffic
++	 * being delivered to domain0 so we disable VMOLR.ROPE on the
++	 * PF. Note that we only need to do this because the driver also
++	 * enables an "accept all" UTA, i.e. all packets going out via 
++	 * the L2 switch from VFs will also be sent to the PF.
++	 */
++	if (igb_xsnsmode_get()) {
++		printk(KERN_INFO "igb: %s disabling VMOLR.ROPE for NetScaler\n", netdev->name);
++		vmolr &= ~E1000_VMOLR_ROPE;
++	}
++
+ 	vmolr |= E1000_READ_REG(hw, E1000_VMOLR(vfn)) &
+ 	         ~(E1000_VMOLR_ROPE | E1000_VMOLR_MPME | E1000_VMOLR_ROMPE);
+ 	E1000_WRITE_REG(hw, E1000_VMOLR(vfn), vmolr);

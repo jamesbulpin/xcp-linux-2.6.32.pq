@@ -1,0 +1,194 @@
+From 5c4ac6ecbb2e872a0924a8341c10ebf0ec26032c Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Tue, 17 Feb 2009 00:30:35 +0000
+Subject: [PATCH] patch 02-blkback-pagemap-patch
+
+---
+ drivers/xen/blkback/Makefile          |    2 +-
+ drivers/xen/blkback/blkback-pagemap.c |   91 +++++++++++++++++++++++++++++++++
+ drivers/xen/blkback/blkback-pagemap.h |   17 ++++++
+ drivers/xen/blkback/blkback.c         |    8 +++
+ drivers/xen/blkback/common.h          |    6 ++
+ 5 files changed, 123 insertions(+), 1 deletions(-)
+ create mode 100644 drivers/xen/blkback/blkback-pagemap.c
+ create mode 100644 drivers/xen/blkback/blkback-pagemap.h
+
+diff --git a/drivers/xen/blkback/Makefile b/drivers/xen/blkback/Makefile
+--- a/drivers/xen/blkback/Makefile
++++ b/drivers/xen/blkback/Makefile
+@@ -1,3 +1,3 @@
+ obj-$(CONFIG_XEN_BLKDEV_BACKEND) := blkbk.o
+ 
+-blkbk-y	:= blkback.o xenbus.o interface.o vbd.o
++blkbk-y	:= blkback.o xenbus.o interface.o vbd.o blkback-pagemap.o
+diff --git a/drivers/xen/blkback/blkback-pagemap.c b/drivers/xen/blkback/blkback-pagemap.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blkback/blkback-pagemap.c
+@@ -0,0 +1,91 @@
++#include "common.h"
++#include "blkback-pagemap.h"
++
++static int blkback_pagemap_size;
++static struct blkback_pagemap *blkback_pagemap;
++
++static inline int
++blkback_pagemap_entry_clear(struct blkback_pagemap *map)
++{
++	static struct blkback_pagemap zero;
++	return !memcmp(map, &zero, sizeof(zero));
++}
++
++int
++blkback_pagemap_init(int pages)
++{
++	blkback_pagemap = kzalloc(pages * sizeof(struct blkback_pagemap),
++				  GFP_KERNEL);
++	if (!blkback_pagemap)
++		return -ENOMEM;
++
++	blkback_pagemap_size = pages;
++	return 0;
++}
++
++void
++blkback_pagemap_set(int idx, struct page *page,
++		    domid_t domid, busid_t busid, grant_ref_t gref)
++{
++	struct blkback_pagemap *entry;
++
++	BUG_ON(!blkback_pagemap);
++	BUG_ON(idx >= blkback_pagemap_size);
++
++	SetPageBlkback(page);
++	set_page_private(page, idx);
++
++	entry = blkback_pagemap + idx;
++	if (!blkback_pagemap_entry_clear(entry)) {
++		printk("overwriting pagemap %d: d %u b %u g %u\n",
++		       idx, entry->domid, entry->busid, entry->gref);
++		BUG();
++	}
++
++	entry->domid = domid;
++	entry->busid = busid;
++	entry->gref  = gref;
++}
++
++void
++blkback_pagemap_clear(struct page *page)
++{
++	int idx;
++	struct blkback_pagemap *entry;
++
++	idx = (int)page_private(page);
++
++	BUG_ON(!blkback_pagemap);
++	BUG_ON(!PageBlkback(page));
++	BUG_ON(idx >= blkback_pagemap_size);
++
++	entry = blkback_pagemap + idx;
++	if (blkback_pagemap_entry_clear(entry)) {
++		printk("clearing empty pagemap %d\n", idx);
++		BUG();
++	}
++
++	memset(entry, 0, sizeof(*entry));
++}
++
++struct blkback_pagemap
++blkback_pagemap_read(struct page *page)
++{
++	int idx;
++	struct blkback_pagemap *entry;
++
++	idx = (int)page_private(page);
++
++	BUG_ON(!blkback_pagemap);
++	BUG_ON(!PageBlkback(page));
++	BUG_ON(idx >= blkback_pagemap_size);
++
++	entry = blkback_pagemap + idx;
++	if (blkback_pagemap_entry_clear(entry)) {
++		printk("reading empty pagemap %d\n", idx);
++		BUG();
++	}
++
++	return *entry;
++}
++EXPORT_SYMBOL(blkback_pagemap_read);
+diff --git a/drivers/xen/blkback/blkback-pagemap.h b/drivers/xen/blkback/blkback-pagemap.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/xen/blkback/blkback-pagemap.h
+@@ -0,0 +1,17 @@
++#ifndef _BLKBACK_PAGEMAP_H_
++#define _BLKBACK_PAGEMAP_H_
++
++#include <xen/interface/xen.h>
++#include <xen/interface/grant_table.h>
++
++typedef unsigned int busid_t;
++
++struct blkback_pagemap {
++	domid_t          domid;
++	busid_t          busid;
++	grant_ref_t      gref;
++};
++
++struct blkback_pagemap blkback_pagemap_read(struct page *);
++
++#endif
+diff --git a/drivers/xen/blkback/blkback.c b/drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c
++++ b/drivers/xen/blkback/blkback.c
+@@ -175,6 +175,7 @@
+ 		handle = pending_handle(req, i);
+ 		if (handle == BLKBACK_INVALID_HANDLE)
+ 			continue;
++		blkback_pagemap_clear(virt_to_page(vaddr(req, i)));
+ 		gnttab_set_unmap_op(&unmap[invcount], vaddr(req, i),
+ 				    GNTMAP_host_map, handle);
+ 		pending_handle(req, i) = BLKBACK_INVALID_HANDLE;
+@@ -463,6 +464,10 @@
+ 			FOREIGN_FRAME(map[i].dev_bus_addr >> PAGE_SHIFT));
+ 		seg[i].buf  = map[i].dev_bus_addr | 
+ 			(req->seg[i].first_sect << 9);
++		blkback_pagemap_set(vaddr_pagenr(pending_req, i),
++				    virt_to_page(vaddr(pending_req, i)),
++				    blkif->domid, req->handle,
++				    req->seg[i].gref);
+ 	}
+ 
+ 	if (ret)
+@@ -624,6 +629,9 @@
+ 					mmap_pages, GFP_KERNEL);
+ 	pending_pages         = alloc_empty_pages_and_pagevec(mmap_pages);
+ 
++	if (blkback_pagemap_init(mmap_pages))
++		goto out_of_memory;
++
+ 	if (!pending_reqs || !pending_grant_handles || !pending_pages)
+ 		goto out_of_memory;
+ 
+diff --git a/drivers/xen/blkback/common.h b/drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h
++++ b/drivers/xen/blkback/common.h
+@@ -43,6 +43,8 @@
+ #include <xen/gnttab.h>
+ #include <xen/driver_util.h>
+ #include <xen/xenbus.h>
++#include "blkback-pagemap.h"
++
+ 
+ #define DPRINTK(_f, _a...)			\
+ 	pr_debug("(file=%s, line=%d) " _f,	\
+@@ -136,4 +138,8 @@
+ int blkback_barrier(struct xenbus_transaction xbt,
+ 		    struct backend_info *be, int state);
+ 
++int blkback_pagemap_init(int);
++void blkback_pagemap_set(int, struct page *, domid_t, busid_t, grant_ref_t);
++void blkback_pagemap_clear(struct page *);
++
+ #endif /* __BLKIF__BACKEND__COMMON_H__ */

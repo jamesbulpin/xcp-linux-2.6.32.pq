@@ -1,0 +1,76 @@
+diff -r 22d64fd72557 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 16:40:13 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 16:40:36 2010 -0700
+@@ -899,8 +899,6 @@
+ 	for (i = 0; i < mmap_pages; i++)
+ 		pending_grant_handles[i] = BLKBACK_INVALID_HANDLE;
+ 
+-	blkif_interface_init();
+-
+ 	memset(pending_reqs, 0, sizeof(pending_reqs));
+ 	INIT_LIST_HEAD(&pending_free);
+ 
+diff -r 22d64fd72557 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 16:40:13 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 16:40:36 2010 -0700
+@@ -136,8 +136,6 @@
+ 
+ int vbd_translate(struct phys_req *req, blkif_t *blkif, int operation);
+ 
+-void blkif_interface_init(void);
+-
+ void blkif_xenbus_init(void);
+ 
+ irqreturn_t blkif_be_int(int irq, void *dev_id);
+diff -r 22d64fd72557 drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Thu Jun 24 16:40:13 2010 -0700
++++ b/drivers/xen/blkback/interface.c	Thu Jun 24 16:40:36 2010 -0700
+@@ -34,17 +34,14 @@
+ #include <xen/evtchn.h>
+ #include <linux/kthread.h>
+ 
+-static struct kmem_cache *blkif_cachep;
+-
+ blkif_t *blkif_alloc(domid_t domid)
+ {
+ 	blkif_t *blkif;
+ 
+-	blkif = kmem_cache_alloc(blkif_cachep, GFP_KERNEL);
++	blkif = kzalloc(sizeof(*blkif), GFP_KERNEL);
+ 	if (!blkif)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	memset(blkif, 0, sizeof(*blkif));
+ 	blkif->domid = domid;
+ 	spin_lock_init(&blkif->blk_ring_lock);
+ 	blkif->st_print = jiffies;
+@@ -55,6 +52,12 @@
+ 	return blkif;
+ }
+ 
++void blkif_free(blkif_t *blkif)
++{
++	BUG_ON(atomic_read(&blkif->requests_pending));
++	kfree(blkif);
++}
++
+ #define	INVALID_GRANT_HANDLE	((grant_handle_t)~0U)
+ 
+ static void unmap_frontend_pages(blkif_t *blkif)
+@@ -204,16 +207,3 @@
+ 		blkif->blk_rings.common.sring = NULL;
+ 	}
+ }
+-
+-void blkif_free(blkif_t *blkif)
+-{
+-	BUG_ON(blkif->bdev);
+-	BUG_ON(atomic_read(&blkif->requests_pending));
+-	kmem_cache_free(blkif_cachep, blkif);
+-}
+-
+-void __init blkif_interface_init(void)
+-{
+-	blkif_cachep = kmem_cache_create("blkif_cache", sizeof(blkif_t), 
+-					 0, 0, NULL);
+-}

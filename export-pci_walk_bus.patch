@@ -1,0 +1,8 @@
+diff -r ed462d2f1119 drivers/pci/bus.c
+--- a/drivers/pci/bus.c	Mon Jul 13 11:14:33 2009 +0100
++++ b/drivers/pci/bus.c	Mon Jul 13 11:24:06 2009 +0100
+@@ -239,3 +239,4 @@
+ EXPORT_SYMBOL_GPL(pci_bus_add_device);
+ EXPORT_SYMBOL(pci_bus_add_devices);
+ EXPORT_SYMBOL(pci_enable_bridges);
++EXPORT_SYMBOL_GPL(pci_walk_bus);

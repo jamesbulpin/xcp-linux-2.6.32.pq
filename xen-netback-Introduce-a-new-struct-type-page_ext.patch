@@ -1,0 +1,104 @@
+From a3031942973b059ed91b6fa8cdf78522b0f0f2d4 Mon Sep 17 00:00:00 2001
+From: Dongxiao Xu <dongxiao.xu@intel.com>
+Date: Wed, 19 May 2010 16:58:57 -0700
+Subject: [PATCH] xen/netback: Introduce a new struct type page_ext.
+
+struct page_ext is used to store the group and idx information by
+which a specified page could be identified.
+
+Signed-off-by: Dongxiao Xu <dongxiao.xu@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/common.h  |   15 +++++++++++++++
+ drivers/xen/netback/netback.c |   28 +++++++++++++++++-----------
+ 2 files changed, 32 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index acb896c..4006fef 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -242,6 +242,21 @@ struct netbk_tx_pending_inuse {
+ 
+ #define MAX_PENDING_REQS 256
+ 
++/* extra field used in struct page */
++union page_ext {
++	struct {
++#if BITS_PER_LONG < 64
++#define IDX_WIDTH   8
++#define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH)
++		unsigned int group:GROUP_WIDTH;
++		unsigned int idx:IDX_WIDTH;
++#else
++		unsigned int group, idx;
++#endif
++	} e;
++	void *mapping;
++};
++
+ struct xen_netbk {
+ 	struct tasklet_struct net_tx_tasklet;
+ 	struct tasklet_struct net_rx_tasklet;
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index a369198..8629091 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -76,22 +76,27 @@ static inline unsigned long idx_to_kaddr(unsigned int idx)
+ }
+ 
+ /* extra field used in struct page */
+-static inline void netif_set_page_index(struct page *pg, unsigned int index)
++static inline void netif_set_page_ext(struct page *pg, unsigned int group,
++		unsigned int idx)
+ {
+-	*(unsigned long *)&pg->mapping = index + 1;
++	union page_ext ext = { .e = { .group = group + 1, .idx = idx } };
++
++	BUILD_BUG_ON(sizeof(ext) > sizeof(ext.mapping));
++	pg->mapping = ext.mapping;
+ }
+ 
+-static inline int netif_page_index(struct page *pg)
++static inline unsigned int netif_page_group(const struct page *pg)
+ {
+-	unsigned long idx = (unsigned long)pg->mapping - 1;
++	union page_ext ext = { .mapping = pg->mapping };
+ 
+-	if (!PageForeign(pg))
+-		return -1;
++	return ext.e.group - 1;
++}
+ 
+-	if ((idx >= MAX_PENDING_REQS) || (netbk->mmap_pages[idx] != pg))
+-		return -1;
++static inline unsigned int netif_page_index(const struct page *pg)
++{
++	union page_ext ext = { .mapping = pg->mapping };
+ 
+-	return idx;
++	return ext.e.idx;
+ }
+ 
+ /*
+@@ -1392,7 +1397,8 @@ static void netif_page_release(struct page *page, unsigned int order)
+ {
+ 	int idx = netif_page_index(page);
+ 	BUG_ON(order);
+-	BUG_ON(idx < 0);
++	BUG_ON(idx < 0 || idx >= MAX_PENDING_REQS);
++	BUG_ON(netbk->mmap_pages[idx] != page);
+ 	netif_idx_release(idx);
+ }
+ 
+@@ -1537,7 +1543,7 @@ static int __init netback_init(void)
+ 	for (i = 0; i < MAX_PENDING_REQS; i++) {
+ 		page = netbk->mmap_pages[i];
+ 		SetPageForeign(page, netif_page_release);
+-		netif_set_page_index(page, i);
++		netif_set_page_ext(page, 0, i);
+ 		INIT_LIST_HEAD(&netbk->pending_inuse[i].list);
+ 	}
+ 
+-- 
+1.5.6.5
+

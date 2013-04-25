@@ -1,0 +1,163 @@
+diff -r c2068915e410 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jun 30 06:28:53 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Wed Jun 30 06:32:00 2010 -0700
+@@ -172,7 +172,7 @@
+ 	if (bdev) {
+ 		blkif_bdev_flush(blkif);
+ 
+-		blkdev_put(bdev);
++		blkdev_put(bdev, blkif->mode);
+ 		blkif->bdev = NULL;
+ 	}
+ }
+@@ -213,7 +213,7 @@
+ int
+ blkif_sector_size(blkif_t *blkif)
+ {
+-	return bdev_hardsect_size(blkif->bdev);
++	return bdev_logical_block_size(blkif->bdev);
+ }
+ 
+ sector_t
+@@ -224,7 +224,7 @@
+ 	if (bdev->bd_part)
+ 		return bdev->bd_part->nr_sects;
+ 
+-	return bdev->bd_disk->capacity;
++	return get_capacity(bdev->bd_disk);
+ }
+ 
+ static inline int
+@@ -734,7 +734,7 @@
+ 
+ 	for (i = 0; i < nseg; i++) {
+ 		if (((int)preq.sector_number|(int)seg[i].nsec) &
+-		    ((bdev_hardsect_size(preq.bdev) >> 9) - 1)) {
++		    ((bdev_logical_block_size(preq.bdev) >> 9) - 1)) {
+ 			DPRINTK("Misaligned I/O request from domain %d",
+ 				blkif->domid);
+ 			goto fail_put_bio;
+diff -r c2068915e410 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jun 30 06:28:53 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Wed Jun 30 06:32:00 2010 -0700
+@@ -274,8 +274,15 @@
+ 				   struct device_attribute *attr,	\
+ 				   char *buf)				\
+ 	{								\
+-		struct backend_info *be = _dev->driver_data;		\
+-		return sprintf(buf, format, ##args);			\
++		ssize_t ret = -ENODEV;					\
++		struct backend_info *be;				\
++									\
++		if (!get_device(_dev))					\
++			return ret;					\
++		if ((be = dev_get_drvdata(_dev)) != NULL)		\
++			ret = sprintf(buf, format, ##args);		\
++		put_device(_dev);					\
++		return ret;						\
+ 	}								\
+ 	static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
+ 
+@@ -286,8 +293,12 @@
+ 	{								\
+ 		int ret = -ENODEV;					\
+ 		s64 cnt, sum, max;					\
+-		struct backend_info *be = _dev->driver_data;		\
++		struct backend_info *be;				\
+ 									\
++		if (!get_device(_dev))					\
++			return ret;					\
++									\
++		be = dev_get_drvdata(_dev);				\
+ 		cnt = _cnt;						\
+ 		sum = _sum;						\
+ 		max = _max;						\
+@@ -303,6 +314,7 @@
+ 		(_cnt) = 0;						\
+ 		(_max) = 0;						\
+ 									\
++		put_device(_dev);					\
+ 		return ret;						\
+ 	}								\
+ 	static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
+@@ -345,7 +357,7 @@
+ 				    struct device_attribute *attr,
+ 				    char *buf)
+ {
+-	struct backend_info *be = dev->driver_data;
++	struct backend_info *be = dev_get_drvdata(dev);
+ 	blkif_t *blkif = be->blkif;
+ 	struct block_device *bdev;
+ 	dev_t rdev = 0;
+@@ -370,13 +382,13 @@
+ ssize_t show_queue_events(struct device *dev, struct device_attribute *attr,
+ 			  char *buf)
+ {
+-	struct backend_info *be = dev->driver_data;
++	struct backend_info *be = dev_get_drvdata(dev);
+ 	return sprintf(buf, "%#x", be->queue_events);
+ }
+ ssize_t store_queue_events(struct device *dev, struct device_attribute *attr,
+ 			   const char *buf, size_t count)
+ {
+-	struct backend_info *be = dev->driver_data;
++	struct backend_info *be = dev_get_drvdata(dev);
+ 	be->queue_events = simple_strtoul(buf, NULL, 0);
+ 	return count;
+ }
+@@ -387,8 +399,8 @@
+ static int xenvbd_sysfs_addif(struct xenbus_device *dev)
+ {
+ 	int error;
+-	struct backend_info *be = dev->dev.driver_data;
+-	
++	struct backend_info *be = dev_get_drvdata(&dev->dev);
++
+ 	error = device_create_file(&dev->dev, &dev_attr_physical_device);
+  	if (error)
+ 		goto fail1;
+@@ -418,7 +430,7 @@
+ 
+ static void xenvbd_sysfs_delif(struct xenbus_device *dev)
+ {
+-	struct backend_info *be = dev->dev.driver_data;
++	struct backend_info *be = dev_get_drvdata(&dev->dev);
+ 	if (be->group_added == 0)
+ 		return;
+ 	device_remove_file(&dev->dev, &dev_attr_queue_events);
+@@ -443,7 +455,7 @@
+ 
+ static int blkback_remove(struct xenbus_device *xbdev)
+ {
+-	struct backend_info *be = xbdev->dev.driver_data;
++	struct backend_info *be = dev_get_drvdata(&xbdev->dev);
+ 	int err;
+ 
+ 	mutex_lock(&be->mutex);
+@@ -477,7 +489,7 @@
+ 	kfree(be->devname);
+ 	backend_release(be);
+ 
+-	xbdev->dev.driver_data = NULL;
++	dev_set_drvdata(&xbdev->dev, NULL);
+ 
+ 	return 0;
+ }
+@@ -583,7 +595,7 @@
+ 		return -ENOMEM;
+ 	}
+ 	be->dev = dev;
+-	dev->dev.driver_data = be;
++	dev_set_drvdata(&dev->dev, be);
+ 	atomic_set(&be->refcnt, 1);
+ 	mutex_init(&be->mutex);
+ 
+@@ -747,7 +759,7 @@
+ static void frontend_changed(struct xenbus_device *dev,
+ 			     enum xenbus_state frontend_state)
+ {
+-	struct backend_info *be = dev->dev.driver_data;
++	struct backend_info *be = dev_get_drvdata(&dev->dev);
+ 	int err;
+ 
+ 	DPRINTK("%s: %s", dev->nodename, xenbus_strstate(frontend_state));

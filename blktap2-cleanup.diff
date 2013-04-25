@@ -1,0 +1,17 @@
+diff -r 0c48e17df47a -r e4e08a250e13 drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Thu Sep 16 05:45:59 2010 -0700
++++ b/drivers/xen/blktap2/request.c	Fri Sep 17 14:18:47 2010 -0700
+@@ -51,6 +51,7 @@
+ 	if (mem->curr_nr < nr_pages)
+ 		return -ENOMEM;
+ 
++	/* NB. avoid thundering herds of tapdisks colliding. */
+ 	spin_lock(&pool->lock);
+ 
+ 	if (mem->curr_nr < nr_pages) {
+@@ -83,5 +84,3 @@
+-
+-	request->nr_pages = 0;
+ }
+ 
+ size_t

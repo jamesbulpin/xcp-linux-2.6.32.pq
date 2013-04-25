@@ -1,0 +1,34 @@
+diff -r f5f47006fb14 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Jan 07 13:32:23 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Jan 07 13:32:38 2011 +0000
+@@ -1527,6 +1527,13 @@ static void net_tx_submit(struct xen_net
+ 		else if (txp->flags & NETTXF_data_validated)
+ 			skb->ip_summed = CHECKSUM_UNNECESSARY;
+ 
++		/*
++                 * Workaround Windows frontends which do not set
++                 * NETTXF_csum_blank for GSO packets. (CA-31409)
++                 */
++		if (skb_shinfo(skb)->gso_type)
++			skb->ip_summed = CHECKSUM_PARTIAL;
++
+ 		netbk_fill_frags(netbk, skb);
+ 
+ 		/*
+diff -r f5f47006fb14 drivers/xen/netfront/netfront.c
+--- a/drivers/xen/netfront/netfront.c	Fri Jan 07 13:32:23 2011 +0000
++++ b/drivers/xen/netfront/netfront.c	Fri Jan 07 13:32:38 2011 +0000
+@@ -1426,6 +1426,13 @@ err:
+ 		else if (rx->flags & NETRXF_data_validated)
+ 			skb->ip_summed = CHECKSUM_UNNECESSARY;
+ 
++		/*
++                 * Workaround Windows frontends which do not set
++                 * NETTXF_csum_blank for GSO packets. (CA-31409)
++                 */
++		if (skb_shinfo(skb)->gso_type)
++			skb->ip_summed = CHECKSUM_PARTIAL;
++
+ 		np->stats.rx_packets++;
+ 		np->stats.rx_bytes += skb->len;
+ 

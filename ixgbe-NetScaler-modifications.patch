@@ -1,0 +1,124 @@
+CA-50148 Add optional promiscuous mode flags to ixgbe driver for NetScaler
+
+diff -r ff072b93466e drivers/net/ixgbe/ixgbe.h
+--- a/drivers/net/ixgbe/ixgbe.h
++++ b/drivers/net/ixgbe/ixgbe.h
+@@ -908,4 +908,8 @@ extern void ixgbe_vlan_mode(struct net_d
+ #ifndef ixgbe_get_netdev_tc_txq
+ #define ixgbe_get_netdev_tc_txq(dev, tc) (&dev->tc_to_txq[tc]);
+ #endif
++
++extern void ixgbe_xsnsmode_set(bool v);
++extern bool ixgbe_xsnsmode_get(void);
++
+ #endif /* _IXGBE_H_ */
+diff -r ff072b93466e drivers/net/ixgbe/ixgbe_main.c
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -143,6 +143,17 @@ MODULE_VERSION(DRV_VERSION);
+ 
+ #define DEFAULT_DEBUG_LEVEL_SHIFT 3
+ 
++/* Promiscuous mode for Citrix XenServer NetScaler */
++static bool xsnsmode = FALSE;
++void ixgbe_xsnsmode_set(bool v)
++{
++	xsnsmode = v;
++}
++bool ixgbe_xsnsmode_get(void)
++{
++	return xsnsmode;
++}
++
+ static void ixgbe_service_event_schedule(struct ixgbe_adapter *adapter)
+ {
+ 	if (!test_bit(__IXGBE_DOWN, &adapter->state) &&
+@@ -4550,6 +4561,12 @@ void ixgbe_set_rx_mode(struct net_device
+ 		IXGBE_WRITE_REG(hw, IXGBE_VMOLR(adapter->num_vfs), vmolr);
+ 	}
+ 
++	if (ixgbe_xsnsmode_get()) {
++		/* VLAN filtering enabled for Citrix NetScaler */
++		printk(KERN_INFO "ixgbe: Enabling NetScaler mode IXGBE_VLNCTRL_VFE\n");
++		vlnctrl |= IXGBE_VLNCTRL_VFE;
++	}
++
+ 	IXGBE_WRITE_REG(hw, IXGBE_VLNCTRL, vlnctrl);
+ 	IXGBE_WRITE_REG(hw, IXGBE_FCTRL, fctrl);
+ }
+diff -r ff072b93466e drivers/net/ixgbe/ixgbe_param.c
+--- a/drivers/net/ixgbe/ixgbe_param.c
++++ b/drivers/net/ixgbe/ixgbe_param.c
+@@ -72,6 +72,19 @@
+ 	MODULE_PARM_DESC(X, desc);
+ #endif
+ 
++/* XSNSMode (XenServer NetScaler mode) (CA-50148)
++ *
++ * Valid Range: 0-1
++ *  - 0 - Standard mode
++ *  - 1 - XenServer NetScaler mode
++ *
++ * Default Value: 0
++ */
++IXGBE_PARAM(XSNSMode, "Change XenServer NetScaler Mode (0=Standard, 1=XSNS Mode), default 0");
++#define IXGBE_XSNS_STD                        0
++#define IXGBE_XSNS_MODE                       1
++#define IXGBE_DEFAULT_XSNS        IXGBE_XSNS_STD
++
+ /* IntMode (Interrupt Mode)
+  *
+  * Valid Range: 0-2
+@@ -1185,5 +1198,28 @@ no_fdir_sample:
+ 		}
+ #endif
+ 	}
++        { /* XenServer NetScaler Mode */
++                static struct ixgbe_option opt = {
++                        .type = range_option,
++                        .name = "XenServer NetScaler mode",
++                        .err  = "using default of "
++                                        __MODULE_STRING(IXGBE_DEFAULT_XSNS),
++                        .def  = IXGBE_DEFAULT_XSNS,
++                        .arg  = { .r = { .min = IXGBE_XSNS_STD,
++                                         .max = IXGBE_XSNS_MODE }}
++                };
++		u32 xsnsmode = opt.def;
++#ifdef module_param_array
++                if (num_XSNSMode > bd) {
++#endif
++                        xsnsmode = XSNSMode[bd];
++                        ixgbe_validate_option(&xsnsmode, &opt);
++#ifdef module_param_array
++                } else {
++                        xsnsmode = opt.def;
++                }
++#endif
++		ixgbe_xsnsmode_set((bool)xsnsmode);
++        }
+ }
+ 
+diff -r ff072b93466e drivers/net/ixgbe/ixgbe_sriov.c
+--- a/drivers/net/ixgbe/ixgbe_sriov.c
++++ b/drivers/net/ixgbe/ixgbe_sriov.c
+@@ -316,6 +316,11 @@ void ixgbe_set_vmolr(struct ixgbe_hw *hw
+ 		vmolr |= IXGBE_VMOLR_AUPE;
+ 	else
+ 		vmolr &= ~IXGBE_VMOLR_AUPE;
++	if (ixgbe_xsnsmode_get()) {
++		/* Promiscuous mode enabled for Citrix NetScaler */
++                printk(KERN_INFO "ixgbe: Enabling NetScaler mode IXGBE_VMOLR_ROMPE | IXGBE_VMOLR_MPE\n");
++		vmolr |= IXGBE_VMOLR_ROMPE | IXGBE_VMOLR_MPE;
++	}
+ 	IXGBE_WRITE_REG(hw, IXGBE_VMOLR(vf), vmolr);
+ }
+ 
+@@ -579,7 +584,7 @@ static int ixgbe_rcv_msg_from_vf(struct 
+ 	case IXGBE_VF_SET_MAC_ADDR:
+ 		new_mac = ((u8 *)(&msgbuf[1]));
+ 		if (is_valid_ether_addr(new_mac) &&
+-		    !adapter->vfinfo[vf].pf_set_mac) {
++		    (!adapter->vfinfo[vf].pf_set_mac || ixgbe_xsnsmode_get())) {
+ 			ixgbe_set_vf_mac(adapter, vf, new_mac);
+ 			e_info(probe, "Set MAC msg received from VF %d\n", vf);
+ 		} else if (memcmp(adapter->vfinfo[vf].vf_mac_addresses,

@@ -1,0 +1,123 @@
+diff -r 0c48e17df47a drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Thu Sep 16 05:45:59 2010 -0700
++++ b/drivers/xen/blktap2/blktap.h	Fri Sep 17 14:31:52 2010 -0700
+@@ -154,7 +154,7 @@
+ };
+ 
+ struct blktap_page_pool {
+-	struct mempool_s              *_mem;
++	struct mempool_s              *bufs;
+ 	spinlock_t                     lock;
+ 	struct kobject                 kobj;
+ 	wait_queue_head_t              wait;
+diff -r 0c48e17df47a drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Thu Sep 16 05:45:59 2010 -0700
++++ b/drivers/xen/blktap2/request.c	Fri Sep 17 14:31:52 2010 -0700
+@@ -24,7 +24,7 @@
+ static void
+ __page_pool_wake(struct blktap_page_pool *pool)
+ {
+-	mempool_t *mem = pool->_mem;
++	mempool_t *mem = pool->bufs;
+ 
+ 	/*
+ 	  NB. slightly wasteful to always wait for a full segment
+@@ -42,7 +42,7 @@
+ 			 struct blktap_request *request, int nr_pages)
+ {
+ 	struct blktap_page_pool *pool = tap->pool;
+-	mempool_t *mem = pool->_mem;
++	mempool_t *mem = pool->bufs;
+ 	struct page *page;
+ 
+ 	BUG_ON(request->nr_pages != 0);
+@@ -78,7 +78,7 @@
+ 
+ 	while (request->nr_pages) {
+ 		page = request->pages[--request->nr_pages];
+-		mempool_free(page, pool->_mem);
++		mempool_free(page, pool->bufs);
+ 	}
+ 
+ 	request->nr_pages = 0;
+@@ -88,7 +88,7 @@
+ blktap_request_debug(struct blktap *tap, char *buf, size_t size)
+ {
+ 	struct blktap_page_pool *pool = tap->pool;
+-	mempool_t *mem = pool->_mem;
++	mempool_t *mem = pool->bufs;
+ 	char *s = buf, *end = buf + size;
+ 
+ 	s += snprintf(buf, end - s,
+@@ -153,13 +153,13 @@
+ static int
+ blktap_page_pool_resize(struct blktap_page_pool *pool, int target)
+ {
+-	mempool_t *mem = pool->_mem;
++	mempool_t *bufs = pool->bufs;
+ 	int err;
+ 
+ 	/* NB. mempool asserts min_nr >= 1 */
+ 	target = max(1, target);
+ 
+-	err = mempool_resize(mem, target, GFP_KERNEL);
++	err = mempool_resize(bufs, target, GFP_KERNEL);
+ 	if (err)
+ 		return err;
+ 
+@@ -185,7 +185,7 @@
+ blktap_page_pool_show_size(struct blktap_page_pool *pool,
+ 			   char *buf)
+ {
+-	mempool_t *mem = pool->_mem;
++	mempool_t *mem = pool->bufs;
+ 	return sprintf(buf, "%d\n", mem->min_nr);
+ }
+ 
+@@ -217,7 +217,7 @@
+ blktap_page_pool_show_free(struct blktap_page_pool *pool,
+ 			   char *buf)
+ {
+-	mempool_t *mem = pool->_mem;
++	mempool_t *mem = pool->bufs;
+ 	return sprintf(buf, "%d\n", mem->curr_nr);
+ }
+ 
+@@ -284,7 +284,7 @@
+ blktap_page_pool_release(struct kobject *kobj)
+ {
+ 	struct blktap_page_pool *pool = kobj_to_pool(kobj);
+-	mempool_destroy(pool->_mem);
++	mempool_destroy(pool->bufs);
+ 	kfree(pool);
+ }
+ 
+@@ -331,23 +331,23 @@
+ 	spin_lock_init(&pool->lock);
+ 	init_waitqueue_head(&pool->wait);
+ 
+-	pool->_mem = mempool_create(nr_pages,
++	pool->bufs = mempool_create(nr_pages,
+ 				    __mempool_page_alloc, __mempool_page_free,
+ 				    pool);
+-	if (!pool->_mem)
++	if (!pool->bufs)
+ 		goto fail_pool;
+ 
+ 	kobject_init(&pool->kobj, &blktap_page_pool_ktype);
+ 	pool->kobj.kset = pool_set;
+ 	err = kobject_add(&pool->kobj, &pool_set->kobj, "%s", name);
+ 	if (err)
+-		goto fail_mem;
++		goto fail_bufs;
+ 
+ 	return &pool->kobj;
+ 
+ 	kobject_del(&pool->kobj);
+-fail_mem:
+-	mempool_destroy(pool->_mem);
++fail_bufs:
++	mempool_destroy(pool->bufs);
+ fail_pool:
+ 	kfree(pool);
+ fail:

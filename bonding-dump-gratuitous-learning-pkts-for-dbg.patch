@@ -1,0 +1,146 @@
+From: Dominic Curran <dominc.curran@citrix.com>
+Subject: Net: Bridge: Dump the bridges gratuitous learning packets
+
+Adding debug in order to try to catch a bug on customers system.
+Debug can be controlled using sysfs:
+ echo 0 > /sys/class/net/bonding_dbg     # turns dbg off
+ echo 1 > /sys/class/net/bonding_dbg     # turns dbg on
+
+Signed-off-by: Dominic Curran <dominic.curran@citrix.com>
+---
+ include/linux/netdevice.h |    1 +
+ net/bridge/br_if.c        |   33 ++++++++++++++++++++++++++++++++-
+ net/core/net-sysfs.c      |   38 +++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 70 insertions(+), 2 deletions(-)
+
+diff -r d2edc3d39f58 include/linux/netdevice.h
+--- a/include/linux/netdevice.h	Thu Jul 15 09:05:00 2010 +0100
++++ b/include/linux/netdevice.h	Thu Jul 15 09:20:17 2010 +0100
+@@ -1138,6 +1138,7 @@
+ extern int	       skb_gro_receive(struct sk_buff **head,
+ 				       struct sk_buff *skb);
+ extern void	       skb_gro_reset_offset(struct sk_buff *skb);
++extern int	       br_get_sysfs_dbg(void);
+ 
+ static inline unsigned int skb_gro_offset(const struct sk_buff *skb)
+ {
+diff -r d2edc3d39f58 net/bridge/br_if.c
+--- a/net/bridge/br_if.c	Thu Jul 15 09:05:00 2010 +0100
++++ b/net/bridge/br_if.c	Thu Jul 15 09:20:17 2010 +0100
+@@ -24,6 +24,12 @@
+ #include <net/sock.h>
+ 
+ #include "br_private.h"
++
++#define BR_DBG(fmt, args...) ({			\
++	if (br_get_sysfs_dbg()) {		\
++	    printk(KERN_INFO fmt, ## args);	\
++	}					\
++})
+ 
+ /*
+  * Determine initial path cost based on speed.
+@@ -386,6 +392,7 @@
+ 	br = dev->br_port->br;
+ 	phys = br_locate_physical_device(br->dev);
+ 
++	BR_DBG("========BOND DBG=========(dev=%s)\n", dev->name);
+ 	spin_lock_bh(&br->hash_lock);
+ 	for (i = 0; i < BR_HASH_SIZE; i++) {
+ 		struct net_bridge_fdb_entry *f;
+@@ -395,7 +402,18 @@
+ 			if (f->dst != phys->br_port &&
+ 			    f->dst->dev->addr_len == ETH_ALEN &&
+ 			    memcmp(&f->dst->dev->dev_addr[0], &f->addr.addr[0], ETH_ALEN) != 0) {
+-				skb = create_switch_learning_packet(dev, f->addr.addr);
++			BR_DBG("SEND dev:%s bridge:%s phys:%s"
++				"%02x:%02x:%02x:%02x:%02x:%02x "
++				"%02x:%02x:%02x:%02x:%02x:%02x\n",
++				f->dst->dev->name, br->dev->name, phys->name,
++				f->addr.addr[0], f->addr.addr[1],
++				f->addr.addr[2], f->addr.addr[3],
++				f->addr.addr[4], f->addr.addr[5],
++				dev->dev_addr[0], dev->dev_addr[1],
++				dev->dev_addr[2], dev->dev_addr[3],
++				dev->dev_addr[4], dev->dev_addr[5]);
++
++			skb = create_switch_learning_packet(dev, f->addr.addr);
+ 
+ 				if (skb == NULL)
+ 					goto out;
+@@ -403,9 +421,22 @@
+ 				dev_queue_xmit(skb);
+ 
+ 				f->ageing_timer = jiffies;
++			} else {
++				BR_DBG("SKIP dev:%s bridge:%s phys:%s "
++				"%02x:%02x:%02x:%02x:%02x:%02x\n",
++				f->dst->dev->name, br->dev->name, phys->name,
++				f->addr.addr[0], f->addr.addr[1],
++				f->addr.addr[2], f->addr.addr[3],
++				f->addr.addr[4], f->addr.addr[5]);
+ 			}
+ 		}
+ 	}
++
++	BR_DBG("BRIDGE dev:%s bridge:%s phys:%s "
++		"%02x:%02x:%02x:%02x:%02x:%02x\n",
++		dev->name, br->dev->name, phys->name,
++		dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
++		dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
+ 
+ 	skb = create_switch_learning_packet(dev, dev->dev_addr);
+ 	if (skb)
+diff -r d2edc3d39f58 net/core/net-sysfs.c
+--- a/net/core/net-sysfs.c	Thu Jul 15 09:05:00 2010 +0100
++++ b/net/core/net-sysfs.c	Thu Jul 15 09:20:17 2010 +0100
+@@ -247,6 +247,34 @@
+ 	return ret;
+ }
+ 
++static int bonding_dbg;
++
++static ssize_t show_bonding_dbg(struct class *cls, char *buffer)
++{
++	int res = 0;
++
++	res += sprintf(buffer + res, "%i\n", bonding_dbg);
++	res++;
++	return res;
++}
++
++static ssize_t store_bonding_dbg(struct class *cls,
++				 const char *buffer,
++				 size_t count)
++{
++	bonding_dbg = (buffer[0] == '0') ? 0 : 1;
++	return count;
++}
++
++int br_get_sysfs_dbg(void)
++{
++	return bonding_dbg;
++}
++EXPORT_SYMBOL(br_get_sysfs_dbg);
++
++static CLASS_ATTR(bonding_dbg,  S_IWUSR | S_IRUGO,
++		  show_bonding_dbg, store_bonding_dbg);
++
+ static struct device_attribute net_class_attributes[] = {
+ 	__ATTR(addr_len, S_IRUGO, show_addr_len, NULL),
+ 	__ATTR(dev_id, S_IRUGO, show_dev_id, NULL),
+@@ -536,5 +564,13 @@
+ 
+ int netdev_kobject_init(void)
+ {
+-	return class_register(&net_class);
++	int ret;
++
++	ret = class_register(&net_class);
++
++	ret = class_create_file(&net_class, &class_attr_bonding_dbg);
++	if (ret != 0)
++		printk(KERN_ERR "error: creating sysfs bonding_dbg\n");
++
++	return ret;
+ }

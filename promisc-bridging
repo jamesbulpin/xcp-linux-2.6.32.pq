@@ -1,0 +1,212 @@
+diff -r c7e5fdd80a5d net/bridge/br_forward.c
+--- a/net/bridge/br_forward.c	Tue Sep 30 14:33:12 2008 +0100
++++ b/net/bridge/br_forward.c	Tue Sep 30 14:33:12 2008 +0100
+@@ -80,9 +80,33 @@ static void __br_forward(const struct ne
+ 			br_forward_finish);
+ }
+ 
++static void __br_promisc(const struct net_bridge_port *to, struct sk_buff *skb,
++	void (*__packet_hook)(const struct net_bridge_port *p,
++			      struct sk_buff *skb))
++{
++	struct net_bridge *br = to->br;
++	struct net_bridge_port *p;
++
++ 	list_for_each_entry_rcu(p, &br->promiscuous_list, promiscuous) {
++		struct sk_buff *skb2;
++
++		/* Do not redeliver to sending port. */
++		if (!should_deliver(p, skb))
++			continue;
++
++		if ((skb2 = skb_clone(skb, GFP_ATOMIC)) == NULL) {
++			br->dev->stats.tx_dropped++;
++		} else {
++			__packet_hook(p, skb2);
++		}
++	}
++}
++
+ /* called with rcu_read_lock */
+ void br_deliver(const struct net_bridge_port *to, struct sk_buff *skb)
+ {
++	__br_promisc(to, skb, __br_deliver);
++
+ 	if (should_deliver(to, skb)) {
+ 		__br_deliver(to, skb);
+ 		return;
+@@ -94,6 +118,8 @@ void br_deliver(const struct net_bridge_
+ /* called with rcu_read_lock */
+ void br_forward(const struct net_bridge_port *to, struct sk_buff *skb)
+ {
++	__br_promisc(to, skb, __br_deliver);
++
+ 	if (should_deliver(to, skb)) {
+ 		__br_forward(to, skb);
+ 		return;
+diff -r c7e5fdd80a5d net/bridge/br_if.c
+--- a/net/bridge/br_if.c	Tue Sep 30 14:33:12 2008 +0100
++++ b/net/bridge/br_if.c	Tue Sep 30 14:36:33 2008 +0100
+@@ -155,6 +155,7 @@ static void del_nbp(struct net_bridge_po
+ 
+ 	br_fdb_delete_by_port(br, p);
+ 
++	list_del_rcu(&p->promiscuous);
+ 	list_del_rcu(&p->list);
+ 
+ 	rcu_assign_pointer(dev->br_port, NULL);
+@@ -196,6 +197,7 @@ static struct net_device *new_bridge_dev
+ 
+ 	spin_lock_init(&br->lock);
+ 	INIT_LIST_HEAD(&br->port_list);
++	INIT_LIST_HEAD(&br->promiscuous_list);
+ 	spin_lock_init(&br->hash_lock);
+ 
+ 	br->bridge_id.prio[0] = 0x80;
+@@ -266,6 +268,7 @@ static struct net_bridge_port *new_nbp(s
+ 	p->port_no = index;
+ 	br_init_port(p);
+ 	p->state = BR_STATE_DISABLED;
++	INIT_LIST_HEAD(&p->promiscuous);
+ 	br_stp_port_timer_init(p);
+ 
+ 	kobject_init(&p->kobj);
+@@ -539,6 +542,73 @@ int br_del_if(struct net_bridge *br, str
+ 	return 0;
+ }
+ 
++int br_port_is_promiscuous(struct net_bridge *br, struct net_bridge_port *p)
++{
++	struct net_bridge_port *p2;
++
++	rcu_read_lock();
++ 	list_for_each_entry_rcu(p2, &br->promiscuous_list, promiscuous) {
++		if (p2 == p) 		{
++			rcu_read_unlock();
++			return 1;
++		}
++	}
++	rcu_read_unlock();
++
++	return 0;
++}
++
++int br_port_enable_promiscuous_mode(struct net_bridge *br, struct net_device *dev)
++{
++	struct net_bridge_port *p = dev->br_port;
++
++	if (!p || p->br != br) {
++		printk(KERN_INFO "interface %s is not on bridge %s\n", dev->name, br->dev->name);
++		return -EINVAL;
++	}
++
++	if (br_port_is_promiscuous(br, p)) {
++		printk(KERN_INFO "interface %s is already promiscuous on bridge %s\n",
++		       dev->name, br->dev->name);
++		return -EINVAL;
++	}
++
++	printk(KERN_INFO "enable promiscuous mode on interface %s (bridge %s)\n",
++	       dev->name, br->dev->name);
++
++	list_add_rcu(&p->promiscuous, &br->promiscuous_list);
++
++	return 0;
++}
++
++int br_port_disable_promiscuous_mode(struct net_bridge *br, struct net_device *dev)
++{
++	struct net_bridge_port *p = dev->br_port;
++
++	if (!p || p->br != br) {
++		printk(KERN_INFO "interface %s is not on bridge %s\n", dev->name, br->dev->name);
++		return -EINVAL;
++	}
++
++	if (!p || p->br != br) {
++		printk(KERN_INFO "interface %s is not on bridge %s\n", dev->name, br->dev->name);
++		return -EINVAL;
++	}
++
++	if (!br_port_is_promiscuous(br, p)) {
++		printk(KERN_INFO "interface %s is not promiscuous on bridge %s\n",
++		       dev->name, br->dev->name);
++		return -EINVAL;
++	}
++
++	printk(KERN_INFO "disable promiscuous mode on interface %s (bridge %s)\n",
++	       dev->name, br->dev->name);
++
++	list_del_rcu(&p->promiscuous);
++
++	return 0;
++}
++
+ void br_net_exit(struct net *net)
+ {
+ 	struct net_device *dev;
+diff -r c7e5fdd80a5d net/bridge/br_private.h
+--- a/net/bridge/br_private.h	Tue Sep 30 14:33:12 2008 +0100
++++ b/net/bridge/br_private.h	Tue Sep 30 14:33:12 2008 +0100
+@@ -62,6 +62,7 @@ struct net_bridge_port
+ 	struct net_bridge		*br;
+ 	struct net_device		*dev;
+ 	struct list_head		list;
++	struct list_head		promiscuous;
+ 
+ 	/* STP */
+ 	u8				priority;
+@@ -88,6 +89,7 @@ struct net_bridge
+ {
+ 	spinlock_t			lock;
+ 	struct list_head		port_list;
++	struct list_head		promiscuous_list;
+ 	struct net_device		*dev;
+ 	struct net_device_stats		statistics;
+ 	spinlock_t			hash_lock;
+@@ -182,6 +184,12 @@ extern int br_min_mtu(const struct net_b
+ extern int br_min_mtu(const struct net_bridge *br);
+ extern void br_features_recompute(struct net_bridge *br);
+ 
++extern int br_port_enable_promiscuous_mode(struct net_bridge *br,
++					   struct net_device *dev);
++extern int br_port_disable_promiscuous_mode(struct net_bridge *br,
++					    struct net_device *dev);
++extern int br_port_is_promiscuous(struct net_bridge *br,
++			   struct net_bridge_port *p);
+ /* br_input.c */
+ extern int br_handle_frame_finish(struct sk_buff *skb);
+ extern int br_handle_frame(struct net_bridge_port *p, struct sk_buff **pskb);
+diff -r c7e5fdd80a5d net/bridge/br_sysfs_if.c
+--- a/net/bridge/br_sysfs_if.c	Tue Sep 30 14:33:12 2008 +0100
++++ b/net/bridge/br_sysfs_if.c	Tue Sep 30 14:33:12 2008 +0100
+@@ -123,6 +123,21 @@ static ssize_t show_message_age_timer(st
+ }
+ static BRPORT_ATTR(message_age_timer, S_IRUGO, show_message_age_timer, NULL);
+ 
++static ssize_t store_port_promisc(struct net_bridge_port *p, unsigned long v)
++{
++	if (v)
++		br_port_enable_promiscuous_mode(p->br, p->dev);
++	else
++		br_port_disable_promiscuous_mode(p->br, p->dev);
++
++	return 0;
++}
++static ssize_t show_port_promisc(struct net_bridge_port *p, char *buf)
++{
++	return sprintf(buf, "%d\n", br_port_is_promiscuous(p->br, p) ? 1 : 0);
++}
++static BRPORT_ATTR(promisc, S_IRUGO | S_IWUSR, show_port_promisc, store_port_promisc);
++
+ static ssize_t show_forward_delay_timer(struct net_bridge_port *p,
+ 					    char *buf)
+ {
+@@ -147,6 +162,7 @@ static struct brport_attribute *brport_a
+ 	&brport_attr_designated_port,
+ 	&brport_attr_designated_cost,
+ 	&brport_attr_state,
++	&brport_attr_promisc,
+ 	&brport_attr_change_ack,
+ 	&brport_attr_config_pending,
+ 	&brport_attr_message_age_timer,

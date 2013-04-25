@@ -1,0 +1,12 @@
+diff -r 346396209a00 drivers/scsi/scsi_transport_iscsi.c
+--- a/drivers/scsi/scsi_transport_iscsi.c	Thu Jul 30 13:49:24 2009 +0100
++++ b/drivers/scsi/scsi_transport_iscsi.c	Fri Jul 31 11:07:27 2009 +0100
+@@ -1076,7 +1076,7 @@
+ 	int flags = multi ? NLM_F_MULTI : 0;
+ 	int t = done ? NLMSG_DONE : type;
+ 
+-	skb = alloc_skb(len, GFP_ATOMIC);
++	skb = alloc_skb(len, GFP_KERNEL); /* not called from interrupt ctxt */
+ 	if (!skb) {
+ 		printk(KERN_ERR "Could not allocate skb to send reply.\n");
+ 		return -ENOMEM;

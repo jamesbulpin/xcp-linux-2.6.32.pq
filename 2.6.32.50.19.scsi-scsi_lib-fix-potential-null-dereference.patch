@@ -1,0 +1,49 @@
+From 03b147083a2f9a2a3fbbd2505fa88ffa3c6ab194 Mon Sep 17 00:00:00 2001
+From: Jiri Slaby <jirislaby@gmail.com>
+Date: Wed, 23 Sep 2009 16:15:35 +0200
+Subject: SCSI: scsi_lib: fix potential NULL dereference
+
+From: Jiri Slaby <jirislaby@gmail.com>
+
+commit 03b147083a2f9a2a3fbbd2505fa88ffa3c6ab194 upstream.
+
+Stanse found a potential NULL dereference in scsi_kill_request.
+
+Instead of triggering BUG() in 'if (unlikely(cmd == NULL))' branch,
+the kernel will Oops earlier on cmd dereference.
+
+Move the dereferences after the if.
+
+Signed-off-by: Jiri Slaby <jirislaby@gmail.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ drivers/scsi/scsi_lib.c |    9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -1370,9 +1370,9 @@ static int scsi_lld_busy(struct request_
+ static void scsi_kill_request(struct request *req, struct request_queue *q)
+ {
+ 	struct scsi_cmnd *cmd = req->special;
+-	struct scsi_device *sdev = cmd->device;
+-	struct scsi_target *starget = scsi_target(sdev);
+-	struct Scsi_Host *shost = sdev->host;
++	struct scsi_device *sdev;
++	struct scsi_target *starget;
++	struct Scsi_Host *shost;
+ 
+ 	blk_start_request(req);
+ 
+@@ -1382,6 +1382,9 @@ static void scsi_kill_request(struct req
+ 		BUG();
+ 	}
+ 
++	sdev = cmd->device;
++	starget = scsi_target(sdev);
++	shost = sdev->host;
+ 	scsi_init_cmd_errh(cmd);
+ 	cmd->result = DID_NO_CONNECT << 16;
+ 	atomic_inc(&cmd->device->iorequest_cnt);

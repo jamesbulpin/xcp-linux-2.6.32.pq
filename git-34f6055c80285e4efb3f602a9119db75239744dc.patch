@@ -1,0 +1,122 @@
+Describe: v3.2-rc5-2-g34f6055
+commit 34f6055c80285e4efb3f602a9119db75239744dc
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Dec 14 00:33:37 2011 +0100
+
+    block: add blk_queue_dead()
+
+    There are a number of QUEUE_FLAG_DEAD tests.  Add blk_queue_dead()
+    macro and use it.
+
+    This patch doesn't introduce any functional difference.
+
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff -r af40b8451cef block/blk-core.c
+--- a/block/blk-core.c	Thu Dec 15 20:03:04 2011 +0100
++++ b/block/blk-core.c	Fri May 25 18:15:41 2012 +0100
+@@ -668,7 +668,7 @@ EXPORT_SYMBOL(blk_init_queue_node);
+ 
+ int blk_get_queue(struct request_queue *q)
+ {
+-	if (likely(!test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))) {
++	if (likely(!blk_queue_dead(q))) {
+ 		kobject_get(&q->kobj);
+ 		return 0;
+ 	}
+@@ -796,7 +796,7 @@ static struct request *get_request(struc
+ 	const bool is_sync = rw_is_sync(rw_flags) != 0;
+ 	int may_queue;
+ 
+-	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
++	if (unlikely(blk_queue_dead(q)))
+ 		return NULL;
+ 
+ 	may_queue = elv_may_queue(q, rw_flags);
+@@ -915,7 +915,7 @@ static struct request *get_request_wait(
+ 		struct io_context *ioc;
+ 		struct request_list *rl = &q->rq;
+ 
+-		if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
++		if (unlikely(blk_queue_dead(q)))
+ 			return NULL;
+ 
+ 		prepare_to_wait_exclusive(&rl->wait[is_sync], &wait,
+@@ -949,7 +949,7 @@ struct request *blk_get_request(struct r
+ {
+ 	struct request *rq;
+ 
+-	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
++	if (unlikely(blk_queue_dead(q)))
+ 		return NULL;
+ 
+ 	BUG_ON(rw != READ && rw != WRITE);
+diff -r af40b8451cef block/blk-exec.c
+--- a/block/blk-exec.c	Thu Dec 15 20:03:04 2011 +0100
++++ b/block/blk-exec.c	Fri May 25 18:15:41 2012 +0100
+@@ -50,7 +50,7 @@ void blk_execute_rq_nowait(struct reques
+ {
+ 	int where = at_head ? ELEVATOR_INSERT_FRONT : ELEVATOR_INSERT_BACK;
+ 
+-	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))) {
++	if (unlikely(blk_queue_dead(q))) {
+ 		rq->errors = -ENXIO;
+ 		if (rq->end_io)
+ 			rq->end_io(rq, rq->errors);
+diff -r af40b8451cef block/blk-sysfs.c
+--- a/block/blk-sysfs.c	Thu Dec 15 20:03:04 2011 +0100
++++ b/block/blk-sysfs.c	Fri May 25 18:15:41 2012 +0100
+@@ -384,7 +384,7 @@ queue_attr_show(struct kobject *kobj, st
+ 	if (!entry->show)
+ 		return -EIO;
+ 	mutex_lock(&q->sysfs_lock);
+-	if (test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)) {
++	if (blk_queue_dead(q)) {
+ 		mutex_unlock(&q->sysfs_lock);
+ 		return -ENOENT;
+ 	}
+@@ -406,7 +406,7 @@ queue_attr_store(struct kobject *kobj, s
+ 
+ 	q = container_of(kobj, struct request_queue, kobj);
+ 	mutex_lock(&q->sysfs_lock);
+-	if (test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)) {
++	if (blk_queue_dead(q)) {
+ 		mutex_unlock(&q->sysfs_lock);
+ 		return -ENOENT;
+ 	}
+diff -r af40b8451cef block/blk.h
+--- a/block/blk.h	Thu Dec 15 20:03:04 2011 +0100
++++ b/block/blk.h	Fri May 25 18:15:41 2012 +0100
+@@ -77,7 +77,7 @@ static inline struct request *__elv_next
+ 				return rq;
+ 		}
+ 
+-		if (test_bit(QUEUE_FLAG_DEAD, &q->queue_flags) ||
++		if (unlikely(blk_queue_dead(q)) ||
+ 		    !q->elevator->ops->elevator_dispatch_fn(q, 0))
+ 			return NULL;
+ 	}
+diff -r af40b8451cef block/elevator.c
+--- a/block/elevator.c	Thu Dec 15 20:03:04 2011 +0100
++++ b/block/elevator.c	Fri May 25 18:15:41 2012 +0100
+@@ -739,7 +739,7 @@ int elv_queue_empty(struct request_queue
+ 	if (!list_empty(&q->queue_head))
+ 		return 0;
+ 
+-	if (!test_bit(QUEUE_FLAG_DEAD, &q->queue_flags) &&
++	if (!unlikely(blk_queue_dead(q)) &&
+ 	    e->ops->elevator_queue_empty_fn)
+ 		return e->ops->elevator_queue_empty_fn(q);
+ 
+diff -r af40b8451cef include/linux/blkdev.h
+--- a/include/linux/blkdev.h	Thu Dec 15 20:03:04 2011 +0100
++++ b/include/linux/blkdev.h	Fri May 25 18:15:41 2012 +0100
+@@ -585,6 +585,7 @@ enum {
+ #define blk_queue_tagged(q)	test_bit(QUEUE_FLAG_QUEUED, &(q)->queue_flags)
+ #define blk_queue_queuing(q)	test_bit(QUEUE_FLAG_CQ, &(q)->queue_flags)
+ #define blk_queue_stopped(q)	test_bit(QUEUE_FLAG_STOPPED, &(q)->queue_flags)
++#define blk_queue_dead(q)	test_bit(QUEUE_FLAG_DEAD, &(q)->queue_flags)
+ #define blk_queue_nomerges(q)	test_bit(QUEUE_FLAG_NOMERGES, &(q)->queue_flags)
+ #define blk_queue_nonrot(q)	test_bit(QUEUE_FLAG_NONROT, &(q)->queue_flags)
+ #define blk_queue_io_stat(q)	test_bit(QUEUE_FLAG_IO_STAT, &(q)->queue_flags)

@@ -1,0 +1,675 @@
+hgignore.patch
+
+#
+# Build system integration
+#
+build-system-integration.patch
+
+#
+# Distro patches.
+#
+linux-2.6.32.12-0.7.1.patch
+apic-fix-module-mismatch.patch
+linux-2.6.32.12-0.7.1-xen.patch
+sles-2.6.32.12-0.7.1-to-2.6.32.43-0.4.1.patch
+sles-revert-conflicts-with-driver-updates.patch
+# FIXME: revisit this revert when the e1000 driver is updated.  See
+# the upstream e1000 change 5622e4044a916de1af84bfcc4d437ce0c799d531
+# and CA-67738
+sles-revert-vlan-0-should-be-treated-as-no-vlan-tag.patch
+xen3-patch-2.6.32.12-13
+xen3-patch-2.6.32.13-14
+xen3-patch-2.6.32.15-16
+xen3-patch-2.6.32.16-17
+xen3-patch-2.6.32.18-19
+xen3-patch-2.6.32.20-21
+xen3-patch-2.6.32.21-22
+xen3-patch-2.6.32.24-25
+xen3-patch-2.6.32.25-26
+xen3-patch-2.6.32.26-27
+xen3-patch-2.6.32.27-28
+xen3-patch-2.6.32.28-29
+xen3-patch-2.6.32.29-30
+xen3-patch-2.6.32.33-34
+xen3-patch-2.6.32.38-39
+# Revert some xen changes from .12-0.7.1
+revert-xen-dcdbas
+revert-xen-netback-kernel-threads
+revert-xen-netback-multiple-tasklets
+revert-xen-netback-generalize
+revert-xen-netback-notify-multi
+revert-xen-netback-nr-irqs
+revert-xen-configurable-guest-devices
+revert-xen-blkfront-cdrom
+revert-xen-op-packet
+revert-xen-blkback-cdrom
+revert-xen-blkif-protocol-fallback-hack
+
+fix-without-CONFIG_DEBUG_RODATA.patch
+
+#
+# Remove all blktap drivers
+#
+remove-drivers-xen-blktap1
+remove-drivers-xen-blktap2
+
+#
+# Patches imported from OSS linux-2.6.18-xen tree.
+#
+
+#
+# Patches reverted from OSS linux-2.6.18-xen tree.
+#
+revert-linux-2.6.18-xen.hg-967.65a7b6de9191 # Changes to various backends to handle GNTST_eagain errors.
+revert-linux-2.6.18-xen.hg-966.399c485098f6 # Changes to netback to handle GNTST_eagain errors.
+revert-linux-2.6.18-xen.hg-965.df70d482d0f4 # Fixes to block backend to handle -EAGAIN grant table errors properly.
+revert-linux-2.6.18-xen.hg-740.5012c470f875 # blkback[, blktap]: Fix potential resource leak.
+
+#
+# Patches which should go to OSS linux-2.6.18-xen tree.
+#
+clts-when-calling-math_state_restore
+clear-ts_usedfpu-on-new-threads
+
+#
+# Patches from 2.6.32-longterm
+#
+2.6.32.44.07.sunrpc-fix-a-race-between-work-queue-and-rpc_killall_tasks.patch
+2.6.32.44.08.sunrpc-fix-use-of-static-variable-in-rpcb_getport_async.patch
+2.6.32.44.11.bridge-send-proper-message_age-in-config-bpdu.patch
+2.6.32.44.13.libata-fix-unexpectedly-frozen-port-after-ata_eh_reset.patch
+2.6.32.44.24.libsas-remove-expander-from-dev-list-on-error.patch
+2.6.32.44.31.pci-ari-is-a-pcie-v2-feature.patch
+2.6.32.44.34.ext3-fix-oops-in-ext3_try_to_allocate_with_rsv.patch
+2.6.32.44.35.svcrpc-fix-list-corrupting-race-on-nfsd-shutdown.patch
+# Releveling patch required
+relevel-xfrm6-tunnel-init.patch
+2.6.32.44.46.netns-xfrm-fixup-xfrm6_tunnel-error-propagation.patch 
+2.6.32.44.47.tunnels-fix-netns-vs-proto-registration-ordering.patch 
+2.6.32.45.01.2.6.32.45.0001-crypto-Move-md5_transform-to-lib-md5.c.patch
+2.6.32.45.02.0002-net-Compute-protocol-sequence-numbers-and-fragment-I.patch
+2.6.32.46.08.mm-fix-wrong-vmap-address-calculations-with-odd-nr_cpus.patch
+2.6.32.46.15.x86-32-vdso-on-system-call-restart-after-sysenter-use-int.patch
+2.6.32.47.41.libsas-fix-failure-to-revalidate-domain-for-anything-but-the-first-expander-child.patch
+2.6.32.47.44.libsas-fix-panic-when-single-phy-is-disabled-on-a-wide-port.patch
+2.6.32.47.77.iommu-amd-fix-wrong-shift-direction.patch
+2.6.32.49.02.make-scsi_free_queue-kill-pending-scsi-commands.patch
+2.6.32.49.17.ipv6-udp-fix-the-wrong-headroom-check.patch
+2.6.32.50.07.timekeeping-add-arch_offset-hook-to-ktime_get-functions.patch
+2.6.32.50.19.scsi-scsi_lib-fix-potential-null-dereference.patch
+2.6.32.50.20.scsi-silencing-killing-requests-for-dead-queue.patch
+2.6.32.50.23.x86-mpparse-account-for-bus-types-other-than-isa-and-pci.patch
+2.6.32.50.26.tick-broadcast-stop-active-broadcast-device-when-replacing-it.patch
+2.6.32.51.06.percpu-fix-chunk-range-calculation.patch
+2.6.32.53.08.hung_task-fix-false-positive-during-vfork.patch
+2.6.32.54.17.pm-sleep-fix-race-between-cpu-hotplug-and-freezer.patch
+2.6.32.54.18.scsi-scsi_dh-check-queuedata-pointer-before-proceeding-further.patch
+2.6.32.55.06.pci-fix-pci_exp_type_rc_ec-value.patch
+2.6.32.55.07.pci-msi-disable-msi-interrupts-when-we-initialize-a-pci-device.patch
+2.6.32.55.08.xen-xenbus-reject-replies-with-payload-xenstore_payload_max.patch
+2.6.32.55.11.x86-fix-mmap-random-address-range.patch
+2.6.32.55.15.svcrpc-fix-double-free-on-shutdown-of-nfsd-after-changing-pool-mode.patch
+2.6.32.55.17.nfsd-fix-oops-when-parsing-a-0-length-export.patch
+2.6.32.55.24.sym53c8xx-fix-null-pointer-dereference-in-slave_destroy.patch
+2.6.32.57.02.nfsv4-fix-up-the-callers-of-nfs4_state_end_reclaim_reboot.patch
+2.6.32.57.03.nfsv4-the-state-manager-shouldn-t-exit-on-errors-that-were-handled.patch
+2.6.32.57.04.nfsv4-ensure-the-state-manager-handles-nfs4err_no_grace-correctly.patch
+2.6.32.57.05.nfsv4-handle-nfs4err_grace-when-recovering-an-expired-lease.patch
+2.6.32.57.06.nfsv4-fix-open-recovery.patch
+2.6.32.57.07.rpc-client-can-not-deal-with-enosock-so-translate-it-into-enoconn.patch
+#2.6.32.57.19.net-fix-sk_forward_alloc-corruptions.patch
+#2.6.32.57.20.net-sock_queue_err_skb-dont-mess-with-sk_forward_alloc.patch
+2.6.32.58.02.lib-proportion-lower-prop_max_shift-to-32-on-64-bit-kernel.patch
+2.6.32.58.03.relay-prevent-integer-overflow-in-relay_open.patch
+2.6.32.58.07.hwmon-f75375s-fix-automatic-pwm-mode-setting-for-f75373-f75375.patch
+2.6.32.58.26.cdrom-use-copy_to_user-without-the-underscores.patch
+
+Fix-memory-leak-corruption-on-VLAN-GRO_DROP.patch # From SLE11-SP1 kernel tree
+
+#
+# Patches from Linux Torvalds linux-2.6.git tree
+# Include output of "git describe <sha1>" in second column and order based on this entry
+#
+
+git-c77a5710b7e23847bfdb81fcaa10b585f65c960a.patch # v2.6.33-6233-gc77a571    block: max number of segments/size in sysfs
+git-fb8a0d9d1bfd1e4355f307e86a6da7209eefd5f3.patch # v2.6.33-rc5-918-gfb8a0d9 pci: Add SR-IOV convenience functions and macros
+git-b280da8d54b8d82b52f368a8703b7ada6c1744d5.patch # v2.6.33-rc5-919-gb280da8 if_link: Add SR-IOV configuration methods
+git-95c26df829ba4a25f40595cadb4c9433883cbe28.patch # v2.6.33-rc5-920-g95c26df net: Add netdev ops for SR-IOV configuration
+git-ebc08a6f47ee76ecad8e9f26c26e6ec9b46ca659.patch # v2.6.33-rc5-921-gebc08a6 rtnetlink: Add VF config code to rtnetlink
+
+git-18e8c134f4e984e6639e62846345192816f06d5c.patch # v2.6.34-rc5-1307-g18e8c13 net: Increase NET_SKB_PAD to 64 bytes
+git-c02db8c6290bb992442fec1407643c94cc414375.patch # v2.6.34-rc7-61-gc02db8c  rtnetlink: make SR-IOV VF interface symmetric
+git-045de01a174d9f0734f657eb4b3313d89b4fd5ad.patch # v2.6.34-4720-g045de01    netlink: bug fix: wrong size was calculated for vfinfo list blob
+git-fc62f2f19edf46c9bdbd1a54725b56b18c43e94f.patch # v2.6.34-7379-gfc62f2f    kernel.h: add pr_warn for symmetry to dev_warn, netdev_warn
+
+git-5933dd2f028cdcbb4b3169dca594324704ba10ae.patch # v2.6.35-rc1-494-g5933dd2 net: NET_SKB_PAD should depend on L1_CACHE_BYTES
+git-89de1669ace055b56f1de1c9f5aca26dd7f17f25.patch # v2.6.35-75-g89de166      blkfront: Fix backtrace in del_gendisk
+git-3a5f65df5a0fcbaa35e5417c0420d691fee4ac56.patch # v2.6.36-6800-g3a5f65d  Typedef SMP call function pointer
+git-c07224005dd3fe746246acadc9be652a588a4d7f.patch # v2.6.37-rc1-1484-gc072240  net/ipv6/udp.c: fix typo in flush_stack()
+
+git-c8def554d031664e984323f6a5d667f070717776.patch # v2.6.38-4493-gc8def55  smp_call_function_interrupt: use typedef and %pf
+
+git-5b3ff237bef43b9e7fb7d1eb858e29b73fd664f9.patch # v2.6.35-rc3-21-g5b3ff23 ext4: move aio completion after unwritten ...
+git-744692dc059845b2a3022119871846e74d4f6e11.patch # v2.6.33-rc8-25-g744692d ext4: Lock i_aio_dio_complete_list on 2.6.32.
+git-b47d19de2c714020ba8f5545a6e7d4968f37eb45.patch # v2.7.37-rc3-4-5fc4397 nfs client performance fix
+git-e9e3bcecf44c04b9e6b505fd8e2eb9cea58fb94d.patch # v2.6.38-rc2-6-ge9e3bce  ext4: serialize unaligned asynchronous DIO
+git-5d94e81f69d4b1d1102d3ab557ce0a817c11fbbb.patch # v2.6.38-rc6-6-45bb167 x86: Introduce pci_map_biosrom() - needed for Intel isci driver
+git-a79e53d85683c6dd9f99c90511028adc2043031f.patch # v2.6.38-rc7-6-ga79e53d  x86/mm: Fix pgd_lock deadlock
+git-bfe159a51203c15d23cb3158fffdc25ec4b4dda1.patch # v3.0-rc7-186-gbfe159a [SCSI] fix crash in scsi_dispatch_cmd()
+git-777eb1bf15b8532c396821774bf6451e563438f5.patch # v3.1-rc8-1-g777eb1b block: Free queue resources at blk_release_queue()
+git-75eb6c372d41d6d140b893873f6687d78c987a44.patch # v3.1-rc10-12-g75eb6c3 block: pass around REQ_* flags instead of broken down booleans during request alloc/free
+git-e3c78ca524d230bc145e902625e88c392a58ddf3.patch # v3.1-rc10-14-ge3c78ca block: reorganize queue draining
+git-da8303c63b8de73619884382d6e573d44aae0810.patch # v3.1-rc10-16-gda8303c block: make get_request[_wait]() fail if queue is dead
+git-c9a929dde3913780b5c416f4bb9d9ed804f509ce.patch # v3.1-rc10-18-gc9a929d block: fix request_queue lifetime handling by making blk_queue_cleanup() properly shutdown
+git-6dd9ad7df2019b1e33a372a501907db293ebcd0d.patch # v3.1-rc10-31-g6dd9ad7 block: don't call blk_drain_queue() if elevator is not up
+git-9ef5992e442b2b0bf6364bfcc5574e983a983159.patch # v3.1-5620-g9ef5992 cifs: Assume passwords are encoded according to iocharset (try #2)
+git-4cecf6d401a01d054afc1e5f605bcbfe553cb9b9.patch # v3.2-rc1-314-g4cecf6d sched, x86: Avoid unnecessary overflow in sched_clock
+git-4eabc941259f9d8c8fb71746d3f30c87e1d9e49b.patch # v3.2-rc2-414-g4eabc94 block: don't kick empty queue in blk_drain_queue()
+git-34f6055c80285e4efb3f602a9119db75239744dc.patch # v3.2-rc5-2-g34f6055 block: add blk_queue_dead()
+git-481a7d64790cd7ca61a8bbcbd9d017ce58e6fe39.patch # v3.2-rc5-3-g481a7d6 block: fix drain_all condition in blk_drain_queue()
+git-8ba61435d73f2274e12d4d823fde06735e8f6a54.patch # v3.2-rc5-4-g8ba6143 block: add missing blk_queue_dead() checks
+
+#
+# Patches to synchronise with xen.git
+# (rework stuff to follow xen.git instead of linux-2.6.18-xen.hg)
+#
+netback-drop-xen-skb-members.patch
+netback-drop-CONFIG_XEN_NETDEV_PIPELINED_TRANSMITTER-option.patch
+netback-call-skb_checksum_setup-at-receive.patch
+netback-netif_t-to-struct-xen_netif.patch
+netif-ring-structures-to-struct-xen.patch
+netback-drop-loopback.patch
+netback-nuke-trailing-whitespace.patch
+xenbus-add-xenbus_watch_pathfmt.patch
+netback-STRUCT_t-to-struct-STRUCT.patch
+netback-drop-NET_SKBUFF_DATA_USES_OFFSET.patch
+netback-tweak-whitespace.patch
+netback-uevent-error-handling.patch
+gnttab_FOO_t-to-struct-gnttab_FOO.patch
+revert-linux-2.6.28-xen.hg-959.1a97bd686258
+
+#
+# Patches from xen.git
+# (sha1 sums are not stable in this tree, use "git format-patch" style
+#  naming, without leading digits)
+#
+
+# netback
+# branch: xen/dom0/backend/netback
+#xen-netback-use-mod_timer.patch
+xen-netback-use-NET_SKB_PAD-rather-than-16.patch
+xen-netback-completely-drop-flip-support.patch
+xen-netback-demacro-MASK_PEND_IDX.patch
+xen-netback-convert-PEND_RING_IDX-into-a-proper-typ.patch
+xen-netback-rename-NR_PENDING_REQS-to-nr_pending_re.patch
+xen-netback-pre-initialize-list-and-spinlocks-use.patch
+xen-netback-remove-CONFIG_XEN_NETDEV_PIPELINED_TRAN.patch
+xen-netback-make-netif_get-put-inlines.patch
+xen-netback-move-code-around.patch
+xen-netback-document-PKT_PROT_LEN.patch
+#xen-netback-use-dev_name-instead-of-removed-bus.patch
+xen-netback-reinstate-missing-code.patch
+Fix-compile-warnings-ignoring-return-value-of-xenb.patch
+xen-netback-use-smart-polling-instead-of-event-noti.patch
+xen-netback-make-sure-that-pg-mapping-is-never-NUL.patch
+xen-rename-netbk-module-xen-netback.patch
+#xen-netback-use-dev_get-set_drvdata-inteface.patch
+xen-netback-remove-unused-xen_network_done-code.patch
+xen-netback-factor-disconnect-from-backend-into-ne.patch
+xen-netback-wait-for-hotplug-scripts-to-complete-b.patch
+xen-netback-Always-pull-through-PKT_PROT_LEN-bytes.patch
+xen-netback-try-to-pull-a-minimum-of-72-bytes-into.patch
+xen-netback-Allow-setting-of-large-MTU-before-rings.patch
+xen-netback-use-get_sset_count-rather-than-obsolete.patch
+xen-netback-correctly-setup-skb-ip_summed-on-recei.patch
+
+# branch: xen/dom0/backend/netback-tasklet
+xen-netback-Move-global-static-variables-into-struc.patch
+xen-netback-Introduce-a-new-struct-type-page_ext.patch
+xen-netback-Multiple-tasklets-support.patch
+xen-netback-Use-Kernel-thread-to-replace-the-taskle.patch 
+Netback-Set-allocated-memory-to-zero-from-vmalloc.patch
+netback-minor-code-formatting-fixup.patch
+
+# branch: xen/dom0/backend/netback
+xen-netback-avoid-null-pointer-access-in-netback_ue.patch
+xen-netback-Fixes-for-delayed-copy-of-tx-network-p.patch
+xen-netback-handle-NET_SKBUFF_DATA_USES_OFFSET-cor.patch
+xen-netback-drop-frag-member-from-struct-netbk_rx_.patch
+xen-netback-linearise-SKBs-as-we-copy-them-into-gue.patch
+xen-netback-drop-more-relics-of-flipping-mode.patch
+xen-rings-make-protocol-specific-usage-of-shared-sri.patch
+xen-netback-fix-basic-indentation-issue.patch
+xen-netback-Add-a-new-style-of-passing-GSO-packets.patch
+xen-netback-Make-frontend-features-distinct-from-ne.patch
+xen-gnttab-propagate-Reserved-flag-from-old-to-new.patch
+xen-netback-make-protocol-specific-usage-of-shared-s.patch
+xen-netback-Fix-null-pointer-access-in-netback_ueve.patch
+xen-netback-check-if-foreign-pages-are-actually-netb.patch
+xen-netback-do-not-unleash-netback-threads-until-in.patch
+xen-netback-save-interrupt-state-in-add_to_net_sche.patch
+xen-netback-increase-size-of-rx_meta-array.patch
+xen-netback-take-net_schedule_list_lock-when-remov.patch 
+
+# blkback
+xen-blkback-patch-02-blkback-pagemap-patch.patch
+xen-blkback-pagemap-bug-fixes.patch
+xen-blkback-simplify-address-translations.patch
+xen-blkback-simplify-linux-2.6.18-xen.hg-918.71a61b393cd.patch
+
+# blktap2
+xen-blktap2-patch-01-blktap-patch.patch
+xen-blktap2-patch-03-blktap2-patch.patch
+xen-blktap2-prefer-spin_lock_init-to-SPIN_LOCK_UNLOCKED.patch
+xen-blktap2-Port-blktap2-from-2.6.18-to-tip.patch
+xen-blktap2-wean-off-of-use-of-the-BlkBack-pageflag.patch
+xen-blktap2-cleanup-usage-of-sysfs.patch
+#xen-blktap2-xen-fix-non-Xen-compile-and-run.patch
+#xen-blktap2-include-asm-xen-hypervisor.h-for-xen_pv_d.patch
+xen-blktap2-don-t-init-on-non-Xen-system.patch
+xen-blktap2-add-tlb-flush-properly.patch
+xen-blktap2-fix-compiler-warnings.patch
+xen-blktap2-allow-to-build-as-module.patch
+xen-blktap2-reduce-TLB-flush-scope.patch
+xen-blktap2-fix-blkback-blktap2-interaction.patch
+xen-blktap2-use-blk_rq_map_sg-here-too.patch
+xen-blktap2-remove-warnings.patch
+xen-blktap2-properly-__init-annotate-blktap2-code.patch
+#xen-blktap2-make-compile.patch
+xen-blktap2-simplify-address-translations.patch
+xen-blktap2-Fix-wild-ptr-deref-during-device-destruction.patch
+xen-blktap2-Fix-queue-restart-racing-block-device-removal.patch
+xen-blktap2-Fix-tap-kobj-double-unref-in-sysfs_destro.patch
+#xen-blktap2-Dequeue-requests-before-completion.patch
+xen-blktap2-Synchronous-queue-dispatch.patch
+#xen-linux-Remove-unmap-hook-from-vm_operations-struct.patch
+xen-blktap2-Remove-broken-sysfs-pause-resume-API.patch
+xen-blktap2-Make-the-device-destruction-path-synchronous.patch
+xen-blktap2-Remove-obsolete-kernel-version-dependencies.patch
+xen-blktap2-Update-tap-state-when-failing-ring-mmap.patch
+xen-blktap2-Remove-passthrough-mode.patch
+xen-blktap2-only-initialize-on-PV-domains.patch
+xen-blktap2-make-protocol-specific-usage-of-shared-sr.patch
+xen-blktap2-Sanity-check-the-device-params.patch
+xen-blktap2-Downgrade-control-spinlock-to-mutex.patch
+xen-blktap2-Register-minors-256.patch
+xen-blktap2-Bump-up-minors-to-1024.patch
+xen-blktap2-Fix-potential-leakage-when-running-as-a-m.patch
+xen-blktap2-Clean-up-ring-and-device-majors-stored.patch
+xen-blktap2-Fix-kunmap-crasher.patch
+xen-blktap2-Link-tasks-to-blktaps.patch
+xen-blktap2-Fix-device-destruction-path.patch
+xen-blktap2-Clean-up-ring-mmap-close.patch
+xen-blktap2-Take-tapdisk-mmap-sem-where-appropriate.patch
+xen-blktap2-Clean-up-remaining-sysfs-code.patch
+xen-blktap2-Fix-request-slot-congestion-deadlocks.patch
+xen-blktap2-Avoid-a-tapdisk-deadlock-in-device-destru.patch
+xen-blktap2-Add-barrier-support.patch
+xen-blktap2-Remove-some-dead-code.patch
+xen-blktap2-Split-debug-code.patch
+xen-blktap2-Additional-response-validation.patch
+
+
+#
+# Patches to be sent to xen.git
+#
+sync_xen_wallclock
+
+#
+# Patches which should be sent to...
+#
+
+#
+# ParaVirtual Memory Management
+#
+get_user_pages_fast-support-foreign-pages.patch
+CA-43749-fix-swiotlb-xen-sync-single-dma-direction-mapping.patch
+CA-44288-pin-vs-vmalloc_sync_all
+
+#
+# XenBus.
+#
+watch_online_node
+xenbus-5ac4212c943511c4704110988de79f900c3c5d0a.patch # xenbus: Make xenbus_switch_state transactional
+
+#
+# Frontend Drivers
+#
+
+# ... blkfront
+#    n/a 2a8c4b19aef40295774a93d011a616f595beb590.diff # blkfront: Fix backtrace in del_gendisk
+#    n/a f6c1e217e3d0f93bc14d77ec718647616a5d2bd0.diff # blkfront: Fix gendisk leak
+blkfront-8d536daf35b0cec4d7abfc9799676f9b3de84c9f.diff #+blkfront # Clean up vbd release
+blkfront-339994f849b2128e20f85fa26210ac346366213a.diff #+blkfront # Lock blkfront_info when closing
+blkfront-7e1ae52d4612f0de8c3b6b64d5399be9e9349fdd.diff #+blkfront # Fix blkfront backend switch race (bdev open)
+blkfront-5c2c5122a13ab671c60232c6a2d80913488b83f3.diff #+blkfront # Fix blkfront backend switch race (bdev release)
+blkfront-453fb55779691d213a8030baef6d2239e2f45b2c.diff #+blkfront # Lock blockfront_info during xbdev removal
+blkfront-1711754424f1630bf8935fb1a1c85beaab158e96.diff #+blkfront # Remove obsolete info->users
+blkfront-899565e3f4f0d076a9a3b1ba5bedafb398980845.diff #+blkfront # Klog the unclean release path
+
+#
+# ParaVirtual Backend Drivers
+#
+backend-give-pg-pinned-a-unique-enum-value.patch
+
+# ... blkback
+blkback-reset-2.6.27.diff
+blkback-use-blk_getput_queue.patch
+blkback-name
+blkback-missed-requests-CA-7665
+CA-7672-blkback-shutdown.patch
+CA-8806-blkback-dont-reconnect-on-unplug
+CA-14804-blkback-fix-block-unplug-retries
+CA-15586-blkback-close-bdev
+CA-15999-blkback-pause-unpause
+close-and-flush-disconnected-emulated-devices
+blkback-latency-stats
+CA-24267-blkback-unpause
+CA-24784-blkback-resource-leak
+CXD-99-blkback-gnterr-status.diff
+blkback_multi_page_ring
+CA-30778-blkback-backend-bound-sysfs.diff
+CA-30953-blkback-wild-ptr-deref.diff
+CA-36054-blkback-blkifreqs.diff
+blkback-pagemap-cleanup.diff
+blkback-rm-vbd.diff
+blkback-blkif-flush.diff
+blkback-blkif-sync.diff
+blkback-blkif-slab.diff
+blkback-be-nodename.diff
+blkback-be-mutex.diff
+blkback-blkif-start.diff
+blkback-blkif-stop.diff
+blkback-bdev-reopen.diff
+blkback-backend-changed.diff
+blkback-thread-spinlock.diff
+blkback-pause-remove.diff
+blkback-pause-remake.diff
+blkback-forward-port-2.6.32.diff
+blkback-queue-state.diff
+blkback-queue-stop-fix.diff
+blkback-blkif-resize.diff #+later
+CA-46095-xenblkd-lock.diff
+xen-blkback-Fix-CVE-2010-3699.patch
+blkback-sysfs-ring-order.diff
+blkback-final-check-fix.diff
+blkback-debug-ring.diff
+blkback-reopen-interface.diff
+blkback-dont-drop-empty-requests.patch
+blkback-handle-spurious-physical-device-watch-events.patch
+blkback-page-pools
+blkback-unregister-device-when-closed-and-offline.patch
+CA-86862-blkback-size-write-panic.patch
+blkback-reduce-wake-ups.patch
+
+# ... blktap2
+blktap2-page-pool.diff
+blktap2-no-foreign-2.diff
+blktap2-end-request.diff
+#blktap2-backport.diff
+blktap2-forward-port-2.6.32.diff
+blktap2-bufs.diff
+blktap2-cleanup.diff
+blktap2-ioc.diff
+blktap2-dio.diff
+blktap2-include.diff
+blktap2-rdonly.diff
+blktap2-wild-ptr-deref.diff
+blktap2-fix-race-in-page-pool-join.patch
+blktap2-reduce-wake-ups.patch
+blktap2-ring-unlocked_ioctl.patch
+
+#
+# Grant Tables.
+#
+gnttab-copy-page-irq-safe.patch
+V2-grant-table-support.patch
+
+# ... netback (for upstream)
+netback-correct-comment.patch
+netback-remove-tx-queue-timeout
+netback-fix-PKT_PROT_LEN
+netback-fix-tx_work_todo
+netback-move-pending-tx-copy
+netback-gso-watch
+netback-protocol1.patch
+netback-fix-slot-accounting
+netback-page_ext-struct
+netback-page_ext-refcounting
+netback-tag-timers
+netback-dynamic-gref-allocation
+netback-new-tx-drain-timer
+netback-dealloc-lock
+netback-skb-copy
+netback-multi-page-ring
+netback-tag-alloc
+
+# ... netback (local workarounds and configuration tweaks)
+netback-tcp-and-ip-in-different-fragments
+netback-force-CHECKSUM_PARTIAL-for-GSO.patch
+netback-closed.patch
+netback-default-to-threads.patch
+netback-limit-max-groups.patch
+netback-remove-permute-ring.patch
+netback-smart-poll-default-to-off.patch
+netback-set-NETIF_F_GSO_ROBUST-flag-for-inter-host-performance.patch
+netback-fix-index-netbk_tx_check_mop.patch
+netback-fix-gso-segment-warning.patch
+netback-fix-zero-count-hypercalls.patch
+netback-fix-tx-loop-whilst-pending-inuse-head-not-empty.patch
+netback-add-mod-parameter-for-delayed-copy-skb-timeout.patch
+netback-sysfs-netback-thread.patch
+netback-call-correct-dev_kfree_skb-variant.patch
+CA-87824-reorder-netback-closing-opening.patch
+
+# ... pciback
+pciback-flr
+remove-release-flr
+flr-change-sbr-d3r-lists
+export-pci_walk_bus.patch
+pciback-flr-82599
+pciback-cleanup-msi-safely.patch
+
+#
+# Event Channels.
+#
+
+#
+# Update the Xen interface headers.
+#
+xen-interface-HVMOP.patch
+xen-4.1-headers
+xen-interface-xenoprof-64bit-escape-code.patch
+
+#
+# Build fixes, tweaks and warning squashing
+#
+
+#
+# kABI fixes 
+#
+
+#
+# kexec/kdump "Features" :)
+#
+kexec-define-vmcore_elf_check_arch_cross.patch
+kexec-larger-max-pfn-for-oldmem.patch
+kexec-limit-page-table-mfns.patch
+kexec-limit-page-tables-to-below-1G.patch
+kexec-clear-vmcoreinfo_notes.patch
+
+#
+# Device Drivers.
+#
+
+# ... Ethernet.
+e1000-8.0.35.patch
+e1000e-1.10.6.patch
+igb-3.3.6.patch
+igb-netscalar-mode.patch
+igb-NetScaler-PR-1322.patch
+igb-NetScaler-CA-62813.patch
+igbvf-1.0.7.patch
+ixgbe-3.8.21.patch
+ixgbevf-1.0.17.patch
+ixgbe-enable-iplink-vf-config.patch
+ixgbe-disable-lro-by-default.patch
+ixgbe-disable-packet-split-by-default.patch
+ixgbe-NetScaler-modifications.patch
+ixgbe-NetScaler-PR-1322.patch
+# ... Broadcom drivers from v14.2.4.1.
+tg3-3.122o.patch
+tg3-fix-miscast-pointer.patch
+# ... Broadcom NetXtreme drivers
+broadcom-del-drivers.patch # They are so intertwined that this is the easiest way
+bnx2-cnic-2.72.13.patch
+bnx2x-1.72.55.patch
+bnx2x-fix-braindead-logic.patch
+# ... Other third party drivers.
+s2io-2.1.37.17590.patch #+v2.6.32-incompatible
+s2io-2-0-27-1.patch #+v2.6.32-incompatible
+s2io-2.1.37.18446.patch #+v2.6.32-incompatible
+s2io-fix-paths.patch #+v2.6.32-incompatible
+sfc-3.2.1.6079.patch
+vxge-2.5.2.22572.patch
+be2net-4.1.450.7.patch
+qlcnic-5.0.27.patch
+bna-3.1.0.0.patch
+netxen-4.0.78.patch
+qlge-1.0.0.30.patch
+cxgb3-1.6.0.3-xen.patch
+cxgb4-1.1.1.0-xen.patch
+mlx4-1.5.7.4.patch
+enic-2.1.1.39-1.patch
+qla3xxx-adjust-loglevel-for-printks.patch
+
+
+forcedeth-disable-msi.patch
+
+# ... SCSI.
+open-iscsi-gfpkernel.patch
+ibft-find.patch
+qisioctl-2.01.00b14.patch #+v2.6.32-incompatible
+lpfc-8.3.5.77-1p.patch
+bfa-3.1.0.0.patch
+fnic-1.5.0.1.patch
+qla4xxx-5.02.14.01.05.06-c0.patch
+qla2xxx-8.04.00.02.55.6-k.patch
+hpsa-3.0.0-6.patch
+bnx2i-2.7.0.4i.patch
+bnx2i-fix-braindead-logic.patch # Fix up paths
+libcxgbi.patch # common libs for cxgb3i and cxgb4i
+cxgb3i-2.0.0.patch
+cxgb4i-0.9.2.patch
+megaraid-sas-00.00.06.15.patch
+megaraid-sas-fallback-to-msi-if-msi-x-fails.patch
+mpt2sas-13.100.00.00.patch
+mpt2sas-fix-module-mismatch.patch
+be2iscsi-2.0.549.0.patch
+mptsas-4.28.00.00.patch
+backport-intel-isci-1.1.0-from-3.3.4.patch
+intel-isci-compile-fixes-for-2.6.32.patch
+
+
+# ... Other.
+cdrom-sysctl-info.patch
+uklog.patch
+
+#
+# Filesystems
+#
+nfs-allow-0-retransmits.patch
+nfs3-discrtry.patch
+cifs-no-tcp-sharing.patch
+
+#
+# Block / I/O Subsystem
+#
+cciss-4.6.28-19.patch
+CA-8809-fix-aio-deadlock
+CA-47970-writeback-fix-race-when-shutting-down-bdi.patch
+block-initialize-the-bounce-pool-if-high-memory-may-.patch
+
+#
+# Kernel Configuration.
+#
+config-create_config-script
+increase-maximum-number-of-loop-devices
+utility-guest
+create_config.sh-x86_64-sane-default
+increase-nr-dynirq
+enable-xen-save-restore.patch
+kernel-configuration
+csp-kernel-configuration
+
+#
+# Quieter Console Logging.
+#
+quiet-vfat
+CA-14400-reduce-printk-levels
+x86-mcheck-quiet-dom0-logging.patch
+
+#
+# Privilege Separation.
+#
+restricted-evtchn-dev
+restricted-privcmd-dev
+privcmd_domctl
+privcmd_hvmop_4.1
+privcmd_schedop
+privcmd_memop
+
+#
+# Networking.
+#
+openvswitch-8021q-Add-kluge-to-support-802.1Q-VLANs-on-devices-with-buggy-drivers.patch
+bridge-locate-physical-device.patch
+bonding-balance-slb.patch
+bonding-default-slb.patch
+promisc-bridging
+quiet-no-ufo
+bonding-balance-slb-fixes.patch
+bonding-balance-slb-fixes2.patch
+bonding-balance-slb-fixes3.patch
+bonding-balance-slb-fixes5.patch
+bonding-balance-slb-fixes6.patch
+bonding-balance-slb-fixes7.patch
+bonding-balance-slb-fixes8.patch
+bonding-no-updelay-on-first-active-slave.patch
+bonding-vlan-fixes.patch
+bonding-dump-gratuitous-learning-pkts-for-dbg.patch
+bonding-activebackup-send-gratuitous-learning-pkts.patch
+bridge-no-topology-change-when-no-stp.patch
+
+CA-45967-handle_timer_interrupt_before_others
+CA-47914-fix-multiple-vcpu-timekeeping.patch
+
+gridcentric-mmu-update.patch
+gridcentric-grant-retry-GNTST-eagain.patch
+
+#
+# Build.
+#
+fix-firmware-path
+
+#
+# Debugging.
+#
+dom0-swap-extra-debugging
+oom-debugging
+oom-debug-me-harder
+debug-dump-skb-info-when-invalid
+debug-dump-csum-and-copy-to-user-when-invalid.patch
+debug-dump-skb-info-and-BUG-on-frag_list
+CA-57949-disable-suspend.patch
+#CA-48121-megaraid_sas-avoid-NULL-ptr.patch # LSI appear to have fixed this
+CA-59187-NFS-fix-async-nospace-race.patch
+ipset.patch
+CA-77243
+support-xen-pdc-override-mechanism.patch
+CA-85967-cifs-4byte.patch
+xen-ftrace-add-notrace-annotations.patch
+
+#
+# EOF
+#

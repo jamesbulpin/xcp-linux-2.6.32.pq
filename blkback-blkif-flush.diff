@@ -1,0 +1,63 @@
+blkback: Flush bdev during close and open.
+
+Open, so outstanding buffer I/O is flushed.
+Close, so that stale buffers are reread.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 8bafdb313b79 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Sun May 23 02:00:46 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Sun May 23 02:00:55 2010 -0700
+@@ -117,6 +117,17 @@
+ static void make_response(blkif_t *blkif, u64 id,
+ 			  unsigned short op, int st);
+ 
++static int
++blkif_bdev_flush(blkif_t *blkif)
++{
++	int err = -EBADF;
++
++	if (blkif->bdev)
++		err = ioctl_by_bdev(blkif->bdev, BLKFLSBUF, 0);
++
++	return err;
++}
++
+ int
+ blkif_bdev_open(blkif_t *blkif, dev_t dev, int mode, int cdrom)
+ {
+@@ -133,6 +144,8 @@
+ 	blkif->cdrom = cdrom;
+ 	blkif->bdev  = bdev;
+ 
++	blkif_bdev_flush(blkif);
++
+ 	return 0;
+ }
+ 
+@@ -142,6 +155,8 @@
+ 	struct block_device *bdev = blkif->bdev;
+ 
+ 	if (bdev) {
++		blkif_bdev_flush(blkif);
++
+ 		blkdev_put(bdev);
+ 		blkif->bdev = NULL;
+ 	}
+diff -r 8bafdb313b79 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Sun May 23 02:00:46 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Sun May 23 02:00:55 2010 -0700
+@@ -99,13 +99,6 @@
+ 		return;
+ 	}
+ 
+-	err = filemap_write_and_wait(blkif->bdev->bd_inode->i_mapping);
+-	if (err) {
+-		xenbus_dev_error(blkif->be->dev, err, "block flush");
+-		return;
+-	}
+-	invalidate_inode_pages2(blkif->bdev->bd_inode->i_mapping);
+-
+ 	blkif->xenblkd = kthread_run(blkif_schedule, blkif, name);
+ 	if (IS_ERR(blkif->xenblkd)) {
+ 		err = PTR_ERR(blkif->xenblkd);

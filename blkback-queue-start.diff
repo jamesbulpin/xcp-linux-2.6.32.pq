@@ -1,0 +1,147 @@
+diff -r 31ddeedae0f1 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Jun 23 19:38:53 2010 -0700
++++ b/drivers/xen/blkback/common.h	Wed Jun 23 19:43:32 2010 -0700
+@@ -129,6 +129,9 @@
+ int blkif_sector_size(blkif_t *blkif);
+ unsigned int blkif_info(blkif_t *blkif);
+ 
++int blkif_queue_start(blkif_t *blkif, const char *name);
++int blkif_queue_stop(blkif_t *blkif);
++
+ struct phys_req {
+ 	unsigned short       dev;
+ 	unsigned short       nr_sects;
+diff -r 31ddeedae0f1 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jun 23 19:38:53 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Wed Jun 23 19:46:26 2010 -0700
+@@ -466,7 +451,8 @@
+ 	blkif->st_oo_req = 0;
+ }
+ 
+-int blkif_schedule(void *arg)
++static int
++blkif_queue_run(void *arg)
+ {
+ 	blkif_t *blkif = arg;
+ 
+@@ -506,6 +506,42 @@
+ 	return 0;
+ }
+ 
++int
++blkif_queue_start(blkif_t *blkif, const char *devname)
++{
++	struct task_struct *tsk;
++	const char *p;
++	int err = 0;
++
++	BUG_ON(!blkif->bdev);
++	BUG_ON(blkif->xenblkd);
++
++	p = strrchr(devname, '/');
++	devname = p ? p + 1: devname;
++
++	tsk = kthread_run(blkif_queue_run, blkif,
++			  "xb.%d.%s", blkif->domid, devname);
++	if (IS_ERR(tsk))
++		return PTR_ERR(tsk);
++
++	blkif->xenblkd = tsk;
++	return err;
++}
++
++int
++blkif_queue_stop(blkif_t *blkif)
++{
++	int err = 0;
++
++	if (!blkif->xenblkd)
++		return 0;
++
++	blkif->remove_requested = 1;
++	wake_up_process(blkif->xenblkd);
++
++	return err;
++}
++
+ /******************************************************************
+  * COMPLETION CALLBACK -- Called as bh->b_end_io()
+  */
+diff -r 31ddeedae0f1 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jun 23 19:38:53 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Wed Jun 23 19:46:26 2010 -0700
+@@ -77,13 +77,9 @@
+ 	if (xbdev->state != XenbusStateConnected)
+ 		return;
+ 
+-	blkif->xenblkd = kthread_run(blkif_schedule, blkif,
+-				     "xb.%05d.%s",
+-				     blkif->domid, be->devname);
+-	if (IS_ERR(blkif->xenblkd)) {
+-		err = PTR_ERR(blkif->xenblkd);
+-		blkif->xenblkd = NULL;
+-		xenbus_dev_error(xbdev, err, "start xenblkd");
++	err = blkif_queue_start(blkif, be->devname);
++	if (err) {
++		xenbus_dev_error(xbdev, err, "starting xenblkd");
+ 		return;
+ 	}
+ 
+@@ -263,30 +259,6 @@
+ 	be->group_added = 0;
+ }
+ 
+-static int __kthread_remove(struct backend_info *be)
+-{
+-	blkif_t *blkif = be->blkif;
+-
+-	if (!blkif->xenblkd)
+-		return 0;
+-
+-	blkif->remove_requested = 1;
+-	wake_up_process(blkif->xenblkd);
+-
+-	return -EBUSY;
+-}
+-
+-static int kthread_remove(struct backend_info *be)
+-{
+-	int busy;
+-
+-	mutex_lock(&be->lock);
+-	busy = __kthread_remove(be);
+-	mutex_unlock(&be->lock);
+-
+-	return busy;
+-}
+-
+ static void signal_shutdown(struct backend_info *be, int atomic)
+ {
+ 	struct xenbus_device *xbdev = be->dev;
+@@ -368,7 +340,7 @@
+ 		be->pause_watch.node = NULL;
+ 	}
+ 
+-	if (kthread_remove(be))
++	if (blkif_queue_stop(be->blkif))
+ 		WPRINTK("BAD REMOVE REQUEST for %s\n", xbdev->nodename);
+ 
+ 	xenvbd_sysfs_delif(xbdev);
+@@ -472,7 +444,7 @@
+ 	shutdown = !blkif->xenblkd;
+ 
+ 	if (!shutdown && force)
+-		shutdown = !__kthread_remove(be);
++		shutdown = !blkif_queue_stop(blkif);
+ 
+ 	mutex_unlock(&be->lock);
+ 
+@@ -793,7 +765,7 @@
+ 		break;
+ 
+ 	case XenbusStateClosed:
+-		if (kthread_remove(be))
++		if (blkif_queue_stop(be->blkif))
+ 			break;
+ 
+ 		blkif_disconnect(be->blkif);

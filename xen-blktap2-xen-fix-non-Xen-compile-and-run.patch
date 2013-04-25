@@ -1,0 +1,47 @@
+From 317845cf242a2737f6e48318af79414caddee13d Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Tue, 8 Dec 2009 15:05:16 -0800
+Subject: [PATCH 07/23] xen: fix non-Xen compile and run
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ arch/x86/mm/gup.c     |    2 ++
+ arch/x86/mm/pgtable.c |    5 ++++-
+ 2 files changed, 6 insertions(+), 1 deletions(-)
+
+# diff --git a/arch/x86/mm/gup.c b/arch/x86/mm/gup.c
+# index 95c9bcb..69206cf 100644
+# --- a/arch/x86/mm/gup.c
+# +++ b/arch/x86/mm/gup.c
+# @@ -252,8 +252,10 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
+#  					(void __user *)start, len)))
+#  		goto slow_irqon;
+#  
+# +#ifdef CONFIG_XEN
+#  	if (unlikely(mm->context.has_foreign_mappings))
+#  		goto slow_irqon;
+# +#endif
+#  
+#  	/*
+#  	 * XXX: batch / limit 'nr', to avoid large irq off latency
+# diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+# index 9b29f06..cb54d91 100644
+# --- a/arch/x86/mm/pgtable.c
+# +++ b/arch/x86/mm/pgtable.c
+# @@ -267,9 +267,12 @@ out:
+#  
+#  void pgd_free(struct mm_struct *mm, pgd_t *pgd)
+#  {
+# +#ifdef CONFIG_XEN
+#  	/* EEW */
+#  	extern void xen_late_unpin_pgd(struct mm_struct *mm, pgd_t *pgd);
+# -	xen_late_unpin_pgd(mm, pgd);
+# +	if (xen_pv_domain())
+# +		xen_late_unpin_pgd(mm, pgd);
+# +#endif
+#  	pgd_mop_up_pmds(mm, pgd);
+#  	pgd_dtor(pgd);
+#  	paravirt_pgd_free(mm, pgd);
+# -- 
+# 1.7.0.4
+# 

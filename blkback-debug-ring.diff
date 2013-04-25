@@ -1,0 +1,134 @@
+CA-60495: Add a blkback ring debug node in sysfs.
+
+Usage:
+
+ - Sample sring and backend indexes:
+
+   # cat /sys/devices/xen-backend/vbd-1-51712/ring
+   req prod 3929 cons 3929 event 3930
+   rsp prod 3929 pvt 3929 event 3930
+
+ - Did the frontend miss a response notification?
+
+   # echo -n kick > /sys/devices/xen-backend/vbd-1-51712/ring
+
+ - Did the backend missed a request notification?
+
+   # echo -n poll > /sys/devices/xen-backend/vbd-1-51712/ring
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff --git a/drivers/xen/blkback/xenbus.c b/drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c
++++ b/drivers/xen/blkback/xenbus.c
+@@ -390,6 +390,77 @@
+ 
+ static DEVICE_ATTR(physical_device, S_IRUGO, show_physical_device, NULL);
+ 
++static ssize_t
++show_io_ring(struct device *dev, struct device_attribute *attr,
++	     char *buf)
++{
++	struct backend_info *be = dev_get_drvdata(dev);
++	blkif_t *blkif = be->blkif;
++	blkif_common_back_ring_t *ring;
++	ssize_t rv = -ENXIO;
++
++	mutex_lock(&be->mutex);
++
++	ring = &blkif->blk_rings.common;
++	if (ring->sring) {
++		blkif_common_sring_t *sring = ring->sring;
++		rv = 0;
++
++		rv += sprintf(buf + rv,
++			      "nr_ents %u\n", ring->nr_ents);
++
++		rv += sprintf(buf + rv,
++			      "req prod %u cons %d event %u\n",
++			      sring->req_prod, ring->req_cons,
++			      sring->req_event);
++
++		rv += sprintf(buf + rv,
++			      "rsp prod %u pvt %d event %u\n",
++			      sring->rsp_prod, ring->rsp_prod_pvt,
++			      sring->rsp_event);
++	}
++
++	mutex_unlock(&be->mutex);
++
++	return rv;
++}
++
++static ssize_t
++store_io_ring(struct device *dev, struct device_attribute *attr,
++	      const char *buf, size_t count)
++{
++	struct backend_info *be = dev_get_drvdata(dev);
++	blkif_t *blkif = be->blkif;
++	ssize_t rv = count;
++	int ok = 1;
++
++	mutex_lock(&be->mutex);
++
++	if (!strncmp(buf, "poll", count)) {
++		ok = !!be->kthread_pid;
++		if (ok)
++			blkif_notify_work(blkif);
++		goto done;
++	}
++
++	if (!strncmp(buf, "kick", count)) {
++		ok = !!blkif->irq;
++		if (ok)
++			notify_remote_via_irq(blkif->irq);
++		goto done;
++	}
++
++	rv = -EINVAL;
++done:
++	if (!ok)
++		rv = -ENXIO;
++
++	mutex_unlock(&be->mutex);
++	return rv;
++}
++
++static DEVICE_ATTR(io_ring, S_IRUGO|S_IWUSR, show_io_ring, store_io_ring);
++
+ ssize_t show_queue_events(struct device *dev, struct device_attribute *attr,
+ 			  char *buf)
+ {
+@@ -428,14 +500,20 @@
+ 	if (error)
+ 		goto fail4;
+ 
++	error = device_create_file(&dev->dev, &dev_attr_io_ring);
++	if (error)
++		goto fail5;
++
+ 	be->group_added = 1;
+ 
+ 	return 0;
+ 
+-fail4:	device_remove_file(&dev->dev, &dev_attr_queue_events);
+-fail3:	sysfs_remove_group(&dev->dev.kobj, &vbdstat_group);
+-fail2:	device_remove_file(&dev->dev, &dev_attr_mode);
+-fail1:	device_remove_file(&dev->dev, &dev_attr_physical_device);
++	device_remove_file(&dev->dev, &dev_attr_io_ring);
++fail5:	device_remove_file(&dev->dev, &dev_attr_queue_events);
++fail4:	sysfs_remove_group(&dev->dev.kobj, &vbdstat_group);
++fail3:	device_remove_file(&dev->dev, &dev_attr_mode);
++fail2:	device_remove_file(&dev->dev, &dev_attr_physical_device);
++fail1:
+ 	return error;
+ }
+ 
+@@ -444,6 +522,7 @@
+ 	struct backend_info *be = dev_get_drvdata(&dev->dev);
+ 	if (be->group_added == 0)
+ 		return;
++	device_remove_file(&dev->dev, &dev_attr_io_ring);
+ 	device_remove_file(&dev->dev, &dev_attr_queue_events);
+ 	sysfs_remove_group(&dev->dev.kobj, &vbdstat_group);
+ 	device_remove_file(&dev->dev, &dev_attr_mode);

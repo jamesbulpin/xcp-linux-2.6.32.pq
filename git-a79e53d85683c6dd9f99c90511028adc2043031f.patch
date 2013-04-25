@@ -1,0 +1,411 @@
+commit a79e53d85683c6dd9f99c90511028adc2043031f
+Author: Andrea Arcangeli <aarcange@redhat.com>
+Date:   Wed Feb 16 15:45:22 2011 -0800
+
+    x86/mm: Fix pgd_lock deadlock
+
+    It's forbidden to take the page_table_lock with the irq disabled
+    or if there's contention the IPIs (for tlb flushes) sent with
+    the page_table_lock held will never run leading to a deadlock.
+
+    Nobody takes the pgd_lock from irq context so the _irqsave can be
+    removed.
+
+    Signed-off-by: Andrea Arcangeli <aarcange@redhat.com>
+    Acked-by: Rik van Riel <riel@redhat.com>
+    Tested-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: <stable@kernel.org>
+    LKML-Reference: <201102162345.p1GNjMjm021738@imap1.linux-foundation.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff -r a05e66503d54 arch/x86/mm/fault-xen.c
+--- a/arch/x86/mm/fault-xen.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/fault-xen.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -231,15 +231,14 @@ void vmalloc_sync_all(void)
+ 	     address >= TASK_SIZE && address < FIXADDR_TOP;
+ 	     address += PMD_SIZE) {
+ 
+-		unsigned long flags;
+ 		struct page *page;
+ 
+-		spin_lock_irqsave(&pgd_lock, flags);
++		spin_lock(&pgd_lock);
+ 		list_for_each_entry(page, &pgd_list, lru) {
+ 			if (!vmalloc_sync_one(page_address(page), address))
+ 				break;
+ 		}
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 	}
+ }
+ 
+@@ -340,13 +339,12 @@ void vmalloc_sync_all(void)
+ 	     address += PGDIR_SIZE) {
+ 
+ 		const pgd_t *pgd_ref = pgd_offset_k(address);
+-		unsigned long flags;
+ 		struct page *page;
+ 
+ 		if (pgd_none(*pgd_ref))
+ 			continue;
+ 
+-		spin_lock_irqsave(&pgd_lock, flags);
++		spin_lock(&pgd_lock);
+ 		list_for_each_entry(page, &pgd_list, lru) {
+ 			pgd_t *pgd;
+ 			pgd = (pgd_t *)page_address(page) + pgd_index(address);
+@@ -355,7 +353,7 @@ void vmalloc_sync_all(void)
+ 			else
+ 				BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_ref));
+ 		}
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 	}
+ }
+ 
+diff -r a05e66503d54 arch/x86/mm/fault.c
+--- a/arch/x86/mm/fault.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/fault.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -226,12 +226,12 @@ void vmalloc_sync_all(void)
+ 		unsigned long flags;
+ 		struct page *page;
+ 
+-		spin_lock_irqsave(&pgd_lock, flags);
++		spin_lock(&pgd_lock);
+ 		list_for_each_entry(page, &pgd_list, lru) {
+ 			if (!vmalloc_sync_one(page_address(page), address))
+ 				break;
+ 		}
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 	}
+ }
+ 
+@@ -331,13 +331,12 @@ void vmalloc_sync_all(void)
+ 	     address += PGDIR_SIZE) {
+ 
+ 		const pgd_t *pgd_ref = pgd_offset_k(address);
+-		unsigned long flags;
+ 		struct page *page;
+ 
+ 		if (pgd_none(*pgd_ref))
+ 			continue;
+ 
+-		spin_lock_irqsave(&pgd_lock, flags);
++		spin_lock(&pgd_lock);
+ 		list_for_each_entry(page, &pgd_list, lru) {
+ 			pgd_t *pgd;
+ 			pgd = (pgd_t *)page_address(page) + pgd_index(address);
+@@ -346,7 +345,7 @@ void vmalloc_sync_all(void)
+ 			else
+ 				BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_ref));
+ 		}
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 	}
+ }
+ 
+diff -r a05e66503d54 arch/x86/mm/pageattr-xen.c
+--- a/arch/x86/mm/pageattr-xen.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/pageattr-xen.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -56,12 +56,10 @@ static unsigned long direct_pages_count[
+ 
+ void update_page_count(int level, unsigned long pages)
+ {
+-	unsigned long flags;
+-
+ 	/* Protect against CPA */
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	direct_pages_count[level] += pages;
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ static void split_page_count(int level)
+@@ -390,7 +388,7 @@ static int
+ try_preserve_large_page(pte_t *kpte, unsigned long address,
+ 			struct cpa_data *cpa)
+ {
+-	unsigned long nextpage_addr, numpages, pmask, psize, flags, addr, pfn;
++	unsigned long nextpage_addr, numpages, pmask, psize, addr, pfn;
+ 	pte_t new_pte, old_pte, *tmp;
+ 	pgprot_t old_prot, new_prot;
+ 	int i, do_split = 1;
+@@ -399,7 +397,7 @@ try_preserve_large_page(pte_t *kpte, uns
+ 	if (cpa->force_split)
+ 		return 1;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	/*
+ 	 * Check for races, another CPU might have split this page
+ 	 * up already:
+@@ -496,14 +494,14 @@ try_preserve_large_page(pte_t *kpte, uns
+ 	}
+ 
+ out_unlock:
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return do_split;
+ }
+ 
+ static int split_large_page(pte_t *kpte, unsigned long address)
+ {
+-	unsigned long flags, mfn, mfninc = 1;
++	unsigned long mfn, mfninc = 1;
+ 	unsigned int i, level;
+ 	pte_t *pbase, *tmp;
+ 	pgprot_t ref_prot;
+@@ -517,7 +515,7 @@ static int split_large_page(pte_t *kpte,
+ 	if (!base)
+ 		return -ENOMEM;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	/*
+ 	 * Check for races, another CPU might have split this page
+ 	 * up for us already:
+@@ -593,7 +591,7 @@ out_unlock:
+ 	 */
+ 	if (base)
+ 		__free_page(base);
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return 0;
+ }
+diff -r a05e66503d54 arch/x86/mm/pageattr.c
+--- a/arch/x86/mm/pageattr.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/pageattr.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -56,12 +56,10 @@ static unsigned long direct_pages_count[
+ 
+ void update_page_count(int level, unsigned long pages)
+ {
+-	unsigned long flags;
+-
+ 	/* Protect against CPA */
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	direct_pages_count[level] += pages;
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ static void split_page_count(int level)
+@@ -376,7 +374,7 @@ static int
+ try_preserve_large_page(pte_t *kpte, unsigned long address,
+ 			struct cpa_data *cpa)
+ {
+-	unsigned long nextpage_addr, numpages, pmask, psize, flags, addr, pfn;
++	unsigned long nextpage_addr, numpages, pmask, psize, addr, pfn;
+ 	pte_t new_pte, old_pte, *tmp;
+ 	pgprot_t old_prot, new_prot;
+ 	int i, do_split = 1;
+@@ -385,7 +383,7 @@ try_preserve_large_page(pte_t *kpte, uns
+ 	if (cpa->force_split)
+ 		return 1;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	/*
+ 	 * Check for races, another CPU might have split this page
+ 	 * up already:
+@@ -480,14 +478,14 @@ try_preserve_large_page(pte_t *kpte, uns
+ 	}
+ 
+ out_unlock:
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return do_split;
+ }
+ 
+ static int split_large_page(pte_t *kpte, unsigned long address)
+ {
+-	unsigned long flags, pfn, pfninc = 1;
++	unsigned long pfn, pfninc = 1;
+ 	unsigned int i, level;
+ 	pte_t *pbase, *tmp;
+ 	pgprot_t ref_prot;
+@@ -501,7 +499,7 @@ static int split_large_page(pte_t *kpte,
+ 	if (!base)
+ 		return -ENOMEM;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	/*
+ 	 * Check for races, another CPU might have split this page
+ 	 * up for us already:
+@@ -573,7 +571,7 @@ out_unlock:
+ 	 */
+ 	if (base)
+ 		__free_page(base);
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return 0;
+ }
+diff -r a05e66503d54 arch/x86/mm/pgtable-xen.c
+--- a/arch/x86/mm/pgtable-xen.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/pgtable-xen.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -409,7 +409,6 @@ void mm_unpin(struct mm_struct *mm)
+ void mm_pin_all(void)
+ {
+ 	struct page *page;
+-	unsigned long flags;
+ 
+ 	if (xen_feature(XENFEAT_writable_page_tables))
+ 		return;
+@@ -420,12 +419,12 @@ void mm_pin_all(void)
+ 	 * All other CPUs must be at a safe point (e.g., in stop_machine
+ 	 * or offlined entirely).
+ 	 */
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	list_for_each_entry(page, &pgd_list, lru) {
+ 		if (!PagePinned(page))
+ 			__pgd_pin((pgd_t *)page_address(page));
+ 	}
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ void arch_dup_mmap(struct mm_struct *oldmm, struct mm_struct *mm)
+@@ -531,9 +530,9 @@ static void pgd_dtor(pgd_t *pgd)
+ 	unsigned long flags; /* can be called from interrupt context */
+ 
+ 	if (!SHARED_KERNEL_PMD) {
+-		spin_lock_irqsave(&pgd_lock, flags);
++		spin_lock(&pgd_lock);
+ 		pgd_list_del(pgd);
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 	}
+ 
+ 	pgd_test_and_unpin(pgd);
+@@ -709,7 +708,6 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ {
+ 	pgd_t *pgd;
+ 	pmd_t *pmds[PREALLOCATED_PMDS];
+-	unsigned long flags;
+ 
+ 	pgd = user_pgd_alloc((void *)__get_free_page(PGALLOC_GFP));
+ 
+@@ -729,13 +727,13 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ 	 * respect to anything walking the pgd_list, so that they
+ 	 * never see a partially populated pgd.
+ 	 */
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 
+ #ifdef CONFIG_X86_PAE
+ 	/* Protect against save/restore: move below 4GB under pgd_lock. */
+ 	if (!xen_feature(XENFEAT_pae_pgdir_above_4gb)
+ 	    && xen_create_contiguous_region((unsigned long)pgd, 0, 32)) {
+-		spin_unlock_irqrestore(&pgd_lock, flags);
++		spin_unlock(&pgd_lock);
+ 		goto out_free_pmds;
+ 	}
+ #endif
+@@ -743,7 +741,7 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ 	pgd_ctor(pgd);
+ 	pgd_prepopulate_pmd(mm, pgd, pmds);
+ 
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return pgd;
+ 
+diff -r a05e66503d54 arch/x86/mm/pgtable.c
+--- a/arch/x86/mm/pgtable.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/mm/pgtable.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -110,14 +110,12 @@ static void pgd_ctor(pgd_t *pgd)
+ 
+ static void pgd_dtor(pgd_t *pgd)
+ {
+-	unsigned long flags; /* can be called from interrupt context */
+-
+ 	if (SHARED_KERNEL_PMD)
+ 		return;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 	pgd_list_del(pgd);
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ /*
+@@ -248,7 +246,6 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ {
+ 	pgd_t *pgd;
+ 	pmd_t *pmds[PREALLOCATED_PMDS];
+-	unsigned long flags;
+ 
+ 	pgd = (pgd_t *)__get_free_page(PGALLOC_GFP);
+ 
+@@ -268,12 +265,12 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ 	 * respect to anything walking the pgd_list, so that they
+ 	 * never see a partially populated pgd.
+ 	 */
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 
+ 	pgd_ctor(pgd);
+ 	pgd_prepopulate_pmd(mm, pgd, pmds);
+ 
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ 
+ 	return pgd;
+ 
+diff -r a05e66503d54 arch/x86/xen/mmu.c
+--- a/arch/x86/xen/mmu.c	Sat Feb 12 08:17:34 2011 -0500
++++ b/arch/x86/xen/mmu.c	Mon Oct 24 17:56:55 2011 +0100
+@@ -987,10 +987,9 @@ static void xen_pgd_pin(struct mm_struct
+  */
+ void xen_mm_pin_all(void)
+ {
+-	unsigned long flags;
+ 	struct page *page;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 
+ 	list_for_each_entry(page, &pgd_list, lru) {
+ 		if (!PagePinned(page)) {
+@@ -999,7 +998,7 @@ void xen_mm_pin_all(void)
+ 		}
+ 	}
+ 
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ /*
+@@ -1100,10 +1099,9 @@ static void xen_pgd_unpin(struct mm_stru
+  */
+ void xen_mm_unpin_all(void)
+ {
+-	unsigned long flags;
+ 	struct page *page;
+ 
+-	spin_lock_irqsave(&pgd_lock, flags);
++	spin_lock(&pgd_lock);
+ 
+ 	list_for_each_entry(page, &pgd_list, lru) {
+ 		if (PageSavePinned(page)) {
+@@ -1113,7 +1111,7 @@ void xen_mm_unpin_all(void)
+ 		}
+ 	}
+ 
+-	spin_unlock_irqrestore(&pgd_lock, flags);
++	spin_unlock(&pgd_lock);
+ }
+ 
+ void xen_activate_mm(struct mm_struct *prev, struct mm_struct *next)

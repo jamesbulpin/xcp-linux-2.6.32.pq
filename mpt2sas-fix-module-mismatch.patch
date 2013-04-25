@@ -1,0 +1,15 @@
+# HG changeset patch
+# Parent 693cbcf8ce7e06a425927d6fd1c1c37d1554a317
+
+diff -r 693cbcf8ce7e drivers/scsi/mpt2sas/mpt2sas_scsih.c
+--- a/drivers/scsi/mpt2sas/mpt2sas_scsih.c
++++ b/drivers/scsi/mpt2sas/mpt2sas_scsih.c
+@@ -7095,7 +7095,7 @@ _scsih_shutdown(struct pci_dev *pdev)
+  * Routine called when unloading the driver.
+  * Return nothing.
+  */
+-static void __devexit
++static void
+ _scsih_remove(struct pci_dev *pdev)
+ {
+ 	struct Scsi_Host *shost = pci_get_drvdata(pdev);

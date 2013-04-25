@@ -1,0 +1,81 @@
+# HG changeset patch
+# Parent 9ac29cb432cd98e27ac54482f0c963c3dd4aefdb
+blkback: Don't let in-flight requests defer pending ones.
+
+Running RING_FINAL_CHECK_FOR_REQUESTS from make_response is a bad
+idea. It means that in-flight I/O is essentially blocking continued
+batches. This essentially kills throughput on frontends which unplug
+(or even just notify) early and rightfully assume addtional requests
+will be picked up on time, not synchronously. 
+
+Saw cache writeback going up from 45MB/s top 65MB/s for xen-blkfront
+on ISCSI.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 9ac29cb432cd drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Fri May 27 15:27:45 2011 -0700
++++ b/drivers/xen/blkback/blkback.c	Fri May 27 15:28:52 2011 -0700
+@@ -552,7 +552,7 @@
+  * DOWNWARD CALLS -- These interface with the block-device layer proper.
+  */
+ 
+-static int do_block_io_op(blkif_t *blkif)
++static int __do_block_io_op(blkif_t *blkif)
+ {
+ 	blkif_back_rings_t *blk_rings = &blkif->blk_rings;
+ 	blkif_request_t req;
+@@ -630,6 +630,22 @@
+ 	return more_to_do;
+ }
+ 
++static int do_block_io_op(blkif_t *blkif)
++{
++	blkif_back_rings_t *blk_rings = &blkif->blk_rings;
++	int more_to_do;
++
++	do {
++		more_to_do = __do_block_io_op(blkif);
++		if (more_to_do)
++			break;
++
++		RING_FINAL_CHECK_FOR_REQUESTS(&blk_rings->common, more_to_do);
++	} while (more_to_do);
++
++	return more_to_do;
++}
++
+ static void dispatch_rw_block_io(blkif_t *blkif,
+ 				 blkif_request_t *req,
+ 				 pending_req_t *pending_req)
+@@ -819,7 +837,6 @@
+ 	blkif_response_t  resp;
+ 	unsigned long     flags;
+ 	blkif_back_rings_t *blk_rings = &blkif->blk_rings;
+-	int more_to_do = 0;
+ 	int notify;
+ 
+ 	resp.id        = id;
+@@ -846,22 +863,7 @@
+ 	}
+ 	blk_rings->common.rsp_prod_pvt++;
+ 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blk_rings->common, notify);
+-	if (blk_rings->common.rsp_prod_pvt == blk_rings->common.req_cons) {
+-		/*
+-		 * Tail check for pending requests. Allows frontend to avoid
+-		 * notifications if requests are already in flight (lower
+-		 * overheads and promotes batching).
+-		 */
+-		RING_FINAL_CHECK_FOR_REQUESTS(&blk_rings->common, more_to_do);
+-
+-	} else if (RING_HAS_UNCONSUMED_REQUESTS(&blk_rings->common)) {
+-		more_to_do = 1;
+-	}
+-
+ 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
+-
+-	if (more_to_do)
+-		blkif_notify_work(blkif);
+ 	if (notify)
+ 		notify_remote_via_irq(blkif->irq);
+ }

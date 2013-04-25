@@ -1,0 +1,18 @@
+Direct callers of math_state_restore need to CLTS first, because the
+Xenified version assumes that Xen cleared CR0.TS in the trap handler.
+
+diff -r f44fc5571555 arch/x86/kernel/process_32-xen.c
+--- a/arch/x86/kernel/process_32-xen.c	Wed May 26 15:59:24 2010 +0100
++++ b/arch/x86/kernel/process_32-xen.c	Wed May 26 16:04:29 2010 +0100
+@@ -485,8 +485,10 @@
+ 	 */
+ 	arch_end_context_switch(next_p);
+ 
+-	if (preload_fpu)
++	if (preload_fpu) {
++ 		clts(); /* Xenified math_state_restore() doesn't do this */
+ 		__math_state_restore();
++	}
+ 
+ 	/*
+ 	 * Restore %gs if needed (which is common)

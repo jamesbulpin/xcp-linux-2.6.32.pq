@@ -1,0 +1,210 @@
+From 868307fdc8f7d7c50034adf0b97de157ca319292 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:35 -0700
+Subject: [PATCH 17/18] xen/blktap: Split debug code.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    3 +++
+ drivers/xen/blktap2/control.c |   13 +++++++++++++
+ drivers/xen/blktap2/device.c  |   35 +++++++++++++++++++++++++++++++++++
+ drivers/xen/blktap2/ring.c    |   35 +++++++++++++++++++++++++++++++++++
+ drivers/xen/blktap2/sysfs.c   |   34 +++++-----------------------------
+ 5 files changed, 91 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 1981f9f..a29b509 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -157,9 +157,11 @@ extern struct blktap **blktaps;
+ extern int blktap_max_minor;
+ 
+ int blktap_control_destroy_tap(struct blktap *);
++size_t blktap_control_debug(struct blktap *, char *, size_t);
+ 
+ int blktap_ring_init(void);
+ void blktap_ring_exit(void);
++size_t blktap_ring_debug(struct blktap *, char *, size_t);
+ int blktap_ring_create(struct blktap *);
+ int blktap_ring_destroy(struct blktap *);
+ void blktap_ring_kick_user(struct blktap *);
+@@ -172,6 +174,7 @@ void blktap_sysfs_destroy(struct blktap *);
+ 
+ int blktap_device_init(void);
+ void blktap_device_exit(void);
++size_t blktap_device_debug(struct blktap *, char *, size_t);
+ int blktap_device_create(struct blktap *, struct blktap_params *);
+ int blktap_device_destroy(struct blktap *);
+ void blktap_device_destroy_sync(struct blktap *);
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 377ee23..ef54fa1 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -172,6 +172,19 @@ static struct miscdevice blktap_misc = {
+ 	.fops     = &blktap_control_file_operations,
+ };
+ 
++size_t
++blktap_control_debug(struct blktap *tap, char *buf, size_t size)
++{
++	char *s = buf, *end = buf + size;
++
++	s += snprintf(s, end - s,
++		      "tap %u:%u name:'%s' flags:%#08lx\n",
++		      MAJOR(tap->ring.devno), MINOR(tap->ring.devno),
++		      tap->name, tap->dev_inuse);
++
++	return s - buf;
++}
++
+ static int __init
+ blktap_control_init(void)
+ {
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 55af5e0..ac3944c 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -879,6 +879,41 @@ fail:
+ 	return err;
+ }
+ 
++size_t
++blktap_device_debug(struct blktap *tap, char *buf, size_t size)
++{
++	struct gendisk *disk = tap->device.gd;
++	struct request_queue *q;
++	struct block_device *bdev;
++	char *s = buf, *end = buf + size;
++
++	if (!disk)
++		return 0;
++
++	q = disk->queue;
++
++	s += snprintf(s, end - s,
++		      "disk capacity:%llu sector size:%u\n",
++		      get_capacity(disk), queue_hardsect_size(q));
++
++	s += snprintf(s, end - s,
++		      "queue flags:%#lx plugged:%d stopped:%d empty:%d\n",
++		      q->queue_flags,
++		      blk_queue_plugged(q), blk_queue_stopped(q),
++		      elv_queue_empty(q));
++
++	bdev = bdget_disk(disk, 0);
++	if (bdev) {
++		s += snprintf(s, end - s,
++			      "bdev openers:%d closed:%d\n",
++			      bdev->bd_openers,
++			      test_bit(BLKTAP_DEVICE_CLOSED, &tap->dev_inuse));
++		bdput(bdev);
++	}
++
++	return s - buf;
++}
++
+ int __init
+ blktap_device_init()
+ {
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 1d90ece..8f58fe9 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -445,6 +445,41 @@ blktap_ring_create(struct blktap *tap)
+ 	return 0;
+ }
+ 
++size_t
++blktap_ring_debug(struct blktap *tap, char *buf, size_t size)
++{
++	char *s = buf, *end = buf + size;
++	int usr_idx;
++
++	s += snprintf(s, end - s,
++		      "begin pending:%d\n", tap->pending_cnt);
++
++	for (usr_idx = 0; usr_idx < MAX_PENDING_REQS; usr_idx++) {
++		struct blktap_request *request;
++		struct timeval *time;
++		int write;
++
++		request = tap->pending_requests[usr_idx];
++		if (!request)
++			continue;
++
++		write = request->operation == BLKIF_OP_WRITE;
++		time  = &request->time;
++
++		s += snprintf(s, end - s,
++			      "%02d: usr_idx:%02d "
++			      "op:%c nr_pages:%02d time:%lu.%09lu\n",
++			      usr_idx, request->usr_idx,
++			      write ? 'W' : 'R', request->nr_pages,
++			      time->tv_sec, time->tv_usec);
++	}
++
++	s += snprintf(s, end - s, "end pending\n");
++
++	return s - buf;
++}
++
++
+ int __init
+ blktap_ring_init(void)
+ {
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 9dc116d..e573549 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -96,43 +96,19 @@ static ssize_t
+ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct blktap *tap;
+-	char *tmp = buf;
+-	int i;
++	char *s = buf, *end = buf + PAGE_SIZE;
+ 
+ 	tap = dev_get_drvdata(dev);
+ 	if (!tap)
+ 		return 0;
+ 
+-	tmp += sprintf(tmp, "%s (%u:%u), dev_inuse: 0x%08lx\n",
+-		       tap->name, MAJOR(tap->ring.devno),
+-		       MINOR(tap->ring.devno), tap->dev_inuse);
+-
+-	if (tap->device.gd) {
+-		struct gendisk *gd = tap->device.gd;
+-		struct block_device *bdev = bdget_disk(gd, 0);
+-		tmp += sprintf(tmp, "capacity: 0x%llx, sector size: %#x, "
+-			       "device users: %d\n", get_capacity(gd),
+-			       gd->queue->hardsect_size, bdev->bd_openers);
+-		bdput(bdev);
+-	}
+-
+-	tmp += sprintf(tmp, "pending requests: %d\n", tap->pending_cnt);
++	s += blktap_control_debug(tap, s, end - s);
+ 
+-	for (i = 0; i < MAX_PENDING_REQS; i++) {
+-		struct blktap_request *req = tap->pending_requests[i];
+-		if (!req)
+-			continue;
++	s += blktap_device_debug(tap, s, end - s);
+ 
+-		tmp += sprintf(tmp, "req %d: id: %llu, usr_idx: %d, "
+-			       "status: 0x%02x, pendcnt: %d, "
+-			       "nr_pages: %u, op: %d, time: %lu:%lu\n",
+-			       i, (unsigned long long)req->id, req->usr_idx,
+-			       req->status, atomic_read(&req->pendcnt),
+-			       req->nr_pages, req->operation, req->time.tv_sec,
+-			       req->time.tv_usec);
+-	}
++	s += blktap_ring_debug(tap, s, end - s);
+ 
+-	return (tmp - buf) + 1;
++	return s - buf;
+ }
+ static DEVICE_ATTR(debug, S_IRUGO, blktap_sysfs_debug_device, NULL);
+ 
+-- 
+1.7.0.4
+

@@ -1,0 +1,12 @@
+diff -r 29c808922149 arch/x86/include/mach-xen/asm/irq_vectors.h
+--- a/arch/x86/include/mach-xen/asm/irq_vectors.h	Wed Jun 17 11:23:13 2009 +0100
++++ b/arch/x86/include/mach-xen/asm/irq_vectors.h	Wed Jun 17 11:27:48 2009 +0100
+@@ -44,7 +44,7 @@
+ #endif
+ 
+ #define DYNIRQ_BASE			(PIRQ_BASE + nr_pirqs)
+-#define NR_DYNIRQS			256
++#define NR_DYNIRQS			768
+ 
+ #define NR_IRQS			(NR_PIRQS + NR_DYNIRQS)
+ 

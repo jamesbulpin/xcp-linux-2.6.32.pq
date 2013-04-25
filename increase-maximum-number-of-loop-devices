@@ -1,0 +1,12 @@
+diff -r b8de1873aa2f drivers/block/loop.c
+--- a/drivers/block/loop.c	Wed Aug 03 15:00:39 2011 +0100
++++ b/drivers/block/loop.c	Wed Aug 03 15:02:49 2011 +0100
+@@ -1615,7 +1615,7 @@ static int __init loop_init(void)
+ 		nr = max_loop;
+ 		range = max_loop << part_shift;
+ 	} else {
+-		nr = 8;
++		nr = 128;
+ 		range = 1UL << MINORBITS;
+ 	}
+ 

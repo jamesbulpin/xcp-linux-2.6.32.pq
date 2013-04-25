@@ -1,0 +1,48 @@
+# HG changeset patch
+# Parent ef458cf2b65c4d433fd06f4aef9270eee0f30ee7
+
+Avoid a global lock when a per-netbk lock will do.
+
+diff -r ef458cf2b65c -r 4c54166727b0 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Thu May 12 11:37:03 2011 +0100
++++ b/drivers/xen/netback/common.h	Thu May 12 12:22:09 2011 +0100
+@@ -365,6 +365,8 @@ struct xen_netbk {
+ 
+ 	pending_ring_idx_t pending_prod;
+ 	pending_ring_idx_t pending_cons;
++
++	spinlock_t dealloc_lock;
+ 	pending_ring_idx_t dealloc_prod;
+ 	pending_ring_idx_t dealloc_cons;
+ 
+diff -r ef458cf2b65c -r 4c54166727b0 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu May 12 11:37:03 2011 +0100
++++ b/drivers/xen/netback/netback.c	Thu May 12 12:22:09 2011 +0100
+@@ -1451,17 +1451,16 @@ out:
+ 
+ static void netif_idx_release(struct xen_netbk *netbk, u16 pending_idx)
+ {
+-	static DEFINE_SPINLOCK(_lock);
+ 	unsigned long flags;
+ 	pending_ring_idx_t index;
+ 
+-	spin_lock_irqsave(&_lock, flags);
++	spin_lock_irqsave(&netbk->dealloc_lock, flags);
+ 	index = pending_index(netbk->dealloc_prod);
+ 	netbk->dealloc_ring[index] = pending_idx;
+ 	/* Sync with net_tx_action_dealloc: insert idx /then/ incr producer. */
+ 	smp_wmb();
+ 	netbk->dealloc_prod++;
+-	spin_unlock_irqrestore(&_lock, flags);
++	spin_unlock_irqrestore(&netbk->dealloc_lock, flags);
+ 
+ 	xen_netbk_bh_handler(netbk, 0);
+ }
+@@ -1711,6 +1710,7 @@ static int __init netback_init(void)
+ 		INIT_LIST_HEAD(&netbk->net_schedule_list);
+ 
+ 		spin_lock_init(&netbk->net_schedule_list_lock);
++		spin_lock_init(&netbk->dealloc_lock);
+ 
+ 		atomic_set(&netbk->netfront_count, 0);
+ 

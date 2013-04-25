@@ -1,0 +1,26 @@
+From d0ee1018fcf918587718a99caab7034aaea246b5 Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Wed, 9 Dec 2009 10:38:14 -0800
+Subject: [PATCH 08/23] xen/blktap: include asm/xen/hypervisor.h for xen_pv_domain
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ arch/x86/mm/pgtable.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+# diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+# index cb54d91..290acdf 100644
+# --- a/arch/x86/mm/pgtable.c
+# +++ b/arch/x86/mm/pgtable.c
+# @@ -4,6 +4,8 @@
+#  #include <asm/tlb.h>
+#  #include <asm/fixmap.h>
+#  
+# +#include <asm/xen/hypervisor.h>
+# +
+#  #define PGALLOC_GFP GFP_KERNEL | __GFP_NOTRACK | __GFP_REPEAT | __GFP_ZERO
+#  
+#  pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
+# -- 
+# 1.7.0.4
+# 

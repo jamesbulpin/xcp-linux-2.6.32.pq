@@ -1,0 +1,21 @@
+diff -r e46f41840c63 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Tue Jun 08 15:00:02 2010 +0100
++++ b/drivers/xen/netback/xenbus.c	Tue Jun 08 15:01:05 2010 +0100
+@@ -164,11 +164,15 @@
+ 		return err;
+ 	}
+ 	else {
+-		add_uevent_var(env, "script=%s", val);
++		if (add_uevent_var(env, "script=%s", val)) {
++			kfree(val);
++			return -ENOMEM;
++		}
+ 		kfree(val);
+ 	}
+ 
+-	add_uevent_var(env, "vif=%s", netif->dev->name);
++	if (add_uevent_var(env, "vif=%s", netif->dev->name))
++		return -ENOMEM;
+ 
+ 	return 0;
+ }

@@ -1,0 +1,27 @@
+Give PG_pinned a unique enum value
+
+diff -r fdda19113c97 include/linux/page-flags.h
+--- a/include/linux/page-flags.h	Tue Sep 14 10:11:58 2010 +0100
++++ b/include/linux/page-flags.h	Tue Sep 14 10:30:38 2010 +0100
+@@ -112,6 +112,7 @@
+ #endif
+ #ifdef CONFIG_XEN
+ 	PG_foreign,		/* Page is owned by foreign allocator. */
++	PG_pinned,		/* Page is pinned */
+ 	/* PG_netback,		   Page is owned by netback */
+ 	PG_blkback,		/* Page is owned by blkback */
+ #endif
+@@ -127,12 +128,7 @@
+ 	PG_fscache = PG_private_2,	/* page backed by cache */
+ 
+ 	/* XEN */
+-#if defined(CONFIG_XEN)
+-	PG_pinned = PG_locked,	/* Cannot alias with PG_owner_priv_1 since
+-				 * bad_page() checks should include this bit.
+-				 * Should not use PG_arch_1 as that may have
+-				 * a different purpose elsewhere. */
+-#elif defined(CONFIG_PARAVIRT_XEN)
++#if defined(CONFIG_PARAVIRT_XEN)
+ 	PG_pinned = PG_owner_priv_1,
+ 	PG_savepinned = PG_dirty,
+ #endif

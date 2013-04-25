@@ -1,0 +1,74 @@
+From 3c91d9d79d9396f8456fdfca7fbadc1e71092a38 Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Thu, 19 Mar 2009 15:45:45 -0700
+Subject: [PATCH] xen/netback: pre-initialize list and spinlocks; use empty list to indicate not on list
+
+Statically pre-initialize net_schedule_list head and lock.
+
+Use an empty list to mark when a xen_netif is not on the schedule list,
+rather than NULL (which may upset list debugging).
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/interface.c |    1 +
+ drivers/xen/netback/netback.c   |   12 ++++--------
+ 2 files changed, 5 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/xen/netback/interface.c b/drivers/xen/netback/interface.c
+index 5e0d26d..dc4fb53 100644
+--- a/drivers/xen/netback/interface.c
++++ b/drivers/xen/netback/interface.c
+@@ -201,6 +201,7 @@ struct xen_netif *netif_alloc(struct device *parent, domid_t domid, unsigned int
+ 	atomic_set(&netif->refcnt, 1);
+ 	init_waitqueue_head(&netif->waiting_to_free);
+ 	netif->dev = dev;
++	INIT_LIST_HEAD(&netif->list);
+ 
+ 	netback_carrier_off(netif);
+ 
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 5410a68..cbd4b03 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -148,8 +148,8 @@ static grant_handle_t grant_tx_handle[MAX_PENDING_REQS];
+ static struct gnttab_unmap_grant_ref tx_unmap_ops[MAX_PENDING_REQS];
+ static struct gnttab_map_grant_ref tx_map_ops[MAX_PENDING_REQS];
+ 
+-static struct list_head net_schedule_list;
+-static spinlock_t net_schedule_list_lock;
++static LIST_HEAD(net_schedule_list);
++static DEFINE_SPINLOCK(net_schedule_list_lock);
+ 
+ #define MAX_MFN_ALLOC 64
+ static unsigned long mfn_list[MAX_MFN_ALLOC];
+@@ -588,15 +588,14 @@ struct net_device_stats *netif_be_get_stats(struct net_device *dev)
+ 
+ static int __on_net_schedule_list(struct xen_netif *netif)
+ {
+-	return netif->list.next != NULL;
++	return !list_empty(&netif->list);
+ }
+ 
+ static void remove_from_net_schedule_list(struct xen_netif *netif)
+ {
+ 	spin_lock_irq(&net_schedule_list_lock);
+ 	if (likely(__on_net_schedule_list(netif))) {
+-		list_del(&netif->list);
+-		netif->list.next = NULL;
++		list_del_init(&netif->list);
+ 		netif_put(netif);
+ 	}
+ 	spin_unlock_irq(&net_schedule_list_lock);
+@@ -1466,9 +1465,6 @@ static int __init netback_init(void)
+ 	for (i = 0; i < MAX_PENDING_REQS; i++)
+ 		pending_ring[i] = i;
+ 
+-	spin_lock_init(&net_schedule_list_lock);
+-	INIT_LIST_HEAD(&net_schedule_list);
+-
+ 	netbk_copy_skb_mode = NETBK_DONT_COPY_SKB;
+ 	if (MODPARM_copy_skb) {
+ 		if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_and_replace,
+-- 
+1.5.6.5
+

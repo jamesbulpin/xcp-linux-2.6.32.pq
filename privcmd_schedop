@@ -1,0 +1,36 @@
+Add a new ioctl to /proc/xen/privcmd which allows SCHEDOP_shutdown to
+be applied on restricted fds.
+
+diff -r 6b21e1a7c5bb drivers/xen/privcmd/privcmd.c
+--- a/drivers/xen/privcmd/privcmd.c	Wed Oct 10 17:45:48 2007 +0100
++++ b/drivers/xen/privcmd/privcmd.c	Wed Oct 10 17:56:10 2007 +0100
+@@ -317,6 +317,18 @@ static long privcmd_ioctl(struct file *f
+         }
+         break;
+ 
++        case IOCTL_PRIVCMD_SHUTDOWN: {
++                sched_remote_shutdown_t srs;
++
++                if (copy_from_user(&srs, udata, sizeof(srs)))
++                        return -EFAULT;
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID &&
++                    fdata->restrict_domid != srs.domain_id)
++                        return -EACCES;
++                ret = HYPERVISOR_sched_op(SCHEDOP_remote_shutdown, &srs);
++        }
++        break;
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff -r 6b21e1a7c5bb include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Wed Oct 10 17:45:48 2007 +0100
++++ b/include/xen/public/privcmd.h	Wed Oct 10 17:56:10 2007 +0100
+@@ -95,5 +95,7 @@ typedef struct privcmd_hvmop {
+ 	_IOC(_IOC_NONE, 'P', 101, sizeof(privcmd_domctl_t))
+ #define IOCTL_PRIVCMD_HVMOP					\
+ 	_IOC(_IOC_NONE, 'P', 102, sizeof(privcmd_hvmop_t))
++#define IOCTL_PRIVCMD_SHUTDOWN					\
++	_IOC(_IOC_NONE, 'P', 103, sizeof(sched_remote_shutdown_t))
+ 
+ #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

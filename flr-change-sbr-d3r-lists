@@ -1,0 +1,114 @@
+diff --git a/drivers/xen/pciback/pci_stub.c b/drivers/xen/pciback/pci_stub.c
+index fb40598..41e1e3c 100644
+--- a/drivers/xen/pciback/pci_stub.c
++++ b/drivers/xen/pciback/pci_stub.c
+@@ -26,11 +26,11 @@ wait_queue_head_t aer_wait_queue;
+ static DECLARE_RWSEM(pcistub_sem);
+ module_param_named(hide, pci_devs_to_hide, charp, S_IRUGO);
+ 
+-static char *pci_devs_use_sbr = NULL;
+-module_param_named(sbr, pci_devs_use_sbr, charp, S_IRUGO);
++static char *pci_devs_no_sbr = NULL;
++module_param_named(nosbr, pci_devs_no_sbr, charp, S_IRUGO);
+ 
+-static char *pci_devs_use_d3r = NULL;
+-module_param_named(d3r, pci_devs_use_d3r, charp, S_IRUGO);
++static char *pci_devs_no_d3r = NULL;
++module_param_named(nod3r, pci_devs_no_d3r, charp, S_IRUGO);
+ 
+ static char *pci_devs_no_flr = NULL;
+ module_param_named(noflr, pci_devs_no_flr, charp, S_IRUGO);
+@@ -39,8 +39,8 @@ module_param_named(noflr, pci_devs_no_flr, charp, S_IRUGO);
+  * for hiding devices and reset logic.
+  */
+ #define PCIBACK_ID_TYPE_HIDE  1
+-#define PCIBACK_ID_TYPE_SBR   2
+-#define PCIBACK_ID_TYPE_D3R   3
++#define PCIBACK_ID_TYPE_NOSBR 2
++#define PCIBACK_ID_TYPE_NOD3R 3
+ #define PCIBACK_ID_TYPE_NOFLR 4
+ 
+ struct pcistub_device_id {
+@@ -403,8 +403,8 @@ static int __devinit pcistub_init_device(struct pci_dev *dev)
+ 	pciback_classify_device(dev);
+ 	dev_data->no_flr = pcistub_match(dev, PCIBACK_ID_TYPE_NOFLR);
+ 	if (!dev_data->no_flr) {
+-		dev_data->use_sbr = pcistub_match(dev, PCIBACK_ID_TYPE_SBR);
+-		dev_data->use_d3r = pcistub_match(dev, PCIBACK_ID_TYPE_D3R);
++		dev_data->no_sbr = pcistub_match(dev, PCIBACK_ID_TYPE_NOSBR);
++		dev_data->no_d3r = pcistub_match(dev, PCIBACK_ID_TYPE_NOD3R);
+ 	}
+ 
+ 	/* Store the config space here where the device is off and ready to be 
+@@ -1286,13 +1286,13 @@ static ssize_t pcistub_resets(struct device_driver *drv, const char *buf,
+ 	int domain, bus, slot, func;
+ 	int type, err = 0;
+ 
+-	/* string begins with reset type specifier sbr=|dr3=|noflr= */
+-	if (!strncmp(buf, "sbr=", 4)) {
+-		type = PCIBACK_ID_TYPE_SBR;
+-		buf += 4;
+-	} else if (!strncmp(buf, "d3r=", 4)) {
+-		type = PCIBACK_ID_TYPE_D3R;
+-		buf += 4;
++	/* string begins with reset type specifier nosbr=|nodr3=|noflr= */
++	if (!strncmp(buf, "nosbr=", 6)) {
++		type = PCIBACK_ID_TYPE_NOSBR;
++		buf += 6;
++	} else if (!strncmp(buf, "nod3r=", 6)) {
++		type = PCIBACK_ID_TYPE_NOD3R;
++		buf += 6;
+ 	} else if (!strncmp(buf, "noflr=", 6)) {
+ 		type = PCIBACK_ID_TYPE_NOFLR;
+ 		buf += 6;
+@@ -1361,11 +1361,11 @@ static int __init pcistub_init(void)
+ 	if (err)
+ 		goto out;
+ 
+-	err = pciback_parse_device_params(pci_devs_use_sbr, PCIBACK_ID_TYPE_SBR, pcistub_device_id_add);
++	err = pciback_parse_device_params(pci_devs_no_sbr, PCIBACK_ID_TYPE_NOSBR, pcistub_device_id_add);
+ 	if (err)
+ 		goto out;
+ 
+-	err = pciback_parse_device_params(pci_devs_use_d3r, PCIBACK_ID_TYPE_D3R, pcistub_device_id_add);
++	err = pciback_parse_device_params(pci_devs_no_d3r, PCIBACK_ID_TYPE_NOD3R, pcistub_device_id_add);
+ 	if (err)
+ 		goto out;
+ 
+diff --git a/drivers/xen/pciback/pciback.h b/drivers/xen/pciback/pciback.h
+index f2a50fa..c6776e6 100644
+--- a/drivers/xen/pciback/pciback.h
++++ b/drivers/xen/pciback/pciback.h
+@@ -60,8 +60,8 @@ struct pciback_dev_data {
+ 	int no_flr;
+ 	int exp_flr_offset;
+ 	int af_flr_offset;
+-	int use_sbr;
+-	int use_d3r;
++	int no_sbr;
++	int no_d3r;
+ 	u8 *cfg_space; /* saved config space for device */
+ };
+ 
+diff --git a/drivers/xen/pciback/pciback_ops.c b/drivers/xen/pciback/pciback_ops.c
+index ff61476..8e6f512 100644
+--- a/drivers/xen/pciback/pciback_ops.c
++++ b/drivers/xen/pciback/pciback_ops.c
+@@ -476,7 +476,7 @@ void pciback_flr_device(struct pci_dev *dev)
+ 		/* Next for integrated devices on the host bus 0, try some other methods */
+ 		if (dev->bus->number == 0) {
+ 			err = pciback_do_vendor_specific_reset(dev);
+-			if (err && dev_data->use_d3r)
++			if (err && !dev_data->no_d3r)
+ 				err = pciback_do_dstate_transition_reset(dev);
+ 			if (err)
+ 				dev_warn(&dev->dev, "FLR functionality not supported; "
+@@ -485,7 +485,7 @@ void pciback_flr_device(struct pci_dev *dev)
+ 		}
+ 
+ 		/* Else attempt a secondary bus reset if all conditions are met */
+-		if (dev_data->use_sbr) {
++		if (!dev_data->no_sbr) {
+ 			err = pciback_do_secondary_bus_reset(dev, dev_data->dev_type);
+ 			if (err)
+ 				dev_warn(&dev->dev, "FLR functionality not supported; "

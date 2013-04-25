@@ -1,0 +1,563 @@
+EA-1001: Add include/linux/blktap.h
+
+Moves blktap2 definitions into a common header file.
+
+Includes xen/interface/io/ring.h and new ring definitions. Makes
+blktap build independently from xen-devel headers.
+
+New blktap_ring structs are fully congrent to blkif rings, for binary
+compat.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 576649d5d54c drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/blktap.h	Fri Jan 14 19:02:28 2011 -0800
+@@ -6,7 +6,7 @@
+ #include <linux/cdev.h>
+ #include <linux/init.h>
+ #include <linux/scatterlist.h>
+-#include <xen/blkif.h>
++#include <linux/blktap.h>
+ 
+ extern int blktap_debug_level;
+ extern int blktap_ring_major;
+@@ -30,76 +30,28 @@
+ #define BLKTAP_DEVICE_CLOSED         5
+ #define BLKTAP_SHUTDOWN_REQUESTED    8
+ 
+-/* blktap IOCTLs: */
+-#define BLKTAP2_IOCTL_KICK_FE        1
+-#define BLKTAP2_IOCTL_ALLOC_TAP      200
+-#define BLKTAP2_IOCTL_FREE_TAP       201
+-#define BLKTAP2_IOCTL_CREATE_DEVICE  202
+-#define BLKTAP2_IOCTL_REMOVE_DEVICE  207
+-
+-#define BLKTAP2_MAX_MESSAGE_LEN      256
+-
+-#define BLKTAP2_RING_MESSAGE_CLOSE   3
+-
+ #define BLKTAP_REQUEST_FREE          0
+ #define BLKTAP_REQUEST_PENDING       1
+ 
+-#define BLKTAP2_BIO_POOL_SIZE        2
+-
+-/*
+- * The maximum number of requests that can be outstanding at any time
+- * is determined by
+- *
+- *   [mmap_alloc * MAX_PENDING_REQS * BLKIF_MAX_SEGMENTS_PER_REQUEST] 
+- *
+- * where mmap_alloc < MAX_DYNAMIC_MEM.
+- *
+- * TODO:
+- * mmap_alloc is initialised to 2 and should be adjustable on the fly via
+- * sysfs.
+- */
+-#define BLK_RING_SIZE		__RING_SIZE((struct blkif_sring *)0, PAGE_SIZE)
+-#define MAX_DYNAMIC_MEM		BLK_RING_SIZE
+-#define MAX_PENDING_REQS	BLK_RING_SIZE
+-#define MMAP_PAGES (MAX_PENDING_REQS * BLKIF_MAX_SEGMENTS_PER_REQUEST)
+-#define MMAP_VADDR(_start, _req, _seg)					\
+-        (_start +                                                       \
+-         ((_req) * BLKIF_MAX_SEGMENTS_PER_REQUEST * PAGE_SIZE) +        \
+-         ((_seg) * PAGE_SIZE))
+-
+-struct grant_handle_pair {
+-	grant_handle_t                 kernel;
+-	grant_handle_t                 user;
+-};
+-#define INVALID_GRANT_HANDLE           0xFFFF
+-
+-struct blktap_handle {
+-	unsigned int                   ring;
+-	unsigned int                   device;
+-	unsigned int                   minor;
+-};
+-
+-struct blktap_params {
+-	char                           name[BLKTAP2_MAX_MESSAGE_LEN];
+-	unsigned long long             capacity;
+-	unsigned long                  sector_size;
+-};
++#define BLKTAP_BIO_POOL_SIZE         2
+ 
+ struct blktap_device {
+ 	spinlock_t                     lock;
+ 	struct gendisk                *gd;
+ };
+ 
++struct blktap_request;
++
+ struct blktap_ring {
+ 	struct task_struct            *task;
+ 
+ 	struct vm_area_struct         *vma;
+-	struct blkif_front_ring        ring;
++	blktap_front_ring_t            ring;
+ 	unsigned long                  ring_vstart;
+ 	unsigned long                  user_vstart;
+ 
+ 	int                            n_pending;
+-	struct blktap_request         *pending[MAX_PENDING_REQS];
++	struct blktap_request         *pending[BLKTAP_RING_SIZE];
+ 
+ 	wait_queue_head_t              poll_wait;
+ 
+@@ -130,8 +82,8 @@
+ 	int                            operation;
+ 	struct timeval                 time;
+ 
+-	struct scatterlist             sg_table[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+-	struct page                   *pages[BLKIF_MAX_SEGMENTS_PER_REQUEST];
++	struct scatterlist             sg_table[BLKTAP_SEGMENT_MAX];
++	struct page                   *pages[BLKTAP_SEGMENT_MAX];
+ 	int                            nr_pages;
+ };
+ 
+@@ -151,7 +103,7 @@
+ 
+ 	wait_queue_head_t              remove_wait;
+ 	struct work_struct             remove_work;
+-	char                           name[BLKTAP2_MAX_MESSAGE_LEN];
++	char                           name[BLKTAP_NAME_MAX];
+ 
+ 	struct blktap_statistics       stats;
+ };
+@@ -192,7 +144,7 @@
+ int blktap_device_init(void);
+ void blktap_device_exit(void);
+ size_t blktap_device_debug(struct blktap *, char *, size_t);
+-int blktap_device_create(struct blktap *, struct blktap_params *);
++int blktap_device_create(struct blktap *, struct blktap_device_info *);
+ int blktap_device_destroy(struct blktap *);
+ void blktap_device_destroy_sync(struct blktap *);
+ void blktap_device_run_queue(struct blktap *);
+diff -r 576649d5d54c drivers/xen/blktap2/control.c
+--- a/drivers/xen/blktap2/control.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/control.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -127,19 +127,19 @@
+ 	struct blktap *tap;
+ 
+ 	switch (cmd) {
+-	case BLKTAP2_IOCTL_ALLOC_TAP: {
+-		struct blktap_handle h;
++	case BLKTAP_IOCTL_ALLOC_TAP: {
++		struct blktap_info info;
+ 		void __user *ptr = (void __user*)arg;
+ 
+ 		tap = blktap_control_create_tap();
+ 		if (!tap)
+ 			return -ENOMEM;
+ 
+-		h.ring   = blktap_ring_major;
+-		h.device = blktap_device_major;
+-		h.minor  = tap->minor;
++		info.ring_major = blktap_ring_major;
++		info.bdev_major = blktap_device_major;
++		info.ring_minor = tap->minor;
+ 
+-		if (copy_to_user(ptr, &h, sizeof(h))) {
++		if (copy_to_user(ptr, &info, sizeof(info))) {
+ 			blktap_control_destroy_tap(tap);
+ 			return -EFAULT;
+ 		}
+@@ -147,7 +147,7 @@
+ 		return 0;
+ 	}
+ 
+-	case BLKTAP2_IOCTL_FREE_TAP: {
++	case BLKTAP_IOCTL_FREE_TAP: {
+ 		int minor = arg;
+ 
+ 		if (minor > MAX_BLKTAP_DEVICE)
+diff -r 576649d5d54c drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/device.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -186,7 +186,7 @@
+ 		write ? 'w' : 'r', blk_rq_bytes(rq), nsegs);
+ 
+ 	request->rq = rq;
+-	request->operation = write ? BLKIF_OP_WRITE : BLKIF_OP_READ;
++	request->operation = write ? BLKTAP_OP_WRITE : BLKTAP_OP_READ;
+ 
+ 	err = blktap_request_get_pages(tap, request, nsegs);
+ 	if (err)
+@@ -276,7 +276,7 @@
+ 
+ static void
+ blktap_device_configure(struct blktap *tap,
+-			struct blktap_params *params)
++			struct blktap_device_info *params)
+ {
+ 	struct request_queue *rq;
+ 	struct blktap_device *dev = &tap->device;
+@@ -297,8 +297,8 @@
+ 	blk_queue_max_segment_size(rq, PAGE_SIZE);
+ 
+ 	/* Ensure a merged request will fit in a single I/O ring slot. */
+-	blk_queue_max_phys_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+-	blk_queue_max_hw_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
++	blk_queue_max_phys_segments(rq, BLKTAP_SEGMENT_MAX);
++	blk_queue_max_hw_segments(rq, BLKTAP_SEGMENT_MAX);
+ 
+ 	/* Make sure buffer addresses are sector-aligned. */
+ 	blk_queue_dma_alignment(rq, 511);
+@@ -311,7 +311,7 @@
+ 
+ static int
+ blktap_device_validate_params(struct blktap *tap,
+-			      struct blktap_params *params)
++			      struct blktap_device_info *params)
+ {
+ 	struct device *dev = tap->ring.dev;
+ 	int sector_order, name_sz;
+@@ -427,7 +427,7 @@
+ }
+ 
+ int
+-blktap_device_create(struct blktap *tap, struct blktap_params *params)
++blktap_device_create(struct blktap *tap, struct blktap_device_info *params)
+ {
+ 	int minor, err;
+ 	struct gendisk *gd;
+diff -r 576649d5d54c drivers/xen/blktap2/ioctx.c
+--- a/drivers/xen/blktap2/ioctx.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/ioctx.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -58,7 +58,7 @@
+ 	sioc->rs.interval = 60 * HZ;
+ 	sioc->rs.burst    = 1;
+ 
+-	sioc->bs = bioset_create(BLKTAP2_BIO_POOL_SIZE, 0);
++	sioc->bs = bioset_create(BLKTAP_BIO_POOL_SIZE, 0);
+ 	if (!sioc->bs)
+ 		goto fail;
+ 
+diff -r 576649d5d54c drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/request.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -7,18 +7,18 @@
+ #include "blktap.h"
+ 
+ /* max pages per shared pool. just to prevent accidental dos. */
+-#define POOL_MAX_PAGES           (256*BLKIF_MAX_SEGMENTS_PER_REQUEST)
++#define POOL_MAX_PAGES           (256*BLKTAP_SEGMENT_MAX)
+ 
+ /* default page pool size. when considering to shrink a shared pool,
+  * note that paused tapdisks may grab a whole lot of pages for a long
+  * time. */
+-#define POOL_DEFAULT_PAGES       (2 * MMAP_PAGES)
++#define POOL_DEFAULT_PAGES       (2 * BLKTAP_RING_SIZE * BLKTAP_SEGMENT_MAX)
+ 
+ /* max number of pages allocatable per request. */
+-#define POOL_MAX_REQUEST_PAGES   BLKIF_MAX_SEGMENTS_PER_REQUEST
++#define POOL_MAX_REQUEST_PAGES   BLKTAP_SEGMENT_MAX
+ 
+ /* min request structs per pool. These grow dynamically. */
+-#define POOL_MIN_REQS            BLK_RING_SIZE
++#define POOL_MIN_REQS            BLKTAP_RING_SIZE
+ 
+ static struct kset *pool_set;
+ 
+diff -r 576649d5d54c drivers/xen/blktap2/ring.c
+--- a/drivers/xen/blktap2/ring.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/ring.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -18,7 +18,7 @@
+ 
+ static void
+ blktap_ring_read_response(struct blktap *tap,
+-		     const struct blkif_response *rsp)
++			  const blktap_ring_rsp_t *rsp)
+ {
+ 	struct blktap_ring *ring = &tap->ring;
+ 	struct blktap_request *request;
+@@ -26,8 +26,8 @@
+ 
+ 	request = NULL;
+ 
+-	usr_idx = rsp->id;
+-	if (usr_idx < 0 || usr_idx >= MAX_PENDING_REQS) {
++	usr_idx = rsp->id;
++	if (usr_idx < 0 || usr_idx >= BLKTAP_RING_SIZE) {
+ 		err = -ERANGE;
+ 		goto invalid;
+ 	}
+@@ -48,7 +48,7 @@
+ 		"request %d [%p] response: %d\n",
+ 		request->usr_idx, request, rsp->status);
+ 
+-	err = rsp->status == BLKIF_RSP_OKAY ? 0 : -EIO;
++	err = rsp->status == BLKTAP_RSP_OKAY ? 0 : -EIO;
+ end_request:
+ 	blktap_device_end_request(tap, request, err);
+ 	return;
+@@ -67,7 +67,7 @@
+ blktap_read_ring(struct blktap *tap)
+ {
+ 	struct blktap_ring *ring = &tap->ring;
+-	struct blkif_response rsp;
++	blktap_ring_rsp_t rsp;
+ 	RING_IDX rc, rp;
+ 
+ 	down_read(&current->mm->mmap_sem);
+@@ -90,6 +90,11 @@
+ 	up_read(&current->mm->mmap_sem);
+ }
+ 
++#define MMAP_VADDR(_start, _req, _seg)				\
++	((_start) +						\
++	 ((_req) * BLKTAP_SEGMENT_MAX * BLKTAP_PAGE_SIZE) +	\
++	 ((_seg) * BLKTAP_PAGE_SIZE))
++
+ static int blktap_ring_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ {
+ 	return VM_FAULT_SIGBUS;
+@@ -102,7 +107,7 @@
+ 	struct blktap_request *request;
+ 	int usr_idx;
+ 
+-	for (usr_idx = 0; usr_idx < MAX_PENDING_REQS; usr_idx++) {
++	for (usr_idx = 0; usr_idx < BLKTAP_RING_SIZE; usr_idx++) {
+ 		request = ring->pending[usr_idx];
+ 		if (!request)
+ 			continue;
+@@ -154,7 +159,7 @@
+ 	int seg, err = 0;
+ 	int write;
+ 
+-	write = request->operation == BLKIF_OP_WRITE;
++	write = request->operation == BLKTAP_OP_WRITE;
+ 
+ 	for (seg = 0; seg < request->nr_pages; seg++) {
+ 		if (write)
+@@ -182,7 +187,7 @@
+ 
+ 	uaddr = MMAP_VADDR(ring->user_vstart, request->usr_idx, 0);
+ 	size  = request->nr_pages << PAGE_SHIFT;
+-	read  = request->operation == BLKIF_OP_READ;
++	read  = request->operation == BLKTAP_OP_READ;
+ 
+ 	if (read)
+ 		for (seg = 0; seg < request->nr_pages; seg++)
+@@ -217,11 +222,11 @@
+ 	if (!request)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	for (usr_idx = 0; usr_idx < BLK_RING_SIZE; usr_idx++)
++	for (usr_idx = 0; usr_idx < BLKTAP_RING_SIZE; usr_idx++)
+ 		if (!ring->pending[usr_idx])
+ 			break;
+ 
+-	BUG_ON(usr_idx >= BLK_RING_SIZE);
++	BUG_ON(usr_idx >= BLKTAP_RING_SIZE);
+ 
+ 	request->tap     = tap;
+ 	request->usr_idx = usr_idx;
+@@ -237,7 +242,7 @@
+ 			   struct blktap_request *request)
+ {
+ 	struct blktap_ring *ring = &tap->ring;
+-	struct blkif_request *breq;
++	blktap_ring_req_t *breq;
+ 	struct scatterlist *sg;
+ 	int i, nsecs = 0;
+ 
+@@ -250,10 +255,10 @@
+ 	breq->sector_number = blk_rq_pos(request->rq);
+-	breq->handle        = 0;
++	breq->__pad         = 0;
+ 	breq->operation     = request->operation;
+ 	breq->nr_segments   = request->nr_pages;
+ 
+ 	blktap_for_each_sg(sg, request, i) {
+-		struct blkif_request_segment *seg = &breq->seg[i];
++		struct blktap_segment *seg = &breq->seg[i];
+ 		int first, count;
+ 
+ 		count = sg->length >> 9;
+@@ -270,12 +275,12 @@
+ 	do_gettimeofday(&request->time);
+ 
+ 
+-	if (request->operation == BLKIF_OP_WRITE) {
++	if (request->operation == BLKTAP_OP_WRITE) {
+ 		tap->stats.st_wr_sect += nsecs;
+ 		tap->stats.st_wr_req++;
+ 	}
+ 
+-	if (request->operation == BLKIF_OP_READ) {
++	if (request->operation == BLKTAP_OP_READ) {
+ 		tap->stats.st_rd_sect += nsecs;
+ 		tap->stats.st_rd_req++;
+ 	}
+@@ -327,7 +332,7 @@
+ {
+ 	struct blktap *tap = filp->private_data;
+ 	struct blktap_ring *ring = &tap->ring;
+-	struct blkif_sring *sring;
++	blktap_sring_t *sring;
+ 	struct page *page = NULL;
+ 	int err;
+ 
+@@ -384,25 +389,25 @@
+ 		return -EACCES;
+ 
+ 	switch(cmd) {
+-	case BLKTAP2_IOCTL_KICK_FE:
++	case BLKTAP_IOCTL_RESPOND:
+ 
+ 		blktap_read_ring(tap);
+ 		return 0;
+ 
+-	case BLKTAP2_IOCTL_CREATE_DEVICE: {
+-		struct blktap_params params;
++	case BLKTAP_IOCTL_CREATE_DEVICE: {
++		struct blktap_device_info info;
+ 		void __user *ptr = (void *)arg;
+ 
+ 		if (!arg)
+ 			return -EINVAL;
+ 
+-		if (copy_from_user(&params, ptr, sizeof(params)))
++		if (copy_from_user(&info, ptr, sizeof(info)))
+ 			return -EFAULT;
+ 
+-		return blktap_device_create(tap, &params);
++		return blktap_device_create(tap, &info);
+ 	}
+ 
+-	case BLKTAP2_IOCTL_REMOVE_DEVICE:
++	case BLKTAP_IOCTL_REMOVE_DEVICE:
+ 
+ 		return blktap_device_destroy(tap);
+ 	}
+@@ -482,7 +487,7 @@
+ 	s += snprintf(s, end - s,
+ 		      "begin pending:%d\n", ring->n_pending);
+ 
+-	for (usr_idx = 0; usr_idx < MAX_PENDING_REQS; usr_idx++) {
++	for (usr_idx = 0; usr_idx < BLKTAP_RING_SIZE; usr_idx++) {
+ 		struct blktap_request *request;
+ 		struct timeval *time;
+ 		int write;
+@@ -491,7 +496,7 @@
+ 		if (!request)
+ 			continue;
+ 
+-		write = request->operation == BLKIF_OP_WRITE;
++		write = request->operation == BLKTAP_OP_WRITE;
+ 		time  = &request->time;
+ 
+ 		s += snprintf(s, end - s,
+diff -r 576649d5d54c drivers/xen/blktap2/sysfs.c
+--- a/drivers/xen/blktap2/sysfs.c	Fri Jan 14 16:37:58 2011 -0800
++++ b/drivers/xen/blktap2/sysfs.c	Fri Jan 14 19:02:28 2011 -0800
+@@ -20,7 +20,7 @@
+ 	if (!tap)
+ 		return 0;
+ 
+-	if (size >= BLKTAP2_MAX_MESSAGE_LEN)
++	if (size >= BLKTAP_NAME_MAX)
+ 		return -ENAMETOOLONG;
+ 
+ 	if (strnlen(buf, size) != size)
+@@ -75,8 +75,8 @@
+ 		goto wait;
+ 
+ 	if (tap->ring.vma) {
+-		blkif_sring_t *sring = tap->ring.ring.sring;
+-		sring->private.tapif_user.msg = BLKTAP2_RING_MESSAGE_CLOSE;
++		blktap_sring_t *sring = tap->ring.ring.sring;
++		sring->private.tapif_user.msg = BLKTAP_RING_MESSAGE_CLOSE;
+ 		blktap_ring_kick_user(tap);
+ 	} else {
+ 		INIT_WORK(&tap->remove_work, blktap_sysfs_remove_work);
+diff -r 576649d5d54c include/linux/blktap.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/include/linux/blktap.h	Fri Jan 14 19:02:28 2011 -0800
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (c) 2011, XenSource Inc.
++ * All rights reserved.
++ */
++
++#ifndef _LINUX_BLKTAP_H
++#define _LINUX_BLKTAP_H
++
++/*
++ * Control
++ */
++
++#define BLKTAP_IOCTL_RESPOND        1
++#define BLKTAP_IOCTL_ALLOC_TAP      200
++#define BLKTAP_IOCTL_FREE_TAP       201
++#define BLKTAP_IOCTL_CREATE_DEVICE  202
++#define BLKTAP_IOCTL_REMOVE_DEVICE  207
++
++#define BLKTAP_NAME_MAX             256
++
++struct blktap_info {
++	unsigned int            ring_major;
++	unsigned int            bdev_major;
++	unsigned int            ring_minor;
++};
++
++struct blktap_device_info {
++	char                    name[BLKTAP_NAME_MAX];
++	unsigned long long      capacity;
++	unsigned long           sector_size;
++};
++
++/*
++ * I/O ring
++ */
++
++#ifdef __KERNEL__
++#define BLKTAP_PAGE_SIZE PAGE_SIZE
++#endif
++
++#include <xen/interface/io/ring.h>
++
++typedef struct blktap_ring_request  blktap_ring_req_t;
++typedef struct blktap_ring_response blktap_ring_rsp_t;
++
++struct blktap_segment {
++	uint32_t                __pad;
++	uint8_t                 first_sect;
++	uint8_t                 last_sect;
++};
++
++#define BLKTAP_OP_READ          0
++#define BLKTAP_OP_WRITE         1
++
++#define BLKTAP_SEGMENT_MAX      11
++
++struct blktap_ring_request {
++	uint8_t                 operation;
++	uint8_t                 nr_segments;
++	uint16_t                __pad;
++	uint64_t                id;
++	uint64_t                sector_number;
++	struct blktap_segment   seg[BLKTAP_SEGMENT_MAX];
++};
++
++#define BLKTAP_RSP_EOPNOTSUPP  -2
++#define BLKTAP_RSP_ERROR       -1
++#define BLKTAP_RSP_OKAY         0
++
++struct blktap_ring_response {
++	uint64_t                id;
++	uint8_t                 operation;
++	int16_t                 status;
++};
++
++DEFINE_RING_TYPES(blktap, struct blktap_ring_request, struct blktap_ring_response);
++#define BLKTAP_RING_SIZE __CONST_RING_SIZE(blktap, BLKTAP_PAGE_SIZE)
++
++/*
++ * Ring messages (DEPRECATED)
++ */
++
++#define BLKTAP_RING_MESSAGE_CLOSE   3
++
++#endif /* _LINUX_BLKTAP_H */

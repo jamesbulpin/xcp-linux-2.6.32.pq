@@ -1,0 +1,31 @@
+From 6171b1f44ebb908a0993976d931fb0932970e24d Mon Sep 17 00:00:00 2001
+From: Jan Beulich <jbeulich@novell.com>
+Date: Fri, 5 Feb 2010 19:19:25 +0000
+Subject: [PATCH 11/23] blktap2: fix compiler warnings
+
+linux-2.6-pvops:
+ * rebase against git-41a06958 (merge into xen/master)
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/sysfs.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index da793d5..03128b3 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -194,7 +194,7 @@ blktap_sysfs_resume_device(struct device *dev,
+ out:
+ 	blktap_sysfs_exit(tap);
+ 
+-	BTDBG("returning %d\n", (err ? err : size));
++	BTDBG("returning %zd\n", (err ? err : size));
+ 	return (err ? err : size);
+ }
+ 
+-- 
+1.7.0.4
+

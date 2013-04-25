@@ -1,0 +1,70 @@
+From 4f7cdf18e14f81860b856ef7694ef58eb1a751c0 Mon Sep 17 00:00:00 2001
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date: Thu, 3 Dec 2009 15:53:20 -0500
+Subject: NFSv4: The state manager shouldn't exit on errors that were handled
+
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+commit 4f7cdf18e14f81860b856ef7694ef58eb1a751c0 upstream.
+
+nfs4_recovery_handle_error() will correctly handle errors such as
+NFS4ERR_CB_PATH_DOWN, however because they are still passed back to the
+main loop in nfs4_state_manager(), they can cause the latter to exit
+prematurely.
+
+Fix this by letting nfs4_recovery_handle_error() change the error value in
+cases where there is no action required by the caller.
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+Cc: Chuck Lever <chuck.lever@oracle.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/nfs/nfs4state.c |   11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+--- a/fs/nfs/nfs4state.c
++++ b/fs/nfs/nfs4state.c
+@@ -1051,12 +1051,12 @@ static void nfs4_state_end_reclaim_nogra
+ 	clear_bit(NFS4CLNT_RECLAIM_NOGRACE, &clp->cl_state);
+ }
+ 
+-static void nfs4_recovery_handle_error(struct nfs_client *clp, int error)
++static int nfs4_recovery_handle_error(struct nfs_client *clp, int error)
+ {
+ 	switch (error) {
+ 		case -NFS4ERR_CB_PATH_DOWN:
+ 			nfs_handle_cb_pathdown(clp);
+-			break;
++			return 0;
+ 		case -NFS4ERR_STALE_CLIENTID:
+ 		case -NFS4ERR_LEASE_MOVED:
+ 			set_bit(NFS4CLNT_LEASE_EXPIRED, &clp->cl_state);
+@@ -1075,6 +1075,7 @@ static void nfs4_recovery_handle_error(s
+ 		case -NFS4ERR_SEQ_MISORDERED:
+ 			set_bit(NFS4CLNT_SESSION_SETUP, &clp->cl_state);
+ 	}
++	return error;
+ }
+ 
+ static int nfs4_do_reclaim(struct nfs_client *clp, const struct nfs4_state_recovery_ops *ops)
+@@ -1094,8 +1095,7 @@ restart:
+ 		if (status < 0) {
+ 			set_bit(ops->owner_flag_bit, &sp->so_flags);
+ 			nfs4_put_state_owner(sp);
+-			nfs4_recovery_handle_error(clp, status);
+-			return status;
++			return nfs4_recovery_handle_error(clp, status);
+ 		}
+ 		nfs4_put_state_owner(sp);
+ 		goto restart;
+@@ -1125,8 +1125,7 @@ static int nfs4_check_lease(struct nfs_c
+ 	status = ops->renew_lease(clp, cred);
+ 	put_rpccred(cred);
+ out:
+-	nfs4_recovery_handle_error(clp, status);
+-	return status;
++	return nfs4_recovery_handle_error(clp, status);
+ }
+ 
+ static int nfs4_reclaim_lease(struct nfs_client *clp)

@@ -1,0 +1,100 @@
+From 2f67bc00539583d3023edab865429845e5582382 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:34 -0700
+Subject: [PATCH 11/18] xen/blktap: Take tapdisk mmap sem where appropriate.
+
+Since all entries into the device queue are single-threadedly driven
+by tapdisk, taking the mmap_sem from ring.c is simpler and
+sufficient. Also locks the VMA during the response dispatch.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    6 +-----
+ drivers/xen/blktap2/ring.c   |   24 +++++++++---------------
+ 2 files changed, 10 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 0ef4b1a..5540124 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -294,11 +294,7 @@ blktap_unmap(struct blktap *tap, struct blktap_request *request)
+ 		}
+ 	}
+ 
+-	if (tap->ring.vma) {
+-		down_write(&tap->ring.vma->vm_mm->mmap_sem);
+-		blktap_device_fast_flush(tap, request);
+-		up_write(&tap->ring.vma->vm_mm->mmap_sem);
+-	}
++	blktap_device_fast_flush(tap, request);
+ }
+ 
+ void
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 6abcd5d..913ac24 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -34,16 +34,17 @@ vma_to_blktap(struct vm_area_struct *vma)
+ static void
+ blktap_read_ring(struct blktap *tap)
+ {
+-	/* This is called to read responses from the ring. */
++	struct blktap_ring *ring = &tap->ring;
+ 	RING_IDX rc, rp;
+ 	struct blkif_response res;
+-	struct blktap_ring *ring;
+ 	struct blktap_request *request;
+ 	int usr_idx, error;
+ 
+-	ring = &tap->ring;
+-	if (!ring->vma)
++	down_read(&current->mm->mmap_sem);
++	if (!ring->vma) {
++		up_read(&current->mm->mmap_sem);
+ 		return;
++	}
+ 
+ 	/* for each outstanding message on the ring  */
+ 	rp = ring->ring.sring->rsp_prod;
+@@ -74,6 +75,8 @@ blktap_read_ring(struct blktap *tap)
+ 		BTWARN("Request %d/%d invalid [%x], tapdisk %d%p\n",
+ 		       rc, rp, usr_idx, ring->task->pid, ring->vma);
+ 	}
++
++	up_read(&current->mm->mmap_sem);
+ }
+ 
+ static int blktap_ring_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+@@ -135,7 +138,6 @@ blktap_ring_clear_pte(struct vm_area_struct *vma,
+ 				    INVALID_P2M_ENTRY);
+ 	}
+ 
+-
+ 	if (khandle->user != INVALID_GRANT_HANDLE) {
+ 		BUG_ON(xen_feature(XENFEAT_auto_translated_physmap));
+ 
+@@ -382,19 +384,11 @@ static unsigned int blktap_ring_poll(struct file *filp, poll_table *wait)
+ 	struct blktap_ring *ring = &tap->ring;
+ 	int work = 0;
+ 
+-	down_read(&current->mm->mmap_sem);
+-
+-	if (!ring->vma) {
+-		up_read(&current->mm->mmap_sem);
+-		force_sig(SIGSEGV, current);
+-		return 0;
+-	}
+-
+ 	poll_wait(filp, &ring->poll_wait, wait);
+ 
+-	if (test_bit(BLKTAP_DEVICE, &tap->dev_inuse))
++	down_read(&current->mm->mmap_sem);
++	if (ring->vma && tap->device.gd)
+ 		work = blktap_device_run_queue(tap);
+-
+ 	up_read(&current->mm->mmap_sem);
+ 
+ 	if (work ||
+-- 
+1.7.0.4
+

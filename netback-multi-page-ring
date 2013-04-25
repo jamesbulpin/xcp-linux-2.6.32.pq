@@ -1,0 +1,558 @@
+# HG changeset patch
+# Parent 64bd2e43549a87f5b9b76021471d425cd74eda50
+
+diff -r 64bd2e43549a drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Fri Dec 09 13:25:16 2011 +0000
++++ b/drivers/xen/netback/common.h	Tue Dec 13 11:11:41 2011 +0000
+@@ -61,19 +61,27 @@ enum {
+ 	NETBK_GSO_PREFIX
+ };
+ 
++#define NETIF_TX_RING_SIZE(_nr_pages) (__CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE) * (_nr_pages))
++#define NETIF_RX_RING_SIZE(_nr_pages) (__CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE) * (_nr_pages))
++
++#define	NETIF_MAX_RING_PAGE_ORDER	2
++#define	NETIF_MAX_RING_PAGES		(1u << NETIF_MAX_RING_PAGE_ORDER)
++
++#define NETIF_MAX_TX_RING_SIZE	NETIF_TX_RING_SIZE(NETIF_MAX_RING_PAGES)
++#define NETIF_MAX_RX_RING_SIZE	NETIF_RX_RING_SIZE(NETIF_MAX_RING_PAGES)
++
++#define	INVALID_GRANT_HANDLE	((grant_handle_t)~0U)
++
+ struct xen_comms {
+-	struct vm_struct		*ring_area;
+-	grant_ref_t			shmem_ref;
+-	grant_handle_t			shmem_handle;
++	struct vm_struct	*ring_area;
++	grant_handle_t		shmem_handle[NETIF_MAX_RING_PAGES];
++	unsigned int		nr_handles;
+ };
+ 
+-#define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
+-#define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
+-
+ /* extra field used in struct page */
+ struct page_ext {
+ #if BITS_PER_LONG < 64
+-#define IDX_WIDTH   8
++#define IDX_WIDTH   16
+ #define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH - 1)
+ 	unsigned int reserved:1;
+ 	unsigned int group:GROUP_WIDTH;
+@@ -113,7 +121,7 @@ struct netbk_protocol0 {
+ struct netbk_protocol1 {
+ 	struct xen_netif_tx_front_ring front;
+ 	spinlock_t lock;
+-	struct netbk_tag tag[NET_TX_RING_SIZE];
++	struct netbk_tag tag[NETIF_MAX_TX_RING_SIZE];
+ 	struct netbk_tag *tag_freelist;
+ 	grant_ref_t gref_head;
+ 	unsigned int gref_count;
+@@ -264,8 +272,10 @@ void netif_disconnect(struct xen_netif *
+ 
+ void netif_set_features(struct xen_netif *netif);
+ struct xen_netif *netif_alloc(struct device *parent, domid_t domid, unsigned int handle);
+-int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref, unsigned long rx_ring_ref,
+-	      unsigned int evtchn, int rx_protocol);
++int netif_map(struct xen_netif *netif, unsigned int evtchn,
++	      unsigned long tx_ring_ref[], unsigned int tx_ring_ref_count,
++	      unsigned long rx_ring_ref[], unsigned int rx_ring_ref_count,
++	      int rx_protocol);
+ 
+ static inline void netif_get(struct xen_netif *netif)
+ {
+@@ -332,7 +342,7 @@ struct netbk_tx_pending_inuse {
+ 	unsigned long alloc_time;
+ };
+ 
+-#define MAX_PENDING_REQS 256
++#define MAX_PENDING_REQS NETIF_MAX_TX_RING_SIZE
+ 
+ #define MAX_BUFFER_OFFSET PAGE_SIZE
+ 
+@@ -396,16 +406,18 @@ struct xen_netbk {
+ 	 * MAX_BUFFER_OFFSET of 4096 the worst case is that each
+ 	 * head/fragment uses 2 copy operation.
+ 	 */
+-	struct gnttab_copy grant_copy_op[2*NET_RX_RING_SIZE];
++	struct gnttab_copy grant_copy_op[2*NETIF_MAX_RX_RING_SIZE];
+ 	unsigned char rx_notify[NR_IRQS];
+-	u16 notify_list[NET_RX_RING_SIZE];
+-	struct netbk_rx_meta meta[2*NET_RX_RING_SIZE];
+-	struct page_ext ext[2*NET_RX_RING_SIZE];
++	u16 notify_list[NETIF_MAX_RX_RING_SIZE];
++	struct netbk_rx_meta meta[2*NETIF_MAX_RX_RING_SIZE];
++	struct page_ext ext[2*NETIF_MAX_RX_RING_SIZE];
+ };
+ 
+ extern struct xen_netbk *xen_netbk;
+ extern int xen_netbk_group_nr;
+ extern unsigned int MODPARM_netback_max_rx_protocol;
++extern unsigned int MODPARM_netback_max_rx_ring_page_order;
++extern unsigned int MODPARM_netback_max_tx_ring_page_order;
+ 
+ void xen_netbk_bh_handler(struct xen_netbk *netbk, int dir);
+ 
+diff -r 64bd2e43549a drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Fri Dec 09 13:25:16 2011 +0000
++++ b/drivers/xen/netback/interface.c	Tue Dec 13 11:11:41 2011 +0000
+@@ -365,47 +365,81 @@ struct xen_netif *netif_alloc(struct dev
+ 	return netif;
+ }
+ 
+-static int map_frontend_pages(struct xen_comms *comms, domid_t domid, grant_ref_t ring_ref)
++static void unmap_frontend_pages(struct xen_comms *comms)
+ {
+-	struct gnttab_map_grant_ref op;
++	struct gnttab_unmap_grant_ref op[NETIF_MAX_RING_PAGES];
++	unsigned int i;
++	unsigned int j;
+ 
+-	comms->ring_area = alloc_vm_area(PAGE_SIZE);
+-	if (comms->ring_area == NULL)
+-		return -ENOMEM;
++	j = 0;
++	for (i = 0; i < comms->nr_handles; i++) {
++		unsigned long addr = (unsigned long)comms->ring_area->addr +
++				     (i * PAGE_SIZE);
+ 
+-	gnttab_set_map_op(&op, (unsigned long)comms->ring_area->addr,
+-			  GNTMAP_host_map, ring_ref, domid);
+-    
+-	if (HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref, &op, 1))
+-		BUG();
++		if (comms->shmem_handle[i] != INVALID_GRANT_HANDLE) {
++			gnttab_set_unmap_op(&op[j++], addr,
++					    GNTMAP_host_map,
++					    comms->shmem_handle[i]);
+ 
+-	if (op.status) {
+-		DPRINTK(" Gnttab failure mapping ring_ref!\n");
+-		free_vm_area(comms->ring_area);
+-		return op.status;
++			comms->shmem_handle[i] = INVALID_GRANT_HANDLE;
++		}
+ 	}
+ 
+-	comms->shmem_ref    = ring_ref;
+-	comms->shmem_handle = op.handle;
++	comms->nr_handles = 0;
+ 
+-	return 0;
+-}
+-
+-static void unmap_frontend_pages(struct xen_comms *comms)
+-{
+-	struct gnttab_unmap_grant_ref op;
+-
+-	gnttab_set_unmap_op(&op, (unsigned long)comms->ring_area->addr,
+-			    GNTMAP_host_map, comms->shmem_handle);
+-
+-	if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref, &op, 1))
+-		BUG();
++	if (j != 0) {
++		if (HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
++					      op, j))
++			BUG();
++	}
+ 
+ 	free_vm_area(comms->ring_area);
+ }
+ 
+-int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref, unsigned long rx_ring_ref,
+-	      unsigned int evtchn, int rx_protocol)
++static int map_frontend_pages(struct xen_comms *comms, domid_t domid, unsigned long ring_ref[],
++			      unsigned int nr_ring_refs)
++{
++	struct gnttab_map_grant_ref op[NETIF_MAX_RING_PAGES];
++	unsigned int i;
++	int status = 0;
++
++	comms->ring_area = alloc_vm_area(PAGE_SIZE * nr_ring_refs);
++	if (comms->ring_area == NULL)
++		return -ENOMEM;
++
++	for (i = 0; i < nr_ring_refs; i++) {
++		unsigned long addr = (unsigned long)comms->ring_area->addr +
++				     (i * PAGE_SIZE);
++
++		gnttab_set_map_op(&op[i], addr, GNTMAP_host_map, ring_ref[i], domid);
++	}
++    
++	if (HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref, &op, nr_ring_refs))
++		BUG();
++
++	comms->nr_handles = nr_ring_refs;
++
++	for (i = 0; i < nr_ring_refs; i++) {
++		if ((status = op[i].status) != 0) {
++			DPRINTK("netback: GNTMAP_host_map(ref = %lu, domid = %u) failed\n",
++				ring_ref[i], domid);
++			comms->shmem_handle[i] = INVALID_GRANT_HANDLE;
++			continue;
++		}
++
++		comms->shmem_handle[i] = op[i].handle;
++	}
++
++	if (status != 0)
++		unmap_frontend_pages(comms);
++
++	return status;
++}
++
++int netif_map(struct xen_netif *netif, unsigned int evtchn,
++	      unsigned long tx_ring_ref[], unsigned int tx_ring_ref_count,
++	      unsigned long rx_ring_ref[], unsigned int rx_ring_ref_count,
++	      int rx_protocol)
+ {
+ 	int err = -ENOMEM;
+ 	struct xen_netif_tx_sring *txs;
+@@ -414,14 +448,14 @@ int netif_map(struct xen_netif *netif, u
+ 	if (netif->irq)
+ 		return 0;
+ 
+-	err = map_frontend_pages(&netif->tx_comms, netif->domid, tx_ring_ref);
++	err = map_frontend_pages(&netif->tx_comms, netif->domid, tx_ring_ref, tx_ring_ref_count);
+ 	if (err)
+ 		goto err_tx_map;
+ 
+ 	txs = (struct xen_netif_tx_sring *)netif->tx_comms.ring_area->addr;
+-	BACK_RING_INIT(&netif->tx, txs, PAGE_SIZE);
++	BACK_RING_INIT(&netif->tx, txs, PAGE_SIZE * tx_ring_ref_count);
+ 
+-	err = map_frontend_pages(&netif->rx_comms, netif->domid, rx_ring_ref);
++	err = map_frontend_pages(&netif->rx_comms, netif->domid, rx_ring_ref, rx_ring_ref_count);
+ 	if (err)
+ 		goto err_rx_map;
+ 
+@@ -467,13 +501,15 @@ int netif_map(struct xen_netif *netif, u
+ 	return 0;
+ 
+ err_hypervisor:
++	DPRINTK("err_hypervisor");
+ err_rx_protocol:
++	DPRINTK("err_rx_protocol");
+ 	unmap_frontend_pages(&netif->rx_comms);
+-
+ err_rx_map:
++	DPRINTK("err_rx_map");
+ 	unmap_frontend_pages(&netif->tx_comms);
+-
+ err_tx_map:
++	DPRINTK("err_tx_map");
+ 	return err;
+ }
+ 
+@@ -500,13 +536,13 @@ void netif_disconnect(struct xen_netif *
+ 
+ 	unregister_netdev(netif->dev);
+ 
++	if (netif->teardown != NULL)
++		netif->teardown(netif);
++
+ 	if (netif->tx.sring) {
+ 		unmap_frontend_pages(&netif->rx_comms);
+ 		unmap_frontend_pages(&netif->tx_comms);
+ 	}
+ 
+-	if (netif->teardown != NULL)
+-		netif->teardown(netif);
+-
+ 	free_netdev(netif->dev);
+ }
+diff -r 64bd2e43549a drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Dec 09 13:25:16 2011 +0000
++++ b/drivers/xen/netback/netback.c	Tue Dec 13 11:11:41 2011 +0000
+@@ -63,6 +63,7 @@ static void net_rx_action(unsigned long 
+ static inline unsigned long idx_to_pfn(struct xen_netbk *netbk,
+ 				       unsigned int idx)
+ {
++	BUG_ON(idx >= MAX_PENDING_REQS);
+ 	return page_to_pfn(netbk->mmap_pages[idx]);
+ }
+ 
+@@ -186,6 +187,14 @@ unsigned int MODPARM_netback_max_rx_prot
+ module_param_named(netback_max_rx_protocol, MODPARM_netback_max_rx_protocol, uint, 0);
+ MODULE_PARM_DESC(netback_max_rx_protocol, "Maximum supported receiver protocol version");
+ 
++unsigned int MODPARM_netback_max_rx_ring_page_order = NETIF_MAX_RING_PAGE_ORDER;
++module_param_named(netback_max_rx_ring_page_order, MODPARM_netback_max_rx_ring_page_order, uint, 0);
++MODULE_PARM_DESC(netback_max_rx_ring_page_order, "Maximum supported receiver ring page order");
++
++unsigned int MODPARM_netback_max_tx_ring_page_order = NETIF_MAX_RING_PAGE_ORDER;
++module_param_named(netback_max_tx_ring_page_order, MODPARM_netback_max_tx_ring_page_order, uint, 0);
++MODULE_PARM_DESC(netback_max_tx_ring_page_order, "Maximum supported transmitter ring page order");
++
+ /*
+  * Netback bottom half handler.
+  * dir indicates the data direction.
+@@ -497,7 +506,7 @@ static void net_rx_action(unsigned long 
+ 		__skb_queue_tail(&rxq, skb);
+ 
+ 		/* Filled the batch queue? */
+-		if (count + MAX_SKB_FRAGS >= NET_RX_RING_SIZE)
++		if (count + MAX_SKB_FRAGS >= NETIF_RX_RING_SIZE(netif->rx_comms.nr_handles))
+ 			break;
+ 	}
+ 
+@@ -1643,7 +1652,7 @@ static int __init netback_init(void)
+ 	memset(xen_netbk, 0, sizeof(struct xen_netbk) * xen_netbk_group_nr);
+ 
+ 	/* We can increase reservation by this much in net_rx_action(). */
+-	balloon_update_driver_allowance(NET_RX_RING_SIZE);
++	balloon_update_driver_allowance(NETIF_MAX_RX_RING_SIZE);
+ 
+ 	for (group = 0; group < xen_netbk_group_nr; group++) {
+ 		struct xen_netbk *netbk = &xen_netbk[group];
+diff -r 64bd2e43549a drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Fri Dec 09 13:25:16 2011 +0000
++++ b/drivers/xen/netback/tx.c	Tue Dec 13 11:11:41 2011 +0000
+@@ -74,7 +74,7 @@ int netbk_p0_queue_full(struct xen_netif
+ 	RING_IDX needed = max_skb_slots(netif);
+ 
+ 	return ((p0->back.sring->req_prod - peek) < needed) ||
+-	       ((p0->back.rsp_prod_pvt + NET_RX_RING_SIZE - peek) < needed);
++	       ((p0->back.rsp_prod_pvt + NETIF_RX_RING_SIZE(netif->rx_comms.nr_handles) - peek) < needed);
+ }
+ 
+ /* Figure out how many ring slots we're going to need to send @skb to
+@@ -269,7 +269,7 @@ void netbk_p0_setup(struct xen_netif *ne
+ 	p0->rx_req_cons_peek = 0;
+ 
+ 	sring = (struct xen_netif_rx_sring *)netif->rx_comms.ring_area->addr;
+-	BACK_RING_INIT(&p0->back, sring, PAGE_SIZE);
++	BACK_RING_INIT(&p0->back, sring, PAGE_SIZE * netif->rx_comms.nr_handles);
+ }
+ 
+ void netbk_p0_teardown(struct xen_netif *netif)
+@@ -320,7 +320,7 @@ static struct netbk_tag *find_tag(struct
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	struct netbk_tag *tag;
+ 
+-	BUG_ON(id >= NET_TX_RING_SIZE);
++	BUG_ON(id >= NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles));
+ 	tag = &p1->tag[id];
+ 
+ 	BUG_ON(tag->next != NULL);
+@@ -515,7 +515,8 @@ static int slot_available(struct xen_net
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	int avail;
+ 
+-	avail = NET_TX_RING_SIZE - (p1->front.req_prod_pvt - p1->front.rsp_cons);
++	avail = NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles) -
++                (p1->front.req_prod_pvt - p1->front.rsp_cons);
+ 
+ 	return (avail >= max_skb_slots(netif));
+ }
+@@ -742,7 +743,7 @@ void netbk_p1_setup(struct xen_netif *ne
+ 	int rc;
+ 
+ 	sring = (struct xen_netif_tx_sring *)netif->rx_comms.ring_area->addr;
+-	FRONT_RING_INIT(&p1->front, sring, PAGE_SIZE);
++	FRONT_RING_INIT(&p1->front, sring, PAGE_SIZE * netif->rx_comms.nr_handles);
+ 	SHARED_RING_INIT(sring);
+ 
+ 	spin_lock_init(&p1->lock);
+@@ -753,7 +754,7 @@ void netbk_p1_setup(struct xen_netif *ne
+ 
+ 	p1->tag_freelist = NULL;
+ 
+-	for (i = 0; i < NET_TX_RING_SIZE; i++) {
++	for (i = 0; i < NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles); i++) {
+ 		struct netbk_tag *tag = &p1->tag[i];
+ 
+ 		tag->netif = netif;
+@@ -783,7 +784,7 @@ void netbk_p1_teardown(struct xen_netif 
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	int i;
+ 
+-	for (i = 0; i < NET_TX_RING_SIZE; i++) {
++	for (i = 0; i < NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles); i++) {
+ 		struct netbk_tag *tag = &p1->tag[i];
+ 
+ 		if (!tag->granted)
+@@ -805,7 +806,7 @@ void netbk_p1_teardown(struct xen_netif 
+ 
+ 		i++;
+ 	}
+-	BUG_ON(i != NET_TX_RING_SIZE);
++	BUG_ON(i != NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles));
+ }
+ 
+ void netbk_p1_event(struct xen_netif *netif)
+diff -r 64bd2e43549a drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Fri Dec 09 13:25:16 2011 +0000
++++ b/drivers/xen/netback/xenbus.c	Tue Dec 13 11:11:41 2011 +0000
+@@ -138,6 +138,22 @@ static int netback_probe(struct xenbus_d
+ 			goto abort_transaction;
+ 		}
+ 
++		err = xenbus_printf(xbt, dev->nodename,
++				    "max-tx-ring-page-order",
++				    "%u", MODPARM_netback_max_tx_ring_page_order);
++		if (err) {
++			message = "writing max-tx-ring-page-order";
++			goto abort_transaction;
++		}
++
++		err = xenbus_printf(xbt, dev->nodename,
++				    "max-rx-ring-page-order",
++				    "%u", MODPARM_netback_max_rx_ring_page_order);
++		if (err) {
++			message = "writing max-rx-ring-page-order";
++			goto abort_transaction;
++		}
++
+ 		err = xenbus_transaction_end(xbt, 0);
+ 	} while (err == -EAGAIN);
+ 
+@@ -534,24 +550,122 @@ static int connect_rings(struct backend_
+ {
+ 	struct xen_netif *netif = be->netif;
+ 	struct xenbus_device *dev = be->dev;
+-	unsigned long tx_ring_ref, rx_ring_ref;
++	unsigned long tx_ring_ref[NETIF_MAX_RING_PAGES];
++	unsigned int tx_ring_order;
++	unsigned long rx_ring_ref[NETIF_MAX_RING_PAGES];
++	unsigned int rx_ring_order;
+ 	unsigned int evtchn, rx_copy, rx_protocol;
+ 	int err;
+ 	int val;
+ 
+-	DPRINTK("");
++	DPRINTK("%s", dev->otherend);
+ 
+-	err = xenbus_gather(XBT_NIL, dev->otherend,
+-			    "tx-ring-ref", "%lu", &tx_ring_ref,
+-			    "rx-ring-ref", "%lu", &rx_ring_ref,
+-			    "event-channel", "%u", &evtchn, NULL);
+-	if (err) {
+-		xenbus_dev_fatal(dev, err,
+-				 "reading %s/ring-ref and event-channel",
++	err = xenbus_scanf(XBT_NIL, dev->otherend, "event-channel", "%u",
++			   &evtchn);
++	if (err < 0) {
++		xenbus_dev_fatal(dev, err, "reading %s/event-channel",
+ 				 dev->otherend);
+ 		return err;
+ 	}
+ 
++	DPRINTK("netback(%s): event-channel %u\n", dev->otherend, evtchn); 
++
++	err = xenbus_scanf(XBT_NIL, dev->otherend, "tx-ring-page-order", "%u",
++			   &tx_ring_order);
++	if (err < 0) {
++		tx_ring_order = 0;
++
++		err = xenbus_scanf(XBT_NIL, dev->otherend, "tx-ring-ref", "%lu",
++				   &tx_ring_ref[0]);
++		if (err < 0) {
++			xenbus_dev_fatal(dev, err, "reading %s/tx-ring-ref",
++					 dev->otherend);
++			return err;
++		}
++
++		DPRINTK("netback(%s): tx-ring-ref %lu\n", dev->otherend, tx_ring_ref[0]); 
++	} else {
++		unsigned int i;
++
++		if (tx_ring_order > MODPARM_netback_max_tx_ring_page_order) {
++			err = -EINVAL;
++
++			xenbus_dev_fatal(dev, err,
++					 "%s/tx-ring-page-order too big",
++					 dev->otherend);
++			return err;
++		}
++
++		for (i = 0; i < (1u << tx_ring_order); i++) {
++			char ring_ref_name[sizeof ("tx-ring-ref") + 2];
++
++			snprintf(ring_ref_name, sizeof (ring_ref_name),
++				 "tx-ring-ref%u", i);
++
++			err = xenbus_scanf(XBT_NIL, dev->otherend,
++					   ring_ref_name, "%lu",
++					   &tx_ring_ref[i]);
++			if (err < 0) {
++				xenbus_dev_fatal(dev, err,
++						 "reading %s/%s",
++						 dev->otherend,
++						 ring_ref_name);
++				return err;
++			}
++
++			DPRINTK("netback(%s): tx-ring-ref[%d] %lu\n", dev->otherend,
++			        i, tx_ring_ref[i]); 
++		}
++	}
++
++	err = xenbus_scanf(XBT_NIL, dev->otherend, "rx-ring-page-order", "%u",
++			   &rx_ring_order);
++	if (err != 1) {
++		rx_ring_order = 0;
++
++		err = xenbus_scanf(XBT_NIL, dev->otherend, "rx-ring-ref", "%lu",
++				   &rx_ring_ref[0]);
++		if (err < 0) {
++			xenbus_dev_fatal(dev, err, "reading %s/rx-ring-ref",
++					 dev->otherend);
++			return err;
++		}
++
++		DPRINTK("netback(%s): rx-ring-ref %lu\n", dev->otherend, rx_ring_ref[0]); 
++	} else {
++		unsigned int i;
++
++		if (rx_ring_order > MODPARM_netback_max_rx_ring_page_order) {
++			err = -EINVAL;
++
++			xenbus_dev_fatal(dev, err,
++					 "%s/rx-ring-page-order too big",
++					 dev->otherend);
++			return err;
++		}
++
++		for (i = 0; i < (1u << rx_ring_order); i++) {
++			char ring_ref_name[sizeof ("rx-ring-ref") + 2];
++
++			snprintf(ring_ref_name, sizeof (ring_ref_name),
++				 "rx-ring-ref%u", i);
++
++			err = xenbus_scanf(XBT_NIL, dev->otherend,
++					   ring_ref_name, "%lu",
++					   &rx_ring_ref[i]);
++			if (err < 0) {
++				xenbus_dev_fatal(dev, err,
++						 "reading %s/%s",
++						 dev->otherend,
++						 ring_ref_name);
++				return err;
++			}
++
++			DPRINTK("netback(%s): rx-ring-ref[%d] %lu\n", dev->otherend,
++			        i, rx_ring_ref[i]); 
++		}
++	}
++
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend, "rx-protocol",
+ 			 "%d", &rx_protocol) < 0)
+ 		rx_protocol = NETBK_MIN_RX_PROTOCOL;
+@@ -606,11 +720,12 @@ static int connect_rings(struct backend_
+ 	netif_set_features(netif);
+ 
+ 	/* Map the shared frame, irq etc. */
+-	err = netif_map(netif, tx_ring_ref, rx_ring_ref, evtchn, rx_protocol);
++	err = netif_map(netif, evtchn,
++			tx_ring_ref, (1u << tx_ring_order),
++			rx_ring_ref, (1u << rx_ring_order),
++			rx_protocol);
+ 	if (err) {
+-		xenbus_dev_fatal(dev, err,
+-				 "mapping shared-frames %lu/%lu port %u",
+-				 tx_ring_ref, rx_ring_ref, evtchn);
++		xenbus_dev_fatal(dev, err, "mapping reng-refs and evtchn");
+ 		return err;
+ 	}
+ 	return 0;

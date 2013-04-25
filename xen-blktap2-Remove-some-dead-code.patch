@@ -1,0 +1,135 @@
+From fc54dc70adc76efb642d13b147cfb1300eb82bb8 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:35 -0700
+Subject: [PATCH 16/18] xen/blktap: Remove some dead code.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |   19 -------------------
+ drivers/xen/blktap2/control.c |    1 -
+ drivers/xen/blktap2/device.c  |   10 ----------
+ drivers/xen/blktap2/sysfs.c   |    5 ++---
+ 4 files changed, 2 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 229ee3d..1981f9f 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -31,7 +31,6 @@ extern int blktap_device_major;
+ #define BLKTAP_DEVICE                4
+ #define BLKTAP_DEVICE_CLOSED         5
+ #define BLKTAP_SHUTDOWN_REQUESTED    8
+-#define BLKTAP_PASSTHROUGH           9
+ 
+ /* blktap IOCTLs: */
+ #define BLKTAP2_IOCTL_KICK_FE        1
+@@ -68,15 +67,6 @@ extern int blktap_device_major;
+          ((_req) * BLKIF_MAX_SEGMENTS_PER_REQUEST * PAGE_SIZE) +        \
+          ((_seg) * PAGE_SIZE))
+ 
+-#define blktap_get(_b) (atomic_inc(&(_b)->refcnt))
+-#define blktap_put(_b)					\
+-	do {						\
+-		if (atomic_dec_and_test(&(_b)->refcnt))	\
+-			wake_up(&(_b)->wq);		\
+-	} while (0)
+-
+-struct blktap;
+-
+ struct grant_handle_pair {
+ 	grant_handle_t                 kernel;
+ 	grant_handle_t                 user;
+@@ -98,10 +88,6 @@ struct blktap_params {
+ struct blktap_device {
+ 	spinlock_t                     lock;
+ 	struct gendisk                *gd;
+-
+-#ifdef ENABLE_PASSTHROUGH
+-	struct block_device           *bdev;
+-#endif
+ };
+ 
+ struct blktap_ring {
+@@ -150,7 +136,6 @@ struct blktap_request {
+ 
+ struct blktap {
+ 	int                            minor;
+-	atomic_t                       refcnt;
+ 	unsigned long                  dev_inuse;
+ 
+ 	struct blktap_ring             ring;
+@@ -192,10 +177,6 @@ int blktap_device_destroy(struct blktap *);
+ void blktap_device_destroy_sync(struct blktap *);
+ int blktap_device_run_queue(struct blktap *);
+ void blktap_device_end_request(struct blktap *, struct blktap_request *, int);
+-#ifdef ENABLE_PASSTHROUGH
+-int blktap_device_enable_passthrough(struct blktap *,
+-				     unsigned, unsigned);
+-#endif
+ 
+ int blktap_request_pool_init(void);
+ void blktap_request_pool_free(void);
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index aba4581..377ee23 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -22,7 +22,6 @@ blktap_control_get_minor(void)
+ 		return NULL;
+ 
+ 	memset(tap, 0, sizeof(*tap));
+-	atomic_set(&tap->refcnt, 0);
+ 	sg_init_table(tap->sg, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+ 
+ 	mutex_lock(&blktap_lock);
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 5f9f58c..55af5e0 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -1,4 +1,3 @@
+-#include <linux/version.h> /* XXX Remove uses of VERSION instead. */
+ #include <linux/fs.h>
+ #include <linux/blkdev.h>
+ #include <linux/cdrom.h>
+@@ -19,12 +18,6 @@
+ 
+ #include "../blkback/blkback-pagemap.h"
+ 
+-#if 0
+-#define DPRINTK_IOCTL(_f, _a...) printk(KERN_ALERT _f, ## _a)
+-#else
+-#define DPRINTK_IOCTL(_f, _a...) ((void)0)
+-#endif
+-
+ struct blktap_grant_table {
+ 	int cnt;
+ 	struct gnttab_map_grant_ref grants[BLKIF_MAX_SEGMENTS_PER_REQUEST * 2];
+@@ -90,9 +83,6 @@ blktap_device_ioctl(struct block_device *bd, fmode_t mode,
+ {
+ 	int i;
+ 
+-	DPRINTK_IOCTL("command: 0x%x, argument: 0x%lx, dev: 0x%04x\n",
+-		      command, (long)argument, inode->i_rdev);
+-
+ 	switch (command) {
+ 	case CDROMMULTISESSION:
+ 		BTDBG("FIXME: support multisession CDs later\n");
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 0d4495f..9dc116d 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -103,10 +103,9 @@ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, cha
+ 	if (!tap)
+ 		return 0;
+ 
+-	tmp += sprintf(tmp, "%s (%u:%u), refcnt: %d, dev_inuse: 0x%08lx\n",
++	tmp += sprintf(tmp, "%s (%u:%u), dev_inuse: 0x%08lx\n",
+ 		       tap->name, MAJOR(tap->ring.devno),
+-		       MINOR(tap->ring.devno), atomic_read(&tap->refcnt),
+-		       tap->dev_inuse);
++		       MINOR(tap->ring.devno), tap->dev_inuse);
+ 
+ 	if (tap->device.gd) {
+ 		struct gendisk *gd = tap->device.gd;
+-- 
+1.7.0.4
+

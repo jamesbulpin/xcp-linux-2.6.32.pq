@@ -1,0 +1,61 @@
+sed -i -e 's/\<gnttab_map_grant_ref_t\>/struct gnttab_map_grant_ref/g' \
+       -e 's/\<gnttab_unmap_grant_ref_t\>/struct gnttab_unmap_grant_ref/g' \
+  drivers/xen/netback/netback.c
+
+diff -r 338fe169b4ec drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed May 26 16:12:19 2010 +0100
++++ b/drivers/xen/netback/netback.c	Tue Jun 08 14:27:45 2010 +0100
+@@ -128,8 +128,8 @@
+ static struct sk_buff_head tx_queue;
+ 
+ static grant_handle_t grant_tx_handle[MAX_PENDING_REQS];
+-static gnttab_unmap_grant_ref_t tx_unmap_ops[MAX_PENDING_REQS];
+-static gnttab_map_grant_ref_t tx_map_ops[MAX_PENDING_REQS];
++static struct gnttab_unmap_grant_ref tx_unmap_ops[MAX_PENDING_REQS];
++static struct gnttab_map_grant_ref tx_map_ops[MAX_PENDING_REQS];
+ 
+ static struct list_head net_schedule_list;
+ static spinlock_t net_schedule_list_lock;
+@@ -868,7 +868,7 @@
+ inline static void net_tx_action_dealloc(void)
+ {
+ 	struct netbk_tx_pending_inuse *inuse, *n;
+-	gnttab_unmap_grant_ref_t *gop;
++	struct gnttab_unmap_grant_ref *gop;
+ 	u16 pending_idx;
+ 	PEND_RING_IDX dc, dp;
+ 	struct xen_netif *netif;
+@@ -1012,10 +1012,10 @@
+ 	return frags;
+ }
+ 
+-static gnttab_map_grant_ref_t *netbk_get_requests(struct xen_netif *netif,
++static struct gnttab_map_grant_ref *netbk_get_requests(struct xen_netif *netif,
+ 						  struct sk_buff *skb,
+ 						  struct xen_netif_tx_request *txp,
+-						  gnttab_map_grant_ref_t *mop)
++						  struct gnttab_map_grant_ref *mop)
+ {
+ 	struct skb_shared_info *shinfo = skb_shinfo(skb);
+ 	skb_frag_t *frags = shinfo->frags;
+@@ -1042,9 +1042,9 @@
+ }
+ 
+ static int netbk_tx_check_mop(struct sk_buff *skb,
+-			       gnttab_map_grant_ref_t **mopp)
++			       struct gnttab_map_grant_ref **mopp)
+ {
+-	gnttab_map_grant_ref_t *mop = *mopp;
++	struct gnttab_map_grant_ref *mop = *mopp;
+ 	int pending_idx = *((u16 *)skb->data);
+ 	struct xen_netif *netif = pending_tx_info[pending_idx].netif;
+ 	struct xen_netif_tx_request *txp;
+@@ -1203,7 +1203,7 @@
+ 	struct xen_netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
+ 	u16 pending_idx;
+ 	RING_IDX i;
+-	gnttab_map_grant_ref_t *mop;
++	struct gnttab_map_grant_ref *mop;
+ 	unsigned int data_len;
+ 	int ret, work_to_do;
+ 

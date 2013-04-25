@@ -1,0 +1,12 @@
+diff -urpN a/drivers/net/s2io.c b/drivers/net/s2io.c
+--- a/drivers/net/s2io.c	2009-09-04 01:44:57.000000000 +0530
++++ b/drivers/net/s2io.c	2009-09-04 03:38:27.000000000 +0530
+@@ -153,7 +153,7 @@
+ #include "s2io-regs.h"
+ #include "util.h"
+ 
+-#define DRV_VERSION "2.1.37.17590"
++#define DRV_VERSION "2.1.37.18446"
+ /* S2io Driver name & version. */
+ static char s2io_driver_name[] = "Neterion";
+ static char s2io_driver_version[] = DRV_VERSION;

@@ -1,0 +1,137 @@
+Add a RESTRICT ioctl to /proc/xen/privcmd, which allows a privcommand
+file descriptor to be restricted to only work with one domain.
+
+Certain difficult operations, like hypercalls, are prohibited completely
+on restricted handles.
+
+diff -r 9c8b129e00ac drivers/xen/privcmd/privcmd.c
+--- a/drivers/xen/privcmd/privcmd.c	Tue Jun 22 16:22:56 2010 +0100
++++ b/drivers/xen/privcmd/privcmd.c	Tue Jun 22 16:35:44 2010 +0100
+@@ -33,6 +33,12 @@
+ static struct proc_dir_entry *privcmd_intf;
+ static struct proc_dir_entry *capabilities_intf;
+ 
++struct privcmd_filp_data {
++    domid_t restrict_domid;
++};
++
++#define UNRESTRICTED_DOMID ((domid_t)-1)
++
+ #ifndef CONFIG_XEN_PRIVILEGED_GUEST
+ #define HAVE_ARCH_PRIVCMD_MMAP
+ #endif
+@@ -60,6 +66,7 @@
+ {
+ 	long ret;
+ 	void __user *udata = (void __user *) data;
++	struct privcmd_filp_data *fdata = file->private_data;
+ #ifdef CONFIG_XEN_PRIVILEGED_GUEST
+ 	unsigned long i, addr, nr, nr_pages;
+ 	int paged_out;
+@@ -73,6 +80,9 @@
+ 	case IOCTL_PRIVCMD_HYPERCALL: {
+ 		privcmd_hypercall_t hypercall;
+   
++		if (fdata->restrict_domid != UNRESTRICTED_DOMID)
++			return -EACCES;
++
+ 		if (copy_from_user(&hypercall, udata, sizeof(hypercall)))
+ 			return -EFAULT;
+ 
+@@ -109,6 +119,10 @@
+ 
+ 		if (mmapcmd.num <= 0)
+ 			return -EINVAL;
++
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID &&
++                    fdata->restrict_domid != mmapcmd.dom)
++                        return -EACCES;
+ 
+ 		p = mmapcmd.entry;
+ 		for (i = 0; i < mmapcmd.num;) {
+@@ -213,6 +227,10 @@
+ 
+ 		if (copy_from_user(&m, udata, sizeof(m)))
+ 			return -EFAULT;
++
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID &&
++                    fdata->restrict_domid != m.dom)
++                        return -EACCES;
+ 
+ 		nr_pages = m.num;
+ 		addr = m.addr;
+@@ -401,6 +419,20 @@
+ 
+ #endif /* CONFIG_XEN_PRIVILEGED_GUEST */
+ 
++        case IOCTL_PRIVCMD_RESTRICT_DOMID: {
++		privcmd_restrict_domid_t prd;
++
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID)
++                        return -EACCES;
++                if (copy_from_user(&prd, udata, sizeof(prd)))
++                        return -EFAULT;
++                if (prd.domid >= DOMID_FIRST_RESERVED)
++                        return -EINVAL;
++                fdata->restrict_domid = prd.domid;
++                ret = 0;
++        }
++        break;
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+@@ -434,11 +466,31 @@
+ }
+ #endif
+ 
++static int privcmd_open(struct inode *ino, struct file *filp)
++{
++        struct privcmd_filp_data *fd;
++        fd = kmalloc(sizeof(*fd), GFP_KERNEL);
++        if (!fd)
++                return -ENOMEM;
++        fd->restrict_domid = UNRESTRICTED_DOMID;
++        filp->private_data = fd;
++        return 0;
++}
++
++static int privcmd_release(struct inode *ino, struct file *filp)
++{
++        struct privcmd_filp_data *fd = filp->private_data;
++        kfree(fd);
++        return 0;
++}
++
+ static const struct file_operations privcmd_file_ops = {
+ 	.unlocked_ioctl = privcmd_ioctl,
+ #ifdef CONFIG_XEN_PRIVILEGED_GUEST
+ 	.mmap = privcmd_mmap,
+ #endif
++        .open = privcmd_open,
++        .release = privcmd_release
+ };
+ 
+ static int capabilities_read(char *page, char **start, off_t off,
+diff -r 9c8b129e00ac include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Tue Jun 22 16:22:56 2010 +0100
++++ b/include/xen/public/privcmd.h	Tue Jun 22 16:35:44 2010 +0100
+@@ -68,6 +68,10 @@
+ 	int __user *err;  /* array of error codes */
+ } privcmd_mmapbatch_v2_t;
+ 
++typedef struct privcmd_restrict_domid {
++	domid_t domid;
++} privcmd_restrict_domid_t;
++
+ /*
+  * @cmd: IOCTL_PRIVCMD_HYPERCALL
+  * @arg: &privcmd_hypercall_t
+@@ -81,5 +85,7 @@
+ 	_IOC(_IOC_NONE, 'P', 3, sizeof(privcmd_mmapbatch_t))
+ #define IOCTL_PRIVCMD_MMAPBATCH_V2				\
+ 	_IOC(_IOC_NONE, 'P', 4, sizeof(privcmd_mmapbatch_v2_t))
++#define IOCTL_PRIVCMD_RESTRICT_DOMID				\
++	_IOC(_IOC_NONE, 'P', 100, sizeof(privcmd_restrict_domid_t))
+ 
+ #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

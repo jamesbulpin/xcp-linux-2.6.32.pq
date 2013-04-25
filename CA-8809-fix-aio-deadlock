@@ -1,0 +1,21 @@
+Avoid potential deadlock which wedges dom0. 
+
+The aio poll code is specific to the linux-2.6.18-xen based ports
+(originally from patches/*/blktap-aio-16_03_06.patch in
+xen-unstable.hg) and so is not applicable upstream.
+
+diff -r e2cccc9ae598 fs/aio.c
+--- a/fs/aio.c	Tue Jul 31 16:17:43 2007 +0100
++++ b/fs/aio.c	Tue Jul 31 16:18:31 2007 +0100
+@@ -1281,10 +1281,10 @@ static unsigned int aio_queue_fd_poll(st
+ 
+ 	if (ioctx) {
+ 
+-		spin_lock_irq(&ioctx->ctx_lock);
+ 		/* Insert inside our poll wait queue */
+ 		poll_wait(file, &ioctx->poll_wait, wait);
+ 
++		spin_lock_irq(&ioctx->ctx_lock);
+ 		/* Check our condition */
+ 		if (aio_read_evt(ioctx, 0))
+ 			pollflags = POLLIN | POLLRDNORM;

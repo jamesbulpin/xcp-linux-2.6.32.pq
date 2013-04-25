@@ -1,0 +1,30 @@
+blktap: fix reference to freed struct request.
+
+The request will be freed by the call to __blktap_end_rq(), so to
+rq->q is invalid before spin_unlock_irq().
+
+Signed-off-by: Dominic Curran <dominic.curran@
+Acked-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+---
+ drivers/xen/blktap2/device.c |    6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+Index: linux-2.6.32.hg/drivers/xen/blktap2/device.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/xen/blktap2/device.c	2011-03-09 10:17:16.499312591 +0000
++++ linux-2.6.32.hg/drivers/xen/blktap2/device.c	2011-03-09 10:20:54.170900927 +0000
+@@ -135,9 +135,11 @@ __blktap_end_rq(struct request *rq, int 
+ static inline void
+ blktap_end_rq(struct request *rq, int err)
+ {
+-	spin_lock_irq(rq->q->queue_lock);
++	struct request_queue *q = rq->q;
++
++	spin_lock_irq(q->queue_lock);
+ 	__blktap_end_rq(rq, err);
+-	spin_unlock_irq(rq->q->queue_lock);
++	spin_unlock_irq(q->queue_lock);
+ }
+ 
+ void

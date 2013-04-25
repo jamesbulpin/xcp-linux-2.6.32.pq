@@ -1,0 +1,1329 @@
+diff --git a/drivers/xen/pciback/controller.c b/drivers/xen/pciback/controller.c
+--- a/drivers/xen/pciback/controller.c
++++ b/drivers/xen/pciback/controller.c
+@@ -208,7 +208,7 @@
+ 	}
+ 
+ 	spin_unlock_irqrestore(&dev_data->lock, flags);
+-	pcistub_put_pci_dev(found_dev);
++	pcistub_put_pci_dev(found_dev, 0);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -396,7 +396,7 @@
+ 		list_for_each_entry_safe(dev_entry, d,
+ 					 &cntrl_entry->dev_list, list) {
+ 			list_del(&dev_entry->list);
+-			pcistub_put_pci_dev(dev_entry->dev);
++			pcistub_put_pci_dev(dev_entry->dev, 0);
+ 			kfree(dev_entry);
+ 		}
+ 		list_del(&cntrl_entry->list);
+diff --git a/drivers/xen/pciback/passthrough.c b/drivers/xen/pciback/passthrough.c
+--- a/drivers/xen/pciback/passthrough.c
++++ b/drivers/xen/pciback/passthrough.c
+@@ -88,7 +88,7 @@
+ 	spin_unlock_irqrestore(&dev_data->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev);
++		pcistub_put_pci_dev(found_dev, 1);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -157,7 +157,7 @@
+ 
+ 	list_for_each_entry_safe(dev_entry, t, &dev_data->dev_list, list) {
+ 		list_del(&dev_entry->list);
+-		pcistub_put_pci_dev(dev_entry->dev);
++		pcistub_put_pci_dev(dev_entry->dev, 1);
+ 		kfree(dev_entry);
+ 	}
+ 
+diff --git a/drivers/xen/pciback/pci_stub.c b/drivers/xen/pciback/pci_stub.c
+--- a/drivers/xen/pciback/pci_stub.c
++++ b/drivers/xen/pciback/pci_stub.c
+@@ -24,10 +24,28 @@
+ * We want to avoid in middle of AER ops, pciback devices is being removed
+ */
+ static DECLARE_RWSEM(pcistub_sem);
+-module_param_named(hide, pci_devs_to_hide, charp, 0444);
++module_param_named(hide, pci_devs_to_hide, charp, S_IRUGO);
++
++static char *pci_devs_use_sbr = NULL;
++module_param_named(sbr, pci_devs_use_sbr, charp, S_IRUGO);
++
++static char *pci_devs_use_d3r = NULL;
++module_param_named(d3r, pci_devs_use_d3r, charp, S_IRUGO);
++
++static char *pci_devs_no_flr = NULL;
++module_param_named(noflr, pci_devs_no_flr, charp, S_IRUGO);
++
++/* Device id list holding different device type listings
++ * for hiding devices and reset logic.
++ */
++#define PCIBACK_ID_TYPE_HIDE  1
++#define PCIBACK_ID_TYPE_SBR   2
++#define PCIBACK_ID_TYPE_D3R   3
++#define PCIBACK_ID_TYPE_NOFLR 4
+ 
+ struct pcistub_device_id {
+ 	struct list_head slot_list;
++	int type;
+ 	int domain;
+ 	unsigned char bus;
+ 	unsigned int devfn;
+@@ -56,6 +74,8 @@
+ static int initialize_devices = 0;
+ static LIST_HEAD(seized_devices);
+ 
++static int disable_all_flr = 0;
++
+ static struct pcistub_device *pcistub_device_alloc(struct pci_dev *dev)
+ {
+ 	struct pcistub_device *psdev;
+@@ -76,6 +96,23 @@
+ 	spin_lock_init(&psdev->lock);
+ 
+ 	return psdev;
++}
++
++static struct pciback_dev_data *pcistub_dev_data_alloc(struct pci_dev *dev)
++{
++	struct pciback_dev_data *dev_data;
++
++	dev_dbg(&dev->dev, "pcistub_dev_data_alloc\n");
++
++	dev_data = kzalloc(sizeof(*dev_data) + dev->cfg_size, GFP_ATOMIC);
++	if (!dev_data)
++		return NULL;
++		
++	pci_set_drvdata(dev, dev_data);
++
++	dev_data->cfg_space = (u8*)(dev_data) + sizeof(*dev_data);
++
++	return dev_data;
+ }
+ 
+ /* Don't call this directly as it's called by pcistub_device_put */
+@@ -200,7 +237,7 @@
+ 	return found_dev;
+ }
+ 
+-void pcistub_put_pci_dev(struct pci_dev *dev)
++void pcistub_put_pci_dev(struct pci_dev *dev, int do_flr)
+ {
+ 	struct pcistub_device *psdev, *found_psdev = NULL;
+ 	unsigned long flags;
+@@ -220,6 +257,13 @@
+ 	* pcistub and pciback when AER is in processing
+ 	*/
+ 	down_write(&pcistub_sem);
++
++	/* For pass-through devices, do an FLR (or approximate) for the device
++	 * before it is put back and ready for the next domain
++	 */
++	if (!disable_all_flr && do_flr)
++		pciback_flr_device(dev);
++
+ 	/* Cleanup our device
+ 	 * (so it's ready for the next domain)
+ 	 */
+@@ -233,6 +277,43 @@
+ 
+ 	pcistub_device_put(found_psdev);
+ 	up_write(&pcistub_sem);
++}
++
++struct pci_dev *pcistub_ref_pci_dev(struct pci_dev *dev)
++{
++	struct pcistub_device *psdev;
++	struct pci_dev *found_dev = NULL;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pcistub_devices_lock, flags);
++
++	list_for_each_entry(psdev, &pcistub_devices, dev_list) {
++		if (psdev->dev == dev) {
++			pcistub_device_get(psdev); /* just a ref count */
++			found_dev = psdev->dev;
++			break;
++		}
++	}
++
++	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
++	return found_dev;
++}
++
++void pcistub_unref_pci_dev(struct pci_dev *dev)
++{
++	struct pcistub_device *psdev;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pcistub_devices_lock, flags);
++
++	list_for_each_entry(psdev, &pcistub_devices, dev_list) {
++		if (psdev->dev == dev) {
++			pcistub_device_get(psdev); /* just an unref count */
++			break;
++		}
++	}
++
++	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
+ }
+ 
+ static int __devinit pcistub_match_one(struct pci_dev *dev,
+@@ -255,7 +336,7 @@
+ 	return 0;
+ }
+ 
+-static int __devinit pcistub_match(struct pci_dev *dev)
++static int __devinit pcistub_match(struct pci_dev *dev, int type)
+ {
+ 	struct pcistub_device_id *pdev_id;
+ 	unsigned long flags;
+@@ -263,6 +344,8 @@
+ 
+ 	spin_lock_irqsave(&device_ids_lock, flags);
+ 	list_for_each_entry(pdev_id, &pcistub_device_ids, slot_list) {
++		if (pdev_id->type != type)
++			continue;
+ 		if (pcistub_match_one(dev, pdev_id)) {
+ 			found = 1;
+ 			break;
+@@ -285,12 +368,11 @@
+ 	 * would need to be called somewhere to free the memory allocated
+ 	 * here and then to call kfree(pci_get_drvdata(psdev->dev)).
+ 	 */
+-	dev_data = kzalloc(sizeof(*dev_data), GFP_ATOMIC);
++	dev_data = pcistub_dev_data_alloc(dev);
+ 	if (!dev_data) {
+ 		err = -ENOMEM;
+ 		goto out;
+ 	}
+-	pci_set_drvdata(dev, dev_data);
+ 
+ 	dev_dbg(&dev->dev, "initializing config\n");
+ 
+@@ -316,6 +398,22 @@
+ 	 */
+ 	dev_dbg(&dev->dev, "reset device\n");
+ 	pciback_reset_device(dev);
++
++	/* Classify the device so we know if it is PCI/PCIe and if it is
++	 * a bridge - this information is used for FLR logic. Also store 
++	 * values if SBR/D3R reset logic was requested.
++	 */
++	pciback_classify_device(dev);
++	dev_data->no_flr = pcistub_match(dev, PCIBACK_ID_TYPE_NOFLR);
++	if (!dev_data->no_flr) {
++		dev_data->use_sbr = pcistub_match(dev, PCIBACK_ID_TYPE_SBR);
++		dev_data->use_d3r = pcistub_match(dev, PCIBACK_ID_TYPE_D3R);
++	}
++
++	/* Store the config space here where the device is off and ready to be 
++	 * exported before any FLRs or other resets are done
++	 */
++	pciback_store_config_space(dev);
+ 
+ 	return 0;
+ 
+@@ -414,7 +512,7 @@
+ 
+ 	dev_dbg(&dev->dev, "probing...\n");
+ 
+-	if (pcistub_match(dev)) {
++	if (pcistub_match(dev, PCIBACK_ID_TYPE_HIDE)) {
+ 
+ 		if (dev->hdr_type != PCI_HEADER_TYPE_NORMAL
+ 		    && dev->hdr_type != PCI_HEADER_TYPE_BRIDGE) {
+@@ -851,7 +949,7 @@
+ 	return -EINVAL;
+ }
+ 
+-static int pcistub_device_id_add(int domain, int bus, int slot, int func)
++static int pcistub_device_id_add(int domain, int bus, int slot, int func, int type)
+ {
+ 	struct pcistub_device_id *pci_dev_id;
+ 	unsigned long flags;
+@@ -860,12 +958,13 @@
+ 	if (!pci_dev_id)
+ 		return -ENOMEM;
+ 
++	pci_dev_id->type = type;
+ 	pci_dev_id->domain = domain;
+ 	pci_dev_id->bus = bus;
+ 	pci_dev_id->devfn = PCI_DEVFN(slot, func);
+ 
+-	pr_debug("pciback: wants to seize %04x:%02x:%02x.%01x\n",
+-		 domain, bus, slot, func);
++	pr_debug("pciback: adding device ID type: %d for %04x:%02x:%02x.%01x\n",
++		 type, domain, bus, slot, func);
+ 
+ 	spin_lock_irqsave(&device_ids_lock, flags);
+ 	list_add_tail(&pci_dev_id->slot_list, &pcistub_device_ids);
+@@ -874,7 +973,7 @@
+ 	return 0;
+ }
+ 
+-static int pcistub_device_id_remove(int domain, int bus, int slot, int func)
++static int pcistub_device_id_remove(int domain, int bus, int slot, int func, int type)
+ {
+ 	struct pcistub_device_id *pci_dev_id, *t;
+ 	int devfn = PCI_DEVFN(slot, func);
+@@ -884,7 +983,7 @@
+ 	spin_lock_irqsave(&device_ids_lock, flags);
+ 	list_for_each_entry_safe(pci_dev_id, t, &pcistub_device_ids, slot_list) {
+ 
+-		if (pci_dev_id->domain == domain
++		if (pci_dev_id->type == type && pci_dev_id->domain == domain
+ 		    && pci_dev_id->bus == bus && pci_dev_id->devfn == devfn) {
+ 			/* Don't break; here because it's possible the same
+ 			 * slot could be in the list more than once
+@@ -939,6 +1038,32 @@
+ 	return err;
+ }
+ 
++static int pcistub_device_do_flr(int domain, int bus, int slot, int func)
++{
++	int err = 0;
++	struct pcistub_device *psdev;
++	struct pci_dev *dev;
++
++	psdev = pcistub_device_find(domain, bus, slot, func);
++	if (!psdev || !psdev->dev) {
++		err = -ENODEV;
++		goto out;
++	}
++	dev = psdev->dev;
++
++	/* Do an FLR (or approximate) for the device on demand and 
++	 * reload config
++	 */
++	if (!disable_all_flr) {
++		pciback_flr_device(dev);
++	}
++	else
++		dev_dbg(&dev->dev, "FLR disabled for all devices\n");
++
++out:
++	return err;
++}
++
+ static ssize_t pcistub_slot_add(struct device_driver *drv, const char *buf,
+ 				size_t count)
+ {
+@@ -949,7 +1074,7 @@
+ 	if (err)
+ 		goto out;
+ 
+-	err = pcistub_device_id_add(domain, bus, slot, func);
++	err = pcistub_device_id_add(domain, bus, slot, func, PCIBACK_ID_TYPE_HIDE);
+ 
+       out:
+ 	if (!err)
+@@ -969,7 +1094,7 @@
+ 	if (err)
+ 		goto out;
+ 
+-	err = pcistub_device_id_remove(domain, bus, slot, func);
++	err = pcistub_device_id_remove(domain, bus, slot, func, PCIBACK_ID_TYPE_HIDE);
+ 
+       out:
+ 	if (!err)
+@@ -987,6 +1112,10 @@
+ 
+ 	spin_lock_irqsave(&device_ids_lock, flags);
+ 	list_for_each_entry(pci_dev_id, &pcistub_device_ids, slot_list) {
++		/* only want devices set for hide, not reset entries */
++		if (pci_dev_id->type != PCIBACK_ID_TYPE_HIDE)
++			continue;
++
+ 		if (count >= PAGE_SIZE)
+ 			break;
+ 
+@@ -1068,7 +1197,7 @@
+ 
+ DRIVER_ATTR(quirks, S_IRUSR | S_IWUSR, pcistub_quirk_show, pcistub_quirk_add);
+ 
+-static ssize_t permissive_add(struct device_driver *drv, const char *buf,
++static ssize_t pcistub_permissive_add(struct device_driver *drv, const char *buf,
+ 			      size_t count)
+ {
+ 	int domain, bus, slot, func;
+@@ -1109,7 +1238,7 @@
+ 	return err;
+ }
+ 
+-static ssize_t permissive_show(struct device_driver *drv, char *buf)
++static ssize_t pcistub_permissive_show(struct device_driver *drv, char *buf)
+ {
+ 	struct pcistub_device *psdev;
+ 	struct pciback_dev_data *dev_data;
+@@ -1132,7 +1261,68 @@
+ 	return count;
+ }
+ 
+-DRIVER_ATTR(permissive, S_IRUSR | S_IWUSR, permissive_show, permissive_add);
++DRIVER_ATTR(permissive, S_IRUSR | S_IWUSR, pcistub_permissive_show, pcistub_permissive_add);
++
++static ssize_t pcistub_do_flr(struct device_driver *drv, const char *buf,
++				   size_t count)
++{
++	int domain, bus, slot, func;
++	int err;
++
++	err = str_to_slot(buf, &domain, &bus, &slot, &func);
++	if (err)
++		goto out;
++
++	err = pcistub_device_do_flr(domain, bus, slot, func);
++
++out:
++	if (!err)
++		err = count;
++	return err;
++}
++
++DRIVER_ATTR(do_flr, S_IWUSR, NULL, pcistub_do_flr);
++
++static ssize_t pcistub_resets(struct device_driver *drv, const char *buf,
++				   size_t count)
++{
++	int domain, bus, slot, func;
++	int type, err = 0;
++
++	/* string begins with reset type specifier sbr=|dr3=|noflr= */
++	if (!strncmp(buf, "sbr=", 4)) {
++		type = PCIBACK_ID_TYPE_SBR;
++		buf += 4;
++	} else if (!strncmp(buf, "d3r=", 4)) {
++		type = PCIBACK_ID_TYPE_D3R;
++		buf += 4;
++	} else if (!strncmp(buf, "noflr=", 6)) {
++		type = PCIBACK_ID_TYPE_NOFLR;
++		buf += 6;
++	} else {
++		err = -EINVAL;
++		goto out;
++	}
++
++	/* check special wildcard noflr */
++	if (type == PCIBACK_ID_TYPE_NOFLR && !strncmp(buf, "(*)", 3)) {
++		disable_all_flr = 1;
++		goto out;
++	}
++
++	err = str_to_slot(buf, &domain, &bus, &slot, &func);
++	if (err)
++		goto out;
++
++	err = pcistub_device_id_add(domain, bus, slot, func, type);
++
++out:
++	if (!err)
++		err = count;
++	return err;
++}
++
++DRIVER_ATTR(resets, S_IWUSR, NULL, pcistub_resets);
+ 
+ #ifdef CONFIG_PCI_MSI
+ 
+@@ -1158,6 +1348,8 @@
+ 	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_slots);
+ 	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_quirks);
+ 	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_permissive);
++	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_do_flr);
++	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_resets);
+ 
+ 	pci_unregister_driver(&pciback_pci_driver);
+ 	WARN_ON(unregister_msi_get_owner(pciback_get_owner));
+@@ -1165,35 +1357,27 @@
+ 
+ static int __init pcistub_init(void)
+ {
+-	int pos = 0;
+ 	int err = 0;
+-	int domain, bus, slot, func;
+-	int parsed;
+ 
+-	if (pci_devs_to_hide && *pci_devs_to_hide) {
+-		do {
+-			parsed = 0;
++	/* Parse device lists for hide, sbr, and d3r */
++	err = pciback_parse_device_params(pci_devs_to_hide, PCIBACK_ID_TYPE_HIDE, pcistub_device_id_add);
++	if (err)
++		goto out;
+ 
+-			err = sscanf(pci_devs_to_hide + pos,
+-				     " (%x:%x:%x.%x) %n",
+-				     &domain, &bus, &slot, &func, &parsed);
+-			if (err != 4) {
+-				domain = 0;
+-				err = sscanf(pci_devs_to_hide + pos,
+-					     " (%x:%x.%x) %n",
+-					     &bus, &slot, &func, &parsed);
+-				if (err != 3)
+-					goto parse_error;
+-			}
++	err = pciback_parse_device_params(pci_devs_use_sbr, PCIBACK_ID_TYPE_SBR, pcistub_device_id_add);
++	if (err)
++		goto out;
+ 
+-			err = pcistub_device_id_add(domain, bus, slot, func);
+-			if (err)
+-				goto out;
++	err = pciback_parse_device_params(pci_devs_use_d3r, PCIBACK_ID_TYPE_D3R, pcistub_device_id_add);
++	if (err)
++		goto out;
+ 
+-			/* if parsed<=0, we've reached the end of the string */
+-			pos += parsed;
+-		} while (parsed > 0 && pci_devs_to_hide[pos]);
+-	}
++	if (pci_devs_no_flr && *pci_devs_no_flr && !strncmp(pci_devs_no_flr, "(*)", 3))
++		disable_all_flr = 1; /* check special wildcard noflr */
++	else
++		err = pciback_parse_device_params(pci_devs_no_flr, PCIBACK_ID_TYPE_NOFLR, pcistub_device_id_add);
++	if (err)
++		goto out;
+ 
+ 	/* If we're the first PCI Device Driver to register, we're the
+ 	 * first one to get offered PCI devices as they become
+@@ -1217,6 +1401,12 @@
+ 	if (!err)
+ 		err = driver_create_file(&pciback_pci_driver.driver,
+ 					 &driver_attr_permissive);
++	if (!err)
++		err = driver_create_file(&pciback_pci_driver.driver,
++					 &driver_attr_do_flr);
++	if (!err)
++		err = driver_create_file(&pciback_pci_driver.driver,
++					 &driver_attr_resets);
+ 
+ 	if (!err)
+ 		err = register_msi_get_owner(pciback_get_owner);
+@@ -1225,11 +1415,6 @@
+ 
+       out:
+ 	return err;
+-
+-      parse_error:
+-	printk(KERN_ERR "pciback: Error parsing pci_devs_to_hide at \"%s\"\n",
+-	       pci_devs_to_hide + pos);
+-	return -EINVAL;
+ }
+ 
+ #ifndef MODULE
+diff --git a/drivers/xen/pciback/pciback.h b/drivers/xen/pciback/pciback.h
+--- a/drivers/xen/pciback/pciback.h
++++ b/drivers/xen/pciback/pciback.h
+@@ -25,6 +25,14 @@
+ #define _PCIB_op_pending	(1)
+ #define PCIB_op_pending		(1<<(_PCIB_op_pending))
+ 
++#define PCIBACK_TYPE_UNKNOWN       0
++#define PCIBACK_TYPE_PCIe_ENDPOINT 1
++#define PCIBACK_TYPE_PCIe_BRIDGE   2
++#define PCIBACK_TYPE_PCI_BRIDGE    3
++#define PCIBACK_TYPE_PCI           4
++
++#define DEV_CLASS_PCI_PCI_BRIDGE 0x0604
++
+ struct pciback_device {
+ 	void *pci_dev_data;
+ 	spinlock_t dev_lock;
+@@ -48,6 +56,13 @@
+ 	struct list_head config_fields;
+ 	int permissive;
+ 	int warned_on_write;
++	u32 dev_type;
++	int no_flr;
++	int exp_flr_offset;
++	int af_flr_offset;
++	int use_sbr;
++	int use_d3r;
++	u8 *cfg_space; /* saved config space for device */
+ };
+ 
+ /* Get/Put PCI Devices that are hidden from the PCI Backend Domain */
+@@ -56,10 +71,24 @@
+ 					    int slot, int func);
+ struct pci_dev *pcistub_get_pci_dev(struct pciback_device *pdev,
+ 				    struct pci_dev *dev);
+-void pcistub_put_pci_dev(struct pci_dev *dev);
++void pcistub_put_pci_dev(struct pci_dev *dev, int do_flr);
++
++/* Reference/unreference PCI Devices and stubs without changing the state */
++struct pci_dev *pcistub_ref_pci_dev(struct pci_dev *dev);
++void pcistub_unref_pci_dev(struct pci_dev *dev);
++
++/* Store/reload config space for devices */
++void pciback_store_config_space(struct pci_dev *dev);
++void pciback_reload_config_space(struct pci_dev *dev);
+ 
+ /* Ensure a device is turned off or reset */
+ void pciback_reset_device(struct pci_dev *pdev);
++
++/* Do a function level reset (or approximage functionality) for device */
++void pciback_flr_device(struct pci_dev *dev);
++
++/* Helper to classify the device type */
++void pciback_classify_device(struct pci_dev *dev);
+ 
+ /* Access a virtual configuration space for a PCI device */
+ int pciback_config_init(void);
+@@ -102,6 +131,10 @@
+ irqreturn_t pciback_handle_event(int irq, void *dev_id);
+ void pciback_do_op(struct work_struct *work);
+ 
++/* Parse and load device specific module parameters */
++int pciback_parse_device_params(const char *device_args, int type,
++					int (*add_func) (int domain, int bus, int slot, int func, int type));
++
+ int pciback_xenbus_register(void);
+ void pciback_xenbus_unregister(void);
+ 
+diff --git a/drivers/xen/pciback/pciback_ops.c b/drivers/xen/pciback/pciback_ops.c
+--- a/drivers/xen/pciback/pciback_ops.c
++++ b/drivers/xen/pciback/pciback_ops.c
+@@ -9,8 +9,177 @@
+ #include <xen/evtchn.h>
+ #include "pciback.h"
+ 
++#define PCIBACK_VENDOR_INTEL     0x8086
++#define PCIBACK_CLASS_ID_USB     0x0c03
++#define PCIBACK_CLASS_ID_VGA     0x0300
++#define PCIBACK_USB_FLRCTRL      0x4
++
++#define PCIBACK_IGFX_CAP09_OFFSET    0xa4
++#define PCIBACK_IGFX_CAP13_OFFSET    0xa4
++
++#define PCIBACK_IGFX_MEDIARST        0x0d
++#define PCIBACK_IGFX_MEDIARST_OFFSET 0xc0
++
+ int verbose_request = 0;
+ module_param(verbose_request, int, 0644);
++
++struct pcistub_sbr_entry {
++	struct list_head dev_list;
++	struct pci_dev *dev;
++};
++
++struct pcistub_sbr_list {
++	struct list_head dev_list;
++	struct pci_dev *bridge;
++	struct pci_dev *dev;
++	int find_all;
++	int err;
++};
++
++/* Used to store the config state so it can be restored after
++ * resets.
++ */
++void pciback_store_config_space(struct pci_dev *dev)
++{
++	struct pciback_dev_data *dev_data = pci_get_drvdata(dev);
++	u32 *ptr = (u32*)dev_data->cfg_space;
++	int i, count = dev->cfg_size/sizeof(u32);
++	
++	for (i = 0; i < count; i += sizeof(u32), ptr++)
++		pci_read_config_dword(dev, i, ptr);
++}
++
++/* Used to reload the config state after resets.
++ */
++void pciback_reload_config_space(struct pci_dev *dev)
++{
++	struct pciback_dev_data *dev_data = pci_get_drvdata(dev);
++	u32 *ptr = (u32*)dev_data->cfg_space;
++	int i, val, count = dev->cfg_size/sizeof(u32);
++
++	for (i = 0; i < count; i += sizeof(u32), ptr++) {
++		pci_read_config_dword(dev, i, &val);
++		if (val != *ptr)
++			pci_write_config_dword(dev, i, *ptr);
++	}
++}
++
++static int pciback_walk_bus_cb(struct pci_dev *dev, void *userdata)
++{
++	struct pcistub_sbr_list *list = (struct pcistub_sbr_list*)userdata;
++	struct pcistub_sbr_entry *entry;
++	struct pci_dev *dev_tmp;
++	
++	if (list->err != 0)
++		return 1;
++
++	/* For PCIe endpoints we are only looking for co-assigned functions */
++	if (!list->find_all &&
++		(dev->bus->number != list->dev->bus->number ||
++		 PCI_SLOT(dev->devfn) != PCI_SLOT(list->dev->devfn)))
++		return 1;
++
++	dev_tmp = pcistub_ref_pci_dev(dev);
++	if (dev_tmp == NULL) {
++		/* not controlled by pciback, fail */
++		list->err = ENXIO;
++		return 1;
++	}
++
++	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
++	if (entry == NULL) {
++		pcistub_unref_pci_dev(dev_tmp);
++		list->err = ENOMEM;
++		return 1;
++	}
++
++	entry->dev = dev_tmp;
++	list_add_tail(&entry->dev_list, &list->dev_list);
++	return 0;
++}
++
++static void pciback_cleanup_sbr_list(struct pcistub_sbr_list *list)
++{
++	struct pcistub_sbr_entry *entry;
++
++	list_for_each_entry(entry, &list->dev_list, dev_list) {
++		pcistub_unref_pci_dev(entry->dev);
++		kfree(entry);
++	}
++}
++
++/* Routine to find all devices and bridges that need to be reset
++ * during a secondary bus reset. For PCIe this is simply all the
++ * functions on the particular device. For PCI this is all devices
++ * and bridges below the topmost PCI/PCI-X bridge. Note for PCI, 
++ * there is at least one something->PCI/PCI-X bridge to find since
++ * the device is not on the host bus 0 and is on a PCI bus.
++ */
++static int pciback_get_sbr_list(struct pci_dev *dev, 
++	struct pcistub_sbr_list *list, int pcie_endpoint)
++{
++	struct pci_dev *bridge = dev->bus->self;
++	struct pci_dev *last = NULL;
++	int exp_pos;
++	u16 exp_caps = 0;
++
++	list->err = 0;
++	list->dev = dev;
++	INIT_LIST_HEAD(&list->dev_list);
++
++	if (!pcie_endpoint) {
++		while (bridge) {
++			/* Looking for the uppermost PCI/PCI-X bridge. If it is not PCIe then 
++			 * this is a PCI/PCI-X bridge. If it is PCIe then except the PCIe to 
++			 * PCI/PCI-X type 7, the rest of the bridge types are PCIe so the last 
++			 * bridge encountered was the topmost PCI/PCI-X bridge.
++			 */
++			exp_pos = pci_find_capability(bridge, PCI_CAP_ID_EXP);
++			if (exp_pos != 0) {
++				pci_read_config_word(bridge, exp_pos + PCI_EXP_FLAGS, &exp_caps);
++				if (((exp_caps & PCI_EXP_FLAGS_TYPE) >> 4) != PCI_EXP_TYPE_PCI_BRIDGE)
++					break; /* don't want it in the list if it is a PCIe bridge */
++			}
++			last = bridge;
++			bridge = last->bus->self;
++		}
++		list->bridge = last;
++		list->find_all = 1; /* find all devices/bridges below the topmost */
++	}
++	else {
++		if (bridge) {
++			/* For PCIe, SBR logic is limited to PCIe endpoints behind a root/switch
++			 * port.
++			 */
++			exp_pos = pci_find_capability(bridge, PCI_CAP_ID_EXP);
++			if (likely(exp_pos != 0)) {
++				pci_read_config_word(bridge, exp_pos + PCI_EXP_FLAGS, &exp_caps);
++				exp_caps = ((exp_caps & PCI_EXP_FLAGS_TYPE) >> 4);
++				if (exp_caps == PCI_EXP_TYPE_ROOT_PORT ||
++					exp_caps == PCI_EXP_TYPE_UPSTREAM ||
++					exp_caps == PCI_EXP_TYPE_DOWNSTREAM)
++					last = bridge;
++			}
++		}
++		list->bridge = last;
++		list->find_all = 0; /* find just functions on this slot */
++	}
++
++	/* Sanity check, there may not be any appropriate bridge to reset */
++	if (!list->bridge) {
++		dev_dbg(&dev->dev, "No appropriate bridge to reset\n");
++		return ENXIO;
++	}
++
++	pci_walk_bus(list->bridge->subordinate, pciback_walk_bus_cb, list);
++
++	if (list->err) {
++		pciback_cleanup_sbr_list(list);
++		return list->err;
++	}
++
++	return 0;
++}
+ 
+ /* Ensure a device is "turned off" and ready to be exported.
+  * (Also see pciback_config_reset to ensure virtual configuration space is
+@@ -18,7 +186,7 @@
+  */
+ void pciback_reset_device(struct pci_dev *dev)
+ {
+-	u16 cmd;
++	u16 cmd = 0;
+ 
+ 	/* Disable devices (but not bridges) */
+ 	if (dev->hdr_type == PCI_HEADER_TYPE_NORMAL) {
+@@ -38,6 +206,425 @@
+ 		}
+ 	}
+ }
++
++/* Do a PCIe type function level reset for a single function on this
++ * device.
++ */
++static void pciback_do_pcie_flr(struct pci_dev *dev, int exp_pos)
++{
++	u16 status = 0;
++	
++	dev_dbg(&dev->dev, "doing PCIe FLR\n");	
++
++	pci_block_user_cfg_access(dev);
++
++	/* Wait for Transaction Pending bit clean */
++	msleep(100);
++	pci_read_config_word(dev, exp_pos + PCI_EXP_DEVSTA, &status);
++	if (status & PCI_EXP_DEVSTA_TRPND) {
++		dev_dbg(&dev->dev, "Busy after 100ms while trying to reset; sleeping for 1 second\n");
++		ssleep(1);
++		pci_read_config_word(dev, exp_pos + PCI_EXP_DEVSTA, &status);
++		if (status & PCI_EXP_DEVSTA_TRPND)
++			dev_warn(&dev->dev, "Still busy after 1s; proceeding with reset anyway\n");
++	}
++
++	pci_write_config_word(dev, exp_pos + PCI_EXP_DEVCTL, PCI_EXP_DEVCTL_BCR_FLR);
++	mdelay(200);
++
++	pciback_reload_config_space(dev);
++
++	pci_unblock_user_cfg_access(dev);
++}
++
++/* Do a PCI type function level reset for a single function on this
++ * device. This uses the Advanced Features Capability extensions to
++ * the PCI spec.
++ */
++static void pciback_do_pci_flr(struct pci_dev *dev, int af_pos, int clear_cmd)
++{
++	u8 status = 0;
++
++	dev_dbg(&dev->dev, "doing PCI FLR\n");
++
++	pci_block_user_cfg_access(dev);
++
++	/* Clear the command register to prevent new transactions */
++	if (clear_cmd)
++		pci_write_config_word(dev, PCI_COMMAND, 0);
++
++	/* Wait for Transaction Pending bit clean */
++	msleep(100);
++	pci_read_config_byte(dev, af_pos + PCI_AF_STATUS, &status);
++	if (status & PCI_AF_STATUS_TP) {
++		dev_dbg(&dev->dev, "Busy after 100ms while trying to reset; sleeping for 1 second\n");
++		ssleep(1);
++		pci_read_config_byte(dev, af_pos + PCI_AF_STATUS, &status);
++		if (status & PCI_AF_STATUS_TP)
++			dev_warn(&dev->dev, "Still busy after 1s; proceeding with reset anyway\n");
++	}
++
++	pci_write_config_byte(dev, af_pos + PCI_AF_CTRL, PCI_AF_CTRL_FLR);
++	mdelay(200);
++
++	pciback_reload_config_space(dev);
++
++	pci_unblock_user_cfg_access(dev);
++}
++
++/* Vendor specific resets. These can be set in the vendor specific
++ * capabilities structures. Currently only the Intel USB and iGFX
++ * reset is supported.
++ */
++static int pciback_do_vendor_specific_reset(struct pci_dev *dev)
++{
++	struct pci_dev *gmch;
++	int vendor_pos, i;
++	u32 reg32 = 0;
++	u16 device_id, cmd;	
++	u8 reg8 = 0;
++
++	dev_dbg(&dev->dev, "doing vendor specific resets\n");	
++
++	if (dev->vendor != PCIBACK_VENDOR_INTEL)
++		return -ENXIO;
++
++	if ((dev->class >> 8) == PCIBACK_CLASS_ID_VGA) {
++		if (dev->bus->number != 0 || dev->devfn != PCI_DEVFN(2,0))
++			return -ENXIO;
++
++		/* Locate the GMCH (north bridge) and test for specific Intel devices */
++		gmch = pci_get_bus_and_slot(0, PCI_DEVFN(0,0));
++		if (!gmch)
++			return -ENXIO;
++
++		device_id = gmch->device;
++		pci_dev_put(gmch);
++
++		if (device_id != PCI_DEVICE_ID_INTEL_GMCHGM45)
++			return -ENXIO;
++
++		/* Correct device and platform, assume vendor specific offset */
++		pci_read_config_dword(dev, PCIBACK_IGFX_CAP09_OFFSET, &reg32);
++		if ((reg32 & 0x000000FF) != PCI_CAP_ID_VNDR ||
++			((reg32 >> 16) & 0x000000FF) != 0x06 ||
++			((reg32 >> 24) & 0x000000F0) != 0x20)
++			return -ENXIO;
++
++		vendor_pos = PCIBACK_IGFX_CAP09_OFFSET;
++	} else if ((dev->class >> 8) == PCIBACK_CLASS_ID_USB) {
++		vendor_pos = pci_find_capability(dev, PCI_CAP_ID_VNDR);
++		if (vendor_pos == 0)
++			return -ENXIO;
++	}
++	else
++		return -ENXIO;	
++
++	if ((dev->class >> 8) == PCIBACK_CLASS_ID_VGA) {
++		pci_write_config_byte(dev, PCIBACK_IGFX_MEDIARST_OFFSET, PCIBACK_IGFX_MEDIARST);
++		for (i = 0; i <= 10; i++) {
++			msleep(100);
++			pci_read_config_byte(dev, PCIBACK_IGFX_MEDIARST_OFFSET, &reg8);
++			if ((reg8 & 0x01) == 0)
++				break;
++			if (i == 10) {
++				dev_warn(&dev->dev, "media not reset after 1s; skipping FLR\n");
++				goto out;
++			}
++		}
++        
++		/* This specific reset will hang if the command register does not have
++		 * memory space access enabled */
++		pci_read_config_word(dev, PCI_COMMAND, &cmd);
++		pci_write_config_word(dev, PCI_COMMAND, (cmd | PCI_COMMAND_MEMORY));
++		/* The rest is the same as a PCI AF FLR - use the same routine */
++		pciback_do_pci_flr(dev, vendor_pos, 0);
++		pci_write_config_word(dev, PCI_COMMAND, cmd);
++	} else {
++		pci_block_user_cfg_access(dev);
++
++		pci_write_config_byte(dev, vendor_pos + PCIBACK_USB_FLRCTRL, 1);
++		mdelay(200);
++
++		pciback_reload_config_space(dev);
++
++		pci_unblock_user_cfg_access(dev);
++	}
++
++out:
++	return 0;
++}
++
++/* Use a D0-D3-D0 device state transition to reset the device. This
++ * is a good enough reset for some devices (like NICs).
++ */
++static int pciback_do_dstate_transition_reset(struct pci_dev *dev)
++{
++	int pm_pos;
++	u32 pm_ctl = 0;
++
++	pm_pos = pci_find_capability(dev, PCI_CAP_ID_PM);
++	if (pm_pos == 0)
++		return -ENXIO;
++
++	dev_dbg(&dev->dev, "doing Dstate transition reset\n");	
++
++	/* No_Soft_Reset - When set 1, this bit indicates that devices
++	 * transitioning from D3hot to D0 because of PowerState commands 
++	 * do not perform an internal reset.
++	 */
++	pci_read_config_dword(dev, pm_pos + PCI_PM_CTRL, &pm_ctl);
++	if (pm_ctl & PCI_PM_CTRL_NO_SOFT_RESET)
++		return -ENXIO;
++	
++	pci_block_user_cfg_access(dev);
++
++	pm_ctl &= ~PCI_PM_CTRL_STATE_MASK;
++	pm_ctl |= PCI_PM_CTRL_D3HOT;
++	pci_write_config_word(dev, pm_pos + PCI_PM_CTRL, pm_ctl);
++	mdelay(10);
++
++	pm_ctl &= ~PCI_PM_CTRL_STATE_MASK;
++	pm_ctl |= PCI_PM_CTRL_D0;
++	pci_write_config_word(dev, pm_pos + PCI_PM_CTRL, pm_ctl);
++	mdelay(10);
++
++	pciback_reload_config_space(dev);
++
++	pci_unblock_user_cfg_access(dev);
++	
++	return 0;
++}
++
++/* Do a secondary bus reset on a bridge. This is only done if all
++ * co-assignment rules are satisfied and if it was explicitly 
++ * requested via pciback parameters.
++ */
++static int pciback_do_secondary_bus_reset(struct pci_dev *dev, u32 dev_type)
++{
++	struct pcistub_sbr_list sbr_list;
++	struct pcistub_sbr_entry *entry;
++	u16 pci_bctl = 0;
++	int err = 0;
++
++	/* Call helper to get the device list needed for the device type. */
++	err = pciback_get_sbr_list(dev, &sbr_list,
++			(dev_type == PCIBACK_TYPE_PCIe_ENDPOINT ? 1 : 0));
++	if (err) {
++		dev_warn(&dev->dev, 
++			"secondary bus reset failed for device - all functions need to be co-assigned - err: %d\n", err);
++		return err;
++	}
++
++	pci_block_user_cfg_access(dev);
++
++	/* Reset the secondary bus and restore the PCI space for all the devfn found above.
++	 */
++	pci_read_config_word(sbr_list.bridge, PCI_BRIDGE_CONTROL, &pci_bctl);
++	pci_write_config_word(sbr_list.bridge, PCI_BRIDGE_CONTROL, pci_bctl | PCI_BRIDGE_CTL_BUS_RESET);
++	msleep(200);
++	pci_write_config_word(sbr_list.bridge, PCI_BRIDGE_CONTROL, pci_bctl);
++	msleep(200);
++	
++	list_for_each_entry(entry, &sbr_list.dev_list, dev_list) {
++		pciback_reload_config_space(entry->dev);
++	}
++	
++	pci_unblock_user_cfg_access(dev);
++
++	pciback_cleanup_sbr_list(&sbr_list);
++
++	return 0;
++}
++
++/* This function is used to do a function level reset on a singe 
++ * device/function. FLRs must be done on devices before they are 
++ * unassigned from one domain and passed through to another. The 
++ * preferred method is to do an actual FLR on the device but the 
++ * functionality may not be present or exposed. In the later case
++ * we attempt to locate the capability even though it is not 
++ * chained into the capabilities list.
++ *
++ * In some cases, there is no way to perform the actual FLR so we 
++ * fall back to some alternate methods (which are not as effective
++ * or useful).
++ */
++void pciback_flr_device(struct pci_dev *dev)
++{
++	struct pciback_dev_data *dev_data = pci_get_drvdata(dev);
++	int err = 0;
++
++	if (dev_data->no_flr) {
++		dev_dbg(&dev->dev, "FLR disabled for device\n");
++		return;
++	}
++	dev_dbg(&dev->dev, "FLR invoked for device\n");
++
++	do {
++		/* First, always try to do an FLR */
++		if (dev_data->dev_type == PCIBACK_TYPE_PCIe_ENDPOINT &&
++			dev_data->exp_flr_offset != 0) {
++			pciback_do_pcie_flr(dev, dev_data->exp_flr_offset);
++			break;
++		}
++		if (dev_data->dev_type == PCIBACK_TYPE_PCI &&
++			dev_data->af_flr_offset != 0) {
++			pciback_do_pci_flr(dev, dev_data->af_flr_offset, 1);
++			break;
++		}
++		
++		/* Next for integrated devices on the host bus 0, try some other methods */
++		if (dev->bus->number == 0) {
++			err = pciback_do_vendor_specific_reset(dev);
++			if (err && dev_data->use_d3r)
++				err = pciback_do_dstate_transition_reset(dev);
++			if (err)
++				dev_warn(&dev->dev, "FLR functionality not supported; "
++						"attempts to use vendor FLR or D-states unsuccessful\n");
++			break;
++		}
++
++		/* Else attempt a secondary bus reset if all conditions are met */
++		if (dev_data->use_sbr) {
++			err = pciback_do_secondary_bus_reset(dev, dev_data->dev_type);
++			if (err)
++				dev_warn(&dev->dev, "FLR functionality not supported; "
++						"attempts to use secondary bus reset unsuccessful;\n");
++			break;
++		}
++
++		err = -ENODEV;		
++	} while (0);
++
++	if (err)
++		dev_warn(&dev->dev, "FLR not performed for device\n");
++}
++
++/* Helper used to location the FLR capabilities for a PCIe device.
++ * When the capability cannot be found in the chain but is present,
++ * special logic is used to attempt to locate functionality.
++ *
++ * returns: the offset to the capability, zero if not found.
++ */
++static int pciback_find_pcie_flr_caps(struct pci_dev *dev)
++{
++	int exp_pos;
++	u32 cap = 0;
++
++	/* First look for the PCIe FLR capabilities using the capabilities list */
++	exp_pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
++	if (exp_pos) {
++		pci_read_config_dword(dev, exp_pos + PCI_EXP_DEVCAP, &cap);
++		if (cap & PCI_EXP_DEVCAP_FLR) {
++			return exp_pos;
++		}
++	}
++
++	return 0;
++}
++
++/* Helper used to location the AF FLR capabilities for a PCI device.
++ * When the capability cannot be found in the chain but is present,
++ * special logic is used to attempt to locate functionality.
++ *
++ * returns: the offset to the capability, zero if not found.
++ */
++static int pciback_find_pci_flr_caps(struct pci_dev *dev)
++{
++	struct pci_dev *gmch;
++	int af_pos;
++	u16 device_id;
++	u8 cap = 0, reg8 = 0;
++
++	/* First look for the PCI AF capabilities for FLR using the capabilities list. This
++	 * is only used on the devices on the root/host bus (integrated devices). 
++	 */
++	if (dev->bus->number != 0)
++		return 0;
++
++	af_pos = pci_find_capability(dev, PCI_CAP_ID_AF);
++	if (af_pos) {
++		pci_read_config_byte(dev, af_pos + PCI_AF_CAP, &cap);
++		if (cap & PCI_AF_CAP_FLR) {
++			return af_pos;
++		}
++	}
++
++	/* Next look for the unchained AF capabilities for FLR using specific 
++	 * logic. Currently only the graphics device on the Intel Q45 etc 
++	 * systems has special logic for locating the hidden FLR caps.
++     */
++	do {
++		if (dev->bus->number != 0 || dev->devfn != PCI_DEVFN(2,0) ||
++			dev->vendor != PCIBACK_VENDOR_INTEL || (dev->class >> 8) != PCIBACK_CLASS_ID_VGA)
++			break;
++
++		/* Locate the GMCH (north bridge) and test for specific Intel devices */
++		gmch = pci_get_bus_and_slot(0, PCI_DEVFN(0,0));
++		if (!gmch)
++			break;
++
++		device_id = gmch->device;
++		pci_dev_put(gmch);
++
++		if (device_id != PCI_DEVICE_ID_INTEL_GMCHQ45 &&
++			device_id != PCI_DEVICE_ID_INTEL_GMCHG45 &&
++			device_id != PCI_DEVICE_ID_INTEL_GMCHG41)
++			break;
++		
++		/* Correct device and platform, assume AF offset */
++		af_pos = PCIBACK_IGFX_CAP13_OFFSET;
++		pci_read_config_byte(dev, af_pos + PCI_AF_LENGTH, &reg8);
++		if (reg8 == 0x06) {
++			pci_read_config_byte(dev, af_pos + PCI_AF_CAP, &cap);
++			if (cap & PCI_AF_CAP_FLR) {
++				return af_pos;
++			}
++		}
++	} while (0);
++
++	/* Else not found */
++	return 0;
++}
++
++/* Classify the device, specifically determine if it is PCIe/PCI 
++ * and whether it is a PCIe endpoint, bridge, or other PCI device. 
++ */
++void pciback_classify_device(struct pci_dev *dev)
++{
++	struct pciback_dev_data *dev_data;
++	int exp_pos;
++	u16 exp_caps = 0;
++
++	dev_data = pci_get_drvdata(dev);
++	dev_data->dev_type = PCIBACK_TYPE_UNKNOWN;
++
++	exp_pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
++	
++	if ((dev->class >> 8) != DEV_CLASS_PCI_PCI_BRIDGE) {
++		if (exp_pos != 0) {
++			dev_data->dev_type = PCIBACK_TYPE_PCIe_ENDPOINT;
++			dev_data->exp_flr_offset = pciback_find_pcie_flr_caps(dev);
++		} else {
++			dev_data->dev_type = PCIBACK_TYPE_PCI;
++			dev_data->af_flr_offset = pciback_find_pci_flr_caps(dev);
++		}
++		goto classify_done;
++	}
++	
++	if (exp_pos == 0) {
++		dev_data->dev_type = PCIBACK_TYPE_PCI_BRIDGE;
++		goto classify_done;
++	}
++
++	pci_read_config_word(dev, exp_pos + PCI_EXP_FLAGS, &exp_caps);
++	dev_data->dev_type = (((exp_caps & PCI_EXP_FLAGS_TYPE) >> 4) == PCI_EXP_TYPE_PCI_BRIDGE) ? PCIBACK_TYPE_PCI_BRIDGE : PCIBACK_TYPE_PCIe_BRIDGE;
++
++classify_done:
++
++	return;
++}
++
+ extern wait_queue_head_t aer_wait_queue;
+ extern struct workqueue_struct *pciback_wq;
+ /*
+@@ -132,3 +719,51 @@
+ 
+ 	return IRQ_HANDLED;
+ }
++
++/* Helper routine used to parse command line parameters passed to the 
++ * pciback module from the boot loader. These params all have the form
++ * of a list of one or more devices, e.g.:
++ * (XXXX:XX:XX.X)(XXXX:XX:XX.X)
++ * Which is: (domain/segment:bus:dev.func)
++ */
++int pciback_parse_device_params(const char *device_args, int type, 
++			int (*add_func) (int domain, int bus, int slot, int func, int type))
++{
++	int pos = 0;
++	int err = 0;
++	int domain, bus, slot, func;
++	int parsed;
++
++	if (device_args && *device_args) {
++		do {
++			parsed = 0;
++
++			err = sscanf(device_args + pos,
++				     " (%x:%x:%x.%x) %n",
++				     &domain, &bus, &slot, &func, &parsed);
++			if (err != 4) {
++				domain = 0;
++				err = sscanf(device_args + pos,
++					     " (%x:%x.%x) %n",
++					     &bus, &slot, &func, &parsed);
++				if (err != 3)
++					goto parse_error;
++			}
++
++			err = add_func(domain, bus, slot, func, type);
++			if (err)
++				goto out;
++
++			/* if parsed<=0, we've reached the end of the string */
++			pos += parsed;
++		} while (parsed > 0 && device_args[pos]);
++	}
++
++out:
++	return err;
++
++parse_error:
++	printk(KERN_ERR "pciback: Error parsing device parameters \"%s\" at \"%s\"\n",
++	       device_args, device_args + pos);
++	return -EINVAL;
++}
+diff --git a/drivers/xen/pciback/slot.c b/drivers/xen/pciback/slot.c
+--- a/drivers/xen/pciback/slot.c
++++ b/drivers/xen/pciback/slot.c
+@@ -109,7 +109,7 @@
+ 	spin_unlock_irqrestore(&slot_dev->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev);
++		pcistub_put_pci_dev(found_dev, 0);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -149,7 +149,7 @@
+ 		for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
+ 			dev = slot_dev->slots[bus][slot];
+ 			if (dev != NULL)
+-				pcistub_put_pci_dev(dev);
++				pcistub_put_pci_dev(dev, 0);
+ 		}
+ 
+ 	kfree(slot_dev);
+diff --git a/drivers/xen/pciback/vpci.c b/drivers/xen/pciback/vpci.c
+--- a/drivers/xen/pciback/vpci.c
++++ b/drivers/xen/pciback/vpci.c
+@@ -162,7 +162,7 @@
+ 	spin_unlock_irqrestore(&vpci_dev->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev);
++		pcistub_put_pci_dev(found_dev, 0);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -202,7 +202,7 @@
+ 		list_for_each_entry_safe(e, tmp, &vpci_dev->dev_list[slot],
+ 					 list) {
+ 			list_del(&e->list);
+-			pcistub_put_pci_dev(e->dev);
++			pcistub_put_pci_dev(e->dev, 0);
+ 			kfree(e);
+ 		}
+ 	}
+diff --git a/include/linux/pci_ids.h b/include/linux/pci_ids.h
+--- a/include/linux/pci_ids.h
++++ b/include/linux/pci_ids.h
+@@ -2501,6 +2501,14 @@
+ #define PCI_DEVICE_ID_INTEL_IXP2800	0x9004
+ #define PCI_DEVICE_ID_INTEL_S21152BB	0xb152
+ 
++#define PCI_DEVICE_ID_INTEL_GMCHQ45 0x2e10
++#define PCI_DEVICE_ID_INTEL_GMCHG45 0x2e20
++#define PCI_DEVICE_ID_INTEL_MCHP45  0x2e20
++#define PCI_DEVICE_ID_INTEL_GMCHG41 0x2e30
++#define PCI_DEVICE_ID_INTEL_GMCHGM45 0x2a40
++
++#define PCI_DEVICE_ID_INTEL_GMCHG41 0x2e30
++
+ #define PCI_VENDOR_ID_SCALEMP		0x8686
+ #define PCI_DEVICE_ID_SCALEMP_VSMP_CTL	0x1010
+ 
+diff --git a/include/linux/pci_regs.h b/include/linux/pci_regs.h
+--- a/include/linux/pci_regs.h
++++ b/include/linux/pci_regs.h
+@@ -239,6 +240,10 @@
+ #define  PCI_PM_CTRL_DATA_SEL_MASK	0x1e00	/* Data select (??) */
+ #define  PCI_PM_CTRL_DATA_SCALE_MASK	0x6000	/* Data scale (??) */
+ #define  PCI_PM_CTRL_PME_STATUS	0x8000	/* PME pin status */
++#define  PCI_PM_CTRL_D0 0x0
++#define  PCI_PM_CTRL_D1 0x1
++#define  PCI_PM_CTRL_D2 0x2
++#define  PCI_PM_CTRL_D3HOT 0x3
+ #define PCI_PM_PPB_EXTENSIONS	6	/* PPB support extensions (??) */
+ #define  PCI_PM_PPB_B2_B3	0x40	/* Stop clock when in D3hot (??) */
+ #define  PCI_PM_BPCC_ENABLE	0x80	/* Bus power/clock control enable (??) */

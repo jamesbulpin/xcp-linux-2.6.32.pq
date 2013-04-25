@@ -1,0 +1,31 @@
+Close block devices when the pv drivers take over and flush the buffer cache.
+- close and free the block devices in qemu when we switch to pv drivers in
+  the guest
+- use BLKFLSBUF to flush the buffer cache, both in qemu and in blkback
+
+diff -r 2272f1761896 drivers/xen/blkback/vbd.c
+--- a/drivers/xen/blkback/vbd.c	Wed Apr 11 17:18:43 2007 +0100
++++ b/drivers/xen/blkback/vbd.c	Wed Apr 18 14:51:31 2007 +0100
+@@ -31,6 +31,8 @@
+  */
+ 
+ #include "common.h"
++#include <linux/fs.h>
++#include <linux/buffer_head.h>
+ 
+ #define vbd_sz(_v)   ((_v)->bdev->bd_part ?				\
+ 	(_v)->bdev->bd_part->nr_sects : (_v)->bdev->bd_disk->capacity)
+@@ -93,6 +95,13 @@ int vbd_create(blkif_t *blkif, blkif_vde
+ 
+ void vbd_free(struct vbd *vbd)
+ {
++	if (vbd->bdev) {
++		/* BLKFLSBUF */
++		lock_kernel();
++		fsync_bdev(vbd->bdev);
++		invalidate_bdev(vbd->bdev);
++		unlock_kernel();
++	}
+ 	if (vbd->bdev)
+ 		blkdev_put(vbd->bdev);
+ 	vbd->bdev = NULL;

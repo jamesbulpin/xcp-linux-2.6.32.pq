@@ -1,0 +1,56 @@
+blkfront: Klog the unclean release path
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+
+diff --git a/drivers/xen/blkfront/blkfront.c b/drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c
++++ b/drivers/xen/blkfront/blkfront.c
+@@ -76,6 +76,10 @@
+ static void blkif_completion(struct blk_shadow *);
+ static void blkif_free(struct blkfront_info *, int);
+ 
++#ifndef disk_to_dev
++#define disk_to_dev(_disk) (&(_disk)->dev)
++#endif
++
+ /**
+  * Entry point to this code when a new device is created.  Allocate the basic
+  * structures and the ring buffer for communication with the backend, and
+@@ -388,6 +392,10 @@
+ 	mutex_lock(&bdev->bd_mutex);
+ 	info = disk->private_data;
+ 
++	dev_warn(disk_to_dev(disk),
++		 "%s was hot-unplugged, %d stale handles\n",
++		 xbdev->nodename, bdev->bd_openers);
++
+ 	if (info && !bdev->bd_openers) {
+ 		xlvbd_release_gendisk(info);
+ 		disk->private_data = NULL;
+@@ -478,7 +486,8 @@
+ 
+ int blkif_release(struct inode *inode, struct file *filep)
+ {
+-	struct gendisk *disk = inode->i_bdev->bd_disk;
++	struct block_device *bdev = inode->i_bdev;
++	struct gendisk *disk = bdev->bd_disk;
+ 	struct blkfront_info *info = disk->private_data;
+ 	struct xenbus_device *xbdev;
+ 
+@@ -495,6 +504,7 @@
+ 
+ 	if (xbdev && xbdev->state == XenbusStateClosing) {
+ 		/* pending switch to state closed */
++		dev_info(disk_to_dev(bdev->bd_disk), "releasing disk\n");
+ 		xlvbd_release_gendisk(info);
+ 		xenbus_frontend_closed(info->xbdev);
+ 	}
+@@ -503,6 +513,7 @@
+ 
+ 	if (!xbdev) {
+ 		/* sudden device removal */
++		dev_info(disk_to_dev(bdev->bd_disk), "releasing disk\n");
+ 		xlvbd_release_gendisk(info);
+ 		disk->private_data = NULL;
+ 		kfree(info);

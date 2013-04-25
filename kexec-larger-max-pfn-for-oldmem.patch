@@ -1,0 +1,50 @@
+Support larger maximum pfn for accessing oldmem so we can get at all
+the RAM which the 64 bit hypervisor could see.
+
+
+diff -r b17a2706e17c arch/x86/kernel/e820.c
+--- a/arch/x86/kernel/e820.c	Thu Jul 23 10:01:55 2009 +0100
++++ b/arch/x86/kernel/e820.c	Fri Jul 24 12:07:39 2009 +0100
+@@ -1056,7 +1056,6 @@
+ {
+ 	int i;
+ 	unsigned long last_pfn = 0;
+-	unsigned long max_arch_pfn = MAX_ARCH_PFN;
+ 
+ 	for (i = 0; i < e820.nr_map; i++) {
+ 		struct e820entry *ei = &e820.map[i];
+@@ -1079,11 +1078,7 @@
+ 			last_pfn = end_pfn;
+ 	}
+ 
+-	if (last_pfn > max_arch_pfn)
+-		last_pfn = max_arch_pfn;
+-
+-	printk(KERN_INFO "last_pfn = %#lx max_arch_pfn = %#lx\n",
+-			 last_pfn, max_arch_pfn);
++	printk(KERN_INFO "last_pfn = %#lx\n", last_pfn);
+ 	return last_pfn;
+ }
+ unsigned long __init e820_end_of_ram_pfn(void)
+@@ -1095,6 +1090,12 @@
+ {
+ 	return e820_end_pfn(1UL<<(32 - PAGE_SHIFT), E820_RAM);
+ }
++
++unsigned long __init e820_end_of_kdump_ram_pfn(void)
++{
++	return e820_end_pfn(~0UL, E820_RAM);
++}
++
+ /*
+  * Finds an active region in the address range from start_pfn to last_pfn and
+  * returns its range in ei_startpfn and ei_endpfn for the e820 entry.
+@@ -1210,7 +1211,7 @@
+ 		 * the real mem size before original memory map is
+ 		 * reset.
+ 		 */
+-		saved_max_pfn = e820_end_of_ram_pfn();
++		saved_max_pfn = e820_end_of_kdump_ram_pfn();
+ #endif
+ 		e820.nr_map = 0;
+ 		userdef = 1;

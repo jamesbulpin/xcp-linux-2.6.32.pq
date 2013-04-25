@@ -1,0 +1,29 @@
+CA-84641: fix race condition in blktap2 when joining a page pool
+
+diff -r 6c3f6510c958 drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Wed Jul 11 15:52:05 2012 +0100
++++ b/drivers/xen/blktap2/request.c	Mon Jul 16 10:49:43 2012 +0100
+@@ -21,6 +21,7 @@
+ #define POOL_MIN_REQS            BLKTAP_RING_SIZE
+ 
+ static struct kset *pool_set;
++static DEFINE_MUTEX(pool_set_mutex);
+ 
+ #define kobj_to_pool(_kobj) \
+ 	container_of(_kobj, struct blktap_page_pool, kobj)
+@@ -365,10 +366,15 @@
+ {
+ 	struct kobject *kobj;
+ 
++	mutex_lock(&pool_set_mutex);
++
+ 	kobj = __blktap_kset_find_obj(pool_set, name);
+ 	if (!kobj)
+ 		kobj = blktap_page_pool_create(name,
+ 					       POOL_DEFAULT_PAGES);
++
++	mutex_unlock(&pool_set_mutex);
++
+ 	if (!kobj)
+ 		return ERR_PTR(-ENOMEM);
+ 

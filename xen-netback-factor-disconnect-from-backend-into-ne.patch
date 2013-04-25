@@ -1,0 +1,50 @@
+From e55e7f3e9f355ba02826247914da56184d4375a7 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Tue, 23 Feb 2010 11:58:26 +0000
+Subject: [PATCH] xen: netback: factor disconnect from backend into new function.
+
+Makes subsequent patches cleaner.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+---
+ drivers/xen/netback/xenbus.c |   16 ++++++++++++----
+ 1 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/xen/netback/xenbus.c b/drivers/xen/netback/xenbus.c
+index 9022c99..b114aa4 100644
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -213,6 +213,16 @@ static void backend_create_netif(struct backend_info *be)
+ }
+ 
+ 
++static void disconnect_backend(struct xenbus_device *dev)
++{
++	struct backend_info *be = dev_get_drvdata(&dev->dev);
++
++	if (be->netif) {
++		netif_disconnect(be->netif);
++		be->netif = NULL;
++	}
++}
++
+ /**
+  * Callback received when the frontend's state changes.
+  */
+@@ -246,11 +256,9 @@ static void frontend_changed(struct xenbus_device *dev,
+ 		break;
+ 
+ 	case XenbusStateClosing:
+-		if (be->netif) {
++		if (be->netif)
+ 			kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
+-			netif_disconnect(be->netif);
+-			be->netif = NULL;
+-		}
++		disconnect_backend(dev);
+ 		xenbus_switch_state(dev, XenbusStateClosing);
+ 		break;
+ 
+-- 
+1.5.6.5
+

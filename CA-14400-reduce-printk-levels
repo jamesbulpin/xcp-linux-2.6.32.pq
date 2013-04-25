@@ -1,0 +1,108 @@
+diff -r c4ed02a862f0 drivers/net/bonding/bond_sysfs.c
+--- a/drivers/net/bonding/bond_sysfs.c	Wed Jun 17 14:12:56 2009 +0100
++++ b/drivers/net/bonding/bond_sysfs.c	Wed Jun 17 14:21:39 2009 +0100
+@@ -276,7 +276,7 @@
+ 		read_lock(&bond->lock);
+ 		bond_for_each_slave(bond, slave, i)
+ 			if (slave->dev == dev) {
+-				pr_err(DRV_NAME
++				pr_info(DRV_NAME
+ 				       ": %s: Interface %s is already enslaved!\n",
+ 				       bond->dev->name, ifname);
+ 				ret = -EPERM;
+diff -r c4ed02a862f0 drivers/xen/blkfront/blkfront.c
+--- a/drivers/xen/blkfront/blkfront.c	Wed Jun 17 14:12:56 2009 +0100
++++ b/drivers/xen/blkfront/blkfront.c	Wed Jun 17 14:21:39 2009 +0100
+@@ -299,7 +299,7 @@
+ 		mutex_lock(&bd->bd_mutex);
+ #endif
+ 		if (info->users > 0)
+-			xenbus_dev_error(dev, -EBUSY,
++			xenbus_dev_error_loglevel(dev, -EBUSY, KERN_DEBUG, 
+ 					 "Device in use; refusing to close");
+ 		else
+ 			blkfront_closing(dev);
+diff -r c4ed02a862f0 drivers/xen/xenbus/xenbus_client.c
+--- a/drivers/xen/xenbus/xenbus_client.c	Wed Jun 17 14:12:56 2009 +0100
++++ b/drivers/xen/xenbus/xenbus_client.c	Wed Jun 17 14:21:39 2009 +0100
+@@ -235,7 +235,7 @@
+ }
+ 
+ 
+-static void _dev_error(struct xenbus_device *dev, int err,
++static void _dev_error(struct xenbus_device *dev, int err, const char *loglevel,
+ 			const char *fmt, va_list ap)
+ {
+ 	int ret;
+@@ -252,7 +252,8 @@
+ 
+ 	BUG_ON(len + ret > PRINTF_BUFFER_SIZE-1);
+ 
+-	dev_err(&dev->dev, "%s\n", printf_buffer);
++ 	printk("%sxenbus dev %s error %s\n", loglevel, dev->nodename,
++  	       printf_buffer);
+ 
+ 	path_buffer = error_path(dev);
+ 
+@@ -293,7 +294,7 @@
+ 	va_list ap;
+ 
+ 	va_start(ap, fmt);
+-	_dev_error(dev, err, fmt, ap);
++	_dev_error(dev, err, KERN_WARNING, fmt, ap);
+ 	va_end(ap);
+ }
+ EXPORT_SYMBOL_GPL(xenbus_dev_error);
+@@ -309,13 +310,25 @@
+  * xenbus_switch_state(dev, NULL, XenbusStateClosing) to schedule an orderly
+  * closedown of this driver and its peer.
+  */
++
++void xenbus_dev_error_loglevel(struct xenbus_device *dev, int err, const char *loglevel, const char *fmt,
++		      ...)
++{
++	va_list ap;
++
++	va_start(ap, fmt);
++	_dev_error(dev, err, loglevel, fmt, ap);
++	va_end(ap);
++}
++EXPORT_SYMBOL_GPL(xenbus_dev_error_loglevel);
++
+ void xenbus_dev_fatal(struct xenbus_device *dev, int err, const char *fmt,
+ 		      ...)
+ {
+ 	va_list ap;
+ 
+ 	va_start(ap, fmt);
+-	_dev_error(dev, err, fmt, ap);
++	_dev_error(dev, err, KERN_ALERT, fmt, ap);
+ 	va_end(ap);
+ 
+ 	xenbus_switch_state(dev, XenbusStateClosing);
+@@ -366,7 +379,7 @@
+ 	va_list ap;
+ 
+ 	va_start(ap, fmt);
+-	_dev_error(dev, err, fmt, ap);
++	_dev_error(dev, err, KERN_ALERT, fmt, ap);
+ 	va_end(ap);
+ 
+ 	if (!depth)
+diff -r 310485d0796a include/xen/xenbus.h
+--- a/include/xen/xenbus.h	Sun May 23 21:15:19 2010 -0700
++++ b/include/xen/xenbus.h	Sun May 23 21:16:09 2010 -0700
+@@ -313,6 +313,13 @@
+ void xenbus_dev_error(struct xenbus_device *dev, int err, const char *fmt,
+ 		      ...);
+ 
++/***
++ * The same as xenbus_dev_error, but using loglevel for printks to console.
++ * xenbus_dev_error(dev, err, fmt, args) is equivalent to 
++ * xenbus_dev_error_loglevel(dev, err, KERN_WARNING, fmt, args).
++ */
++void xenbus_dev_error_loglevel(struct xenbus_device *dev, int err, const char *loglevel, const char *fmt,
++		      ...);
+ 
+ /***
+  * Equivalent to xenbus_dev_error(dev, err, fmt, args), followed by

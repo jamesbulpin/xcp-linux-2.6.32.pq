@@ -1,0 +1,51 @@
+From: Jiri Slaby <jslaby@suse.cz>
+Subject: Linux 2.6.32.28
+Patch-mainline: 2.6.32.28
+
+Signed-off-by: Jiri Slaby <jslaby@suse.cz>
+Automatically created from "patches.kernel.org/patch-2.6.32.27-28" by xen-port-patches.py
+
+--- sle11sp1-2011-01-14.orig/arch/x86/include/mach-xen/asm/processor.h	2010-03-17 14:37:31.000000000 +0100
++++ sle11sp1-2011-01-14/arch/x86/include/mach-xen/asm/processor.h	2011-01-14 12:47:12.000000000 +0100
+@@ -710,31 +710,6 @@ extern unsigned long		boot_option_idle_o
+ extern unsigned long		idle_halt;
+ extern unsigned long		idle_nomwait;
+ 
+-#ifndef CONFIG_XEN
+-/*
+- * on systems with caches, caches must be flashed as the absolute
+- * last instruction before going into a suspended halt.  Otherwise,
+- * dirty data can linger in the cache and become stale on resume,
+- * leading to strange errors.
+- *
+- * perform a variety of operations to guarantee that the compiler
+- * will not reorder instructions.  wbinvd itself is serializing
+- * so the processor will not reorder.
+- *
+- * Systems without cache can just go into halt.
+- */
+-static inline void wbinvd_halt(void)
+-{
+-	mb();
+-	/* check for clflush to determine if wbinvd is legal */
+-	if (cpu_has_clflush)
+-		asm volatile("cli; wbinvd; 1: hlt; jmp 1b" : : : "memory");
+-	else
+-		while (1)
+-			halt();
+-}
+-#endif
+-
+ extern void enable_sep_cpu(void);
+ extern int sysenter_setup(void);
+ 
+--- sle11sp1-2011-01-14.orig/arch/x86/kernel/apic/io_apic-xen.c	2010-11-04 13:20:41.000000000 +0100
++++ sle11sp1-2011-01-14/arch/x86/kernel/apic/io_apic-xen.c	2011-01-14 12:46:27.000000000 +0100
+@@ -3678,6 +3678,7 @@ static int dmar_msi_set_affinity(unsigne
+ 	msg.data |= MSI_DATA_VECTOR(cfg->vector);
+ 	msg.address_lo &= ~MSI_ADDR_DEST_ID_MASK;
+ 	msg.address_lo |= MSI_ADDR_DEST_ID(dest);
++	msg.address_hi = MSI_ADDR_BASE_HI | MSI_ADDR_EXT_DEST_ID(dest);
+ 
+ 	dmar_msi_write(irq, &msg);
+ 

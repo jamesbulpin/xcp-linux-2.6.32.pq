@@ -1,0 +1,212 @@
+blktap2: use unlocked_ioctl for ring device
+
+Use unlocked_ioctl for the ring device to avoiding taking the BKL for
+every request completion. RESPONSE is protected by
+current->mm->mmap_sem.  CREATE/DESTROY_DEVICE are protected by a new
+tap->device_mutex.
+
+# HG changeset patch
+# Parent c7e45049a92c15114b3f80056ced334b5cbbf723
+
+diff -r c7e45049a92c drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Thu Jul 19 11:20:23 2012 +0100
++++ b/drivers/xen/blktap2/blktap.h	Thu Jul 19 16:30:02 2012 +0100
+@@ -101,6 +101,9 @@ struct blktap {
+ 	struct blktap_page_pool       *pool;
+ 	struct io_context             *ioc;
+ 
++	/* device_mutex protects the block device create/destroy. */
++	struct mutex                   device_mutex;
++
+ 	struct list_head               node;
+ 
+ 	wait_queue_head_t              remove_wait;
+diff -r c7e45049a92c drivers/xen/blktap2/control.c
+--- a/drivers/xen/blktap2/control.c	Thu Jul 19 11:20:23 2012 +0100
++++ b/drivers/xen/blktap2/control.c	Thu Jul 19 16:30:02 2012 +0100
+@@ -22,6 +22,7 @@ blktap_control_get_minor(void)
+ 	if (unlikely(!tap))
+ 		return NULL;
+ 
++	mutex_init(&tap->device_mutex);
+ 	INIT_LIST_HEAD(&tap->node);
+ 
+ 	mutex_lock(&blktap_lock);
+diff -r c7e45049a92c drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Thu Jul 19 11:20:23 2012 +0100
++++ b/drivers/xen/blktap2/device.c	Thu Jul 19 16:30:02 2012 +0100
+@@ -365,7 +365,7 @@ fail:
+ }
+ 
+ int
+-blktap_device_destroy(struct blktap *tap)
++__blktap_device_destroy(struct blktap *tap)
+ {
+ 	struct blktap_device *tapdev = &tap->device;
+ 	struct block_device *bdev;
+@@ -425,6 +425,18 @@ out_nolock:
+ 	return err;
+ }
+ 
++int
++blktap_device_destroy(struct blktap *tap)
++{
++	int ret;
++
++	mutex_lock(&tap->device_mutex);
++	ret = __blktap_device_destroy(tap);
++	mutex_unlock(&tap->device_mutex);
++
++	return ret;
++}
++
+ static void
+ blktap_device_fail_queue(struct blktap *tap)
+ {
+@@ -450,10 +462,14 @@ blktap_device_try_destroy(struct blktap 
+ {
+ 	int err;
+ 
+-	err = blktap_device_destroy(tap);
++	mutex_lock(&tap->device_mutex);
++
++	err = __blktap_device_destroy(tap);
+ 	if (err)
+ 		blktap_device_fail_queue(tap);
+ 
++	mutex_unlock(&tap->device_mutex);
++
+ 	return err;
+ }
+ 
+@@ -465,7 +481,7 @@ blktap_device_destroy_sync(struct blktap
+ }
+ 
+ int
+-blktap_device_create(struct blktap *tap, struct blktap_device_info *info)
++__blktap_device_create(struct blktap *tap, struct blktap_device_info *info)
+ {
+ 	int minor, err;
+ 	struct gendisk *gd;
+@@ -547,6 +563,19 @@ fail:
+ 	return err;
+ }
+ 
++int
++blktap_device_create(struct blktap *tap, struct blktap_device_info *info)
++{
++	int ret;
++
++	mutex_lock(&tap->device_mutex);
++	ret = __blktap_device_create(tap, info);
++	mutex_unlock(&tap->device_mutex);
++
++	return ret;
++}
++
++
+ size_t
+ blktap_device_debug(struct blktap *tap, char *buf, size_t size)
+ {
+diff -r c7e45049a92c drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Thu Jul 19 11:20:23 2012 +0100
++++ b/drivers/xen/blktap2/request.c	Thu Jul 19 16:30:02 2012 +0100
+@@ -3,7 +3,6 @@
+ #include <linux/mutex.h>
+ #include <linux/sched.h>
+ #include <linux/device.h>
+-#include <linux/blkdev.h>
+ 
+ #include "blktap.h"
+ 
+diff -r c7e45049a92c drivers/xen/blktap2/ring.c
+--- a/drivers/xen/blktap2/ring.c	Thu Jul 19 11:20:23 2012 +0100
++++ b/drivers/xen/blktap2/ring.c	Thu Jul 19 16:30:02 2012 +0100
+@@ -70,12 +70,6 @@ blktap_read_ring(struct blktap *tap)
+ 	blktap_ring_rsp_t rsp;
+ 	RING_IDX rc, rp;
+ 
+-	down_read(&current->mm->mmap_sem);
+-	if (!ring->vma) {
+-		up_read(&current->mm->mmap_sem);
+-		return;
+-	}
+-
+ 	/* for each outstanding message on the ring  */
+ 	rp = ring->ring.sring->rsp_prod;
+ 	rmb();
+@@ -86,8 +80,6 @@ blktap_read_ring(struct blktap *tap)
+ 	}
+ 
+ 	ring->ring.rsp_cons = rc;
+-
+-	up_read(&current->mm->mmap_sem);
+ }
+ 
+ #define MMAP_VADDR(_start, _req, _seg)				\
+@@ -376,9 +368,15 @@ fail:
+ 	return err;
+ }
+ 
+-static int
+-blktap_ring_ioctl(struct inode *inode, struct file *filp,
+-		  unsigned int cmd, unsigned long arg)
++static bool
++blktap_ring_vma_valid(struct blktap_ring *ring)
++{
++	/* Current process has mapped this ring? */
++	return ring->vma && ring->vma->vm_mm == current->mm;
++}
++
++static long
++__blktap_ring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	struct blktap *tap = filp->private_data;
+ 	struct blktap_ring *ring = &tap->ring;
+@@ -387,7 +385,7 @@ blktap_ring_ioctl(struct inode *inode, s
+ 
+ 	BTDBG("%d: cmd: %u, arg: %lu\n", tap->minor, cmd, arg);
+ 
+-	if (!ring->vma || ring->vma->vm_mm != current->mm)
++	if (!blktap_ring_vma_valid(ring))
+ 		return -EACCES;
+ 
+ 	switch(cmd) {
+@@ -437,6 +435,19 @@ blktap_ring_ioctl(struct inode *inode, s
+ 	return -ENOIOCTLCMD;
+ }
+ 
++static long
++blktap_ring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++	int ret;
++
++	down_read(&current->mm->mmap_sem);
++	ret = __blktap_ring_ioctl(filp, cmd, arg);
++	up_read(&current->mm->mmap_sem);
++
++	return ret;
++}
++
++
+ static unsigned int blktap_ring_poll(struct file *filp, poll_table *wait)
+ {
+ 	struct blktap *tap = filp->private_data;
+@@ -446,7 +457,7 @@ static unsigned int blktap_ring_poll(str
+ 	poll_wait(filp, &ring->poll_wait, wait);
+ 
+ 	down_read(&current->mm->mmap_sem);
+-	if (ring->vma && tap->device.gd)
++	if (blktap_ring_vma_valid(ring) && tap->device.gd)
+ 		blktap_device_run_queue(tap);
+ 	up_read(&current->mm->mmap_sem);
+ 
+@@ -465,7 +476,7 @@ static struct file_operations blktap_rin
+ 	.owner    = THIS_MODULE,
+ 	.open     = blktap_ring_open,
+ 	.release  = blktap_ring_release,
+-	.ioctl    = blktap_ring_ioctl,
++	.unlocked_ioctl = blktap_ring_ioctl,
+ 	.mmap     = blktap_ring_mmap,
+ 	.poll     = blktap_ring_poll,
+ };

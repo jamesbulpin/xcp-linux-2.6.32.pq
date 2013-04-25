@@ -1,0 +1,85 @@
+Prevent iSCSI transport timeout checks from spinning.
+
+Callbacks on iscsi_check_transport_timeouts() can spin in timer
+expiries.
+
+Sending a nop-out effectively sets a timer expiring at last_ping +
+ping_timeout, where last_ping ~= jiffies
+
+But after the timer expires, the check for a ping timeout is presently
+calculated as last_recv + recv_timeout + ping_timeout.
+
+This would work if last_ping were always last_recv +
+recv_timeout. True at nop-out send time, but last_recv can change
+anytime later.
+
+Special case: if iscsi_xmit() unconditionally resets last_recv to
+jiffies, then a nop-out xmit itself basically guarantees this to
+happen.
+
+Fix goes in two steps:
+
+ * Robustify ping timeout calculation, by putting it into one single place.
+
+ * if ping_task is already pending, then make sure not to try another
+   nop-out.
+
+   The nop-out won't be sent and last_ping stays the same, so
+   next_timeout points into the past, and we spin.
+
+ * If ping_task is pending, recalculate next_timeout as ping timeout.
+
+   If the path remains indeed blocked, then last_recv + recv_timout
+   may have already expired, and we spin again.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Cc: Hannes Reinecke <hare@suse.de>
+
+diff -r 88e71da0a8da drivers/scsi/libiscsi.c
+--- a/drivers/scsi/libiscsi.c	Wed Feb 10 23:35:11 2010 -0800
++++ b/drivers/scsi/libiscsi.c	Thu Feb 11 00:14:30 2010 -0800
+@@ -1633,14 +1633,17 @@
+  * progress but got started before the ping and is taking a while
+  * to complete so the ping is just stuck behind it in a queue.
+  */
++static unsigned long iscsi_ping_timeout(struct iscsi_conn *conn)
++{
++	return
++		conn->last_recv + (conn->recv_timeout * HZ) +
++		(conn->ping_timeout * HZ);
++}
++
+ static int iscsi_has_ping_timed_out(struct iscsi_conn *conn)
+ {
+-	if (conn->ping_task &&
+-	    time_before_eq(conn->last_recv + (conn->recv_timeout * HZ) +
+-			   (conn->ping_timeout * HZ), jiffies))
+-		return 1;
+-	else
+-		return 0;
++	unsigned long ping_timeout = iscsi_ping_timeout(conn);
++	return conn->ping_task && time_before_eq(ping_timeout, jiffies);
+ }
+ 
+ static enum blk_eh_timer_return iscsi_eh_cmd_timed_out(struct scsi_cmnd *scmd)
+@@ -1730,13 +1733,17 @@
+ 		return;
+ 	}
+ 
+-	if (time_before_eq(last_recv + recv_timeout, jiffies)) {
++	next_timeout = last_recv + recv_timeout;
++
++	if (conn->ping_task)
++		next_timeout = iscsi_ping_timeout(conn);
++
++	else if (time_before_eq(next_timeout, jiffies)) {
+ 		/* send a ping to try to provoke some traffic */
+ 		debug_scsi("Sending nopout as ping on conn %p\n", conn);
+ 		iscsi_send_nopout(conn, NULL);
+ 		next_timeout = conn->last_ping + (conn->ping_timeout * HZ);
+-	} else
+-		next_timeout = last_recv + recv_timeout;
++	}
+ 
+ 	debug_scsi("Setting next tmo %lu\n", next_timeout);
+ 	mod_timer(&conn->transport_timer, next_timeout);

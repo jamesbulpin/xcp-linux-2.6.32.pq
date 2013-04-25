@@ -1,0 +1,116 @@
+Add a RESTRICT ioctl to /dev/xen/evtchn, which allows an event channel
+file descriptor to be restricted to only working with a particular domain.
+
+diff -r e18ae648d6d7 drivers/xen/evtchn/evtchn.c
+--- a/drivers/xen/evtchn/evtchn.c	Wed Jun 11 16:17:30 2008 +0100
++++ b/drivers/xen/evtchn/evtchn.c	Wed Jun 11 16:17:30 2008 +0100
+@@ -66,7 +66,11 @@ struct per_user_data {
+ 
+ 	int bind_cpu;
+ 	int nr_event_wrong_delivery;
++
++	domid_t restrict_domid;
+ };
++
++#define UNRESTRICTED_DOMID ((domid_t)-1)
+ 
+ /* Who's bound to each port? */
+ static struct per_user_data *port_user[NR_EVENT_CHANNELS];
+@@ -270,6 +274,10 @@ static long evtchn_ioctl(struct file *fi
+ 		struct ioctl_evtchn_bind_virq bind;
+ 		struct evtchn_bind_virq bind_virq;
+ 
++		rc = -EACCES;
++		if (u->restrict_domid != UNRESTRICTED_DOMID)
++			break;
++
+ 		rc = -EFAULT;
+ 		if (copy_from_user(&bind, uarg, sizeof(bind)))
+ 			break;
+@@ -294,6 +302,11 @@ static long evtchn_ioctl(struct file *fi
+ 		if (copy_from_user(&bind, uarg, sizeof(bind)))
+ 			break;
+ 
++		rc = -EACCES;
++		if (u->restrict_domid != UNRESTRICTED_DOMID &&
++		    u->restrict_domid != bind.remote_domain)
++			break;
++
+ 		bind_interdomain.remote_dom  = bind.remote_domain;
+ 		bind_interdomain.remote_port = bind.remote_port;
+ 		rc = HYPERVISOR_event_channel_op(EVTCHNOP_bind_interdomain,
+@@ -310,11 +323,15 @@ static long evtchn_ioctl(struct file *fi
+ 		struct ioctl_evtchn_bind_unbound_port bind;
+ 		struct evtchn_alloc_unbound alloc_unbound;
+ 
++		rc = -EACCES;
++		if (u->restrict_domid != UNRESTRICTED_DOMID)
++			break;
++
+ 		rc = -EFAULT;
+ 		if (copy_from_user(&bind, uarg, sizeof(bind)))
+ 			break;
+ 
+-		alloc_unbound.dom        = DOMID_SELF;
++		alloc_unbound.dom	 = DOMID_SELF;
+ 		alloc_unbound.remote_dom = bind.remote_domain;
+ 		rc = HYPERVISOR_event_channel_op(EVTCHNOP_alloc_unbound,
+ 						 &alloc_unbound);
+@@ -389,6 +406,27 @@ static long evtchn_ioctl(struct file *fi
+ 		break;
+ 	}
+ 
++	case IOCTL_EVTCHN_RESTRICT_DOMID: {
++		struct ioctl_evtchn_restrict_domid ierd;
++
++		rc = -EACCES;
++		if (u->restrict_domid != UNRESTRICTED_DOMID)
++			break;
++
++		rc = -EFAULT;
++		if (copy_from_user(&ierd, uarg, sizeof(ierd)))
++		    break;
++
++		rc = -EINVAL;
++		if (ierd.domid == 0 || ierd.domid >= DOMID_FIRST_RESERVED)
++			break;
++
++		u->restrict_domid = ierd.domid;
++		rc = 0;
++
++		break;
++	}
++
+ 	default:
+ 		rc = -ENOSYS;
+ 		break;
+@@ -433,6 +471,8 @@ static int evtchn_open(struct inode *ino
+ 	}
+ 
+ 	mutex_init(&u->ring_cons_mutex);
++
++	u->restrict_domid = UNRESTRICTED_DOMID;
+ 
+ 	filp->private_data = u;
+ 
+diff -r e18ae648d6d7 include/xen/public/evtchn.h
+--- a/include/xen/public/evtchn.h	Wed Jun 11 16:17:30 2008 +0100
++++ b/include/xen/public/evtchn.h	Tue Jun 17 14:23:13 2008 +0100
+@@ -85,4 +85,17 @@ struct ioctl_evtchn_notify {
+ #define IOCTL_EVTCHN_RESET				\
+ 	_IOC(_IOC_NONE, 'E', 5, 0)
+ 
++/* Restruct this file descriptor so that it can only be applied to a
++ * nominated domain.  Once a file descriptor has been restricted it
++ * cannot be de-restricted, and must be closed and re-openned.  Event
++ * channels which were bound before restricting remain bound
++ * afterwards, and can be notified as usual.
++ */
++#define IOCTL_EVTCHN_RESTRICT_DOMID			\
++	_IOC(_IOC_NONE, 'E', 100, sizeof(struct ioctl_evtchn_restrict_domid))
++struct ioctl_evtchn_restrict_domid {
++	domid_t domid;
++};
++
++
+ #endif /* __LINUX_PUBLIC_EVTCHN_H__ */

@@ -1,0 +1,55 @@
+From 27818675ef0fcc40bc109129183210a2ce2cf9dd Mon Sep 17 00:00:00 2001
+From: Isaku Yamahata <yamahata@valinux.co.jp>
+Date: Fri, 5 Feb 2010 19:19:30 +0000
+Subject: [PATCH 16/23] blktap2: remove warnings.
+
+This patch removes the following warnings on ia64.
+
+> linux-2.6.18-xen.hg/drivers/xen/blktap2/device.c: In function
+  'blktap_device_finish_request':
+> linux-2.6.18-xen.hg/drivers/xen/blktap2/device.c:403: warning:
+  format '%lld' expects type 'long long int', but argument 7 has type 'uint64_t'
+> linux-2.6.18-xen.hg/drivers/xen/blktap2/sysfs.c: In function
+  'blktap_sysfs_debug_device':
+> linux-2.6.18-xen.hg/drivers/xen/blktap2/sysfs.c:276: warning: format
+  '%llu' expects type 'long long unsigned int', but argument 4 has type
+  'uint64_t'
+
+Signed-off-by: Isaku Yamahata <yamahata@valinux.co.jp>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    3 ++-
+ drivers/xen/blktap2/sysfs.c  |    2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index ec4b356..75a9bb5 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -400,7 +400,8 @@ blktap_device_finish_request(struct blktap *tap,
+ 	ret = res->status == BLKIF_RSP_OKAY ? 0 : -EIO;
+ 
+ 	BTDBG("req %p res status %d operation %d/%d id %lld\n", req,
+-		res->status, res->operation, request->operation, res->id);
++	      res->status, res->operation, request->operation,
++	      (unsigned long long)res->id);
+ 
+ 	switch (request->operation) {
+ 	case BLKIF_OP_READ:
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 03128b3..2ebe3a5 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -276,7 +276,7 @@ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, cha
+ 		tmp += sprintf(tmp, "req %d: id: %llu, usr_idx: %d, "
+ 			       "status: 0x%02x, pendcnt: %d, "
+ 			       "nr_pages: %u, op: %d, time: %lu:%lu\n",
+-			       i, req->id, req->usr_idx,
++			       i, (unsigned long long)req->id, req->usr_idx,
+ 			       req->status, atomic_read(&req->pendcnt),
+ 			       req->nr_pages, req->operation, req->time.tv_sec,
+ 			       req->time.tv_usec);
+-- 
+1.7.0.4
+

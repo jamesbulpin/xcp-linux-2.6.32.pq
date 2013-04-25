@@ -1,0 +1,61 @@
+From 777eb1bf15b8532c396821774bf6451e563438f5 Mon Sep 17 00:00:00 2001
+From: Hannes Reinecke <hare@suse.de>
+Date: Wed, 28 Sep 2011 08:07:01 -0600
+Subject: [PATCH] block: Free queue resources at blk_release_queue()
+
+A kernel crash is observed when a mounted ext3/ext4 filesystem is
+physically removed. The problem is that blk_cleanup_queue() frees up
+some resources eg by calling elevator_exit(), which are not checked for
+in normal operation. So we should rather move these calls to the
+destructor function blk_release_queue() as at that point all remaining
+references are gone. However, in doing so we have to ensure that any
+externally supplied queue_lock is disconnected as the driver might free
+up the lock after the call of blk_cleanup_queue(),
+
+Signed-off-by: Hannes Reinecke <hare@suse.de>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+---
+ block/blk-core.c  |   13 ++++++-------
+ block/blk-sysfs.c |    5 +++++
+ 2 files changed, 11 insertions(+), 7 deletions(-)
+
+diff -r 02ebcb6a95f4 block/blk-core.c
+--- a/block/blk-core.c	Thu May 24 17:06:49 2012 +0100
++++ b/block/blk-core.c	Thu May 24 18:26:55 2012 +0100
+@@ -441,6 +441,12 @@ void blk_put_queue(struct request_queue 
+ 	kobject_put(&q->kobj);
+ }
+ 
++/*
++ * Note: If a driver supplied the queue lock, it is disconnected
++ * by this function. The actual state of the lock doesn't matter
++ * here as the request_queue isn't accessible after this point
++ * (QUEUE_FLAG_DEAD is set) and no other requests will be queued.
++ */
+ void blk_cleanup_queue(struct request_queue *q)
+ {
+ 	/*
+@@ -455,8 +461,8 @@ void blk_cleanup_queue(struct request_qu
+ 	queue_flag_set_unlocked(QUEUE_FLAG_DEAD, q);
+ 	mutex_unlock(&q->sysfs_lock);
+ 
+-	if (q->elevator)
+-		elevator_exit(q->elevator);
++	if (q->queue_lock != &q->__queue_lock)
++		q->queue_lock = &q->__queue_lock;
+ 
+ 	blk_put_queue(q);
+ }
+diff -r 02ebcb6a95f4 block/blk-sysfs.c
+--- a/block/blk-sysfs.c	Thu May 24 17:06:49 2012 +0100
++++ b/block/blk-sysfs.c	Thu May 24 18:26:55 2012 +0100
+@@ -438,6 +438,9 @@ static void blk_release_queue(struct kob
+ 
+ 	blk_sync_queue(q);
+ 
++	if (q->elevator)
++		elevator_exit(q->elevator);
++
+ 	if (rl->rq_pool)
+ 		mempool_destroy(rl->rq_pool);
+ 

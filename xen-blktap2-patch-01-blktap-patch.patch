@@ -1,0 +1,36 @@
+From c97a6501cd6f6878e4611cdd050cb3882bfda260 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 27 Mar 2009 09:35:21 +0000
+Subject: [PATCH] patch 01-blktap-patch
+
+---
+ include/linux/mm.h |    3 +++
+ mm/memory.c        |    4 +++-
+ 2 files changed, 6 insertions(+), 1 deletions(-)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -116,5 +116,8 @@
+ #define VM_SAO		0		/* Strong Access Ordering (powerpc) */
+ #define VM_FOREIGN	0x20000000	/* Has pages belonging to another VM */
++struct vm_foreign_map {
++        struct page **map;
++};
+ #endif
+ #define VM_PFN_AT_MMAP	0x40000000	/* PFNMAP vma that is fully mapped at mmap time */
+ #define VM_MERGEABLE	0x80000000	/* KSM may merge identical pages */
+diff --git a/mm/memory.c b/mm/memory.c
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1215,7 +1215,9 @@
+ 
+ #ifdef CONFIG_XEN
+ 		if (vma && (vma->vm_flags & VM_FOREIGN)) {
+-			struct page **map = vma->vm_private_data;
++			struct vm_foreign_map *foreign_map =
++				vma->vm_private_data;
++			struct page **map = foreign_map->map;
+ 			int offset = (start - vma->vm_start) >> PAGE_SHIFT;
+ 			if (map[offset] != NULL) {
+ 			        if (pages) {

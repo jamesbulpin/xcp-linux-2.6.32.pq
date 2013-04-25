@@ -1,0 +1,30 @@
+diff -r 8e28f77254cd drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Tue Jun 08 15:48:17 2010 +0100
++++ b/drivers/xen/netback/netback.c	Thu Jun 10 13:02:07 2010 +0100
+@@ -1208,7 +1208,8 @@
+ 	unsigned int data_len;
+ 	int ret, work_to_do;
+ 
+-	net_tx_action_dealloc();
++	if (dealloc_cons != dealloc_prod)
++		net_tx_action_dealloc();
+ 
+ 	mop = tx_map_ops;
+ 	while (((NR_PENDING_REQS + MAX_SKB_FRAGS) < MAX_PENDING_REQS) &&
+@@ -1362,7 +1363,7 @@
+ 	}
+ 
+ 	if (mop == tx_map_ops)
+-		goto out;
++		return;
+ 
+ 	ret = HYPERVISOR_grant_table_op(
+ 		GNTTABOP_map_grant_ref, tx_map_ops, mop - tx_map_ops);
+@@ -1437,7 +1438,6 @@
+ 		netif->dev->last_rx = jiffies;
+ 	}
+ 
+- out:
+ 	if (netbk_copy_skb_mode == NETBK_DELAYED_COPY_SKB &&
+ 	    !list_empty(&pending_inuse_head)) {
+ 		struct netbk_tx_pending_inuse *oldest;

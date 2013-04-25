@@ -1,0 +1,44 @@
+From fa13279de20db4d8d4e4d5a1afd06d27b5989d25 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:34 -0700
+Subject: [PATCH 15/18] xen/blktap: Add barrier support.
+
+Inform the device queue of ordering constraints. On AIO/O_DIRECT,
+tapdisk is reordering, but cacheless (completed requests are
+durable). So proper write serialization presently takes a queue drain
+by the block layer, before completing barrier writes as normal writes
+in userspace.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/device.c |    7 +++++--
+ 1 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 65ce712..5f9f58c 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -605,8 +605,8 @@ blktap_device_run_queue(struct blktap *tap)
+ 			continue;
+ 		}
+ 
+-		if (blk_barrier_rq(req)) {
+-			end_request(req, 0);
++		if (blk_empty_barrier_rq(req)) {
++			end_request(req, 1);
+ 			continue;
+ 		}
+ 
+@@ -691,6 +691,9 @@ blktap_device_configure(struct blktap *tap,
+ 	/* Make sure buffer addresses are sector-aligned. */
+ 	blk_queue_dma_alignment(rq, 511);
+ 
++	/* We are reordering, but cacheless. */
++	blk_queue_ordered(rq, QUEUE_ORDERED_DRAIN, NULL);
++
+ 	spin_unlock_irq(&dev->lock);
+ }
+ 
+-- 
+1.7.0.4
+

@@ -1,0 +1,128 @@
+# HG changeset patch
+# Parent 4632268e87a41532054680270c74384de871cb77
+
+Copy aside SKBs with headers spanning a page boundary.
+
+This makes protocol 1 behaviour the same as protocol 0 in this respect.
+Previously protocol 1 coped with headers spanning a single page
+boundary using code largely lifted from xen-netfront but this appears
+to be insufficient when using openvswitch, which occasionally pulls up
+large packets thereby creating headers spanning multiple page
+boundaries.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+
+diff -r 4632268e87a4 -r 57b9b4c27be7 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Tue Aug 16 09:55:05 2011 +0100
++++ b/drivers/xen/netback/tx.c	Tue Aug 16 11:50:44 2011 +0100
+@@ -603,10 +603,9 @@ void netbk_p1_start_xmit(struct xen_neti
+ 	RING_IDX prod;
+ 	struct netbk_tag *tag;
+ 	int frags;
+-	unsigned char *data;
+-	unsigned int len;
++    struct page *page;
+ 	unsigned int page_offset;
+-	unsigned int frag_size;
++	unsigned int size;
+ 	int notify;
+ 
+ 	BUG_ON(skb->dev != dev);
+@@ -621,30 +620,39 @@ void netbk_p1_start_xmit(struct xen_neti
+ 	    !gref_available(netif))
+ 		goto drop;
+ 
+-	prod = p1->front.req_prod_pvt;
++	/* Make sure the skb head does not cross a page boundary */
++	if ((skb_headlen(skb) + offset_in_page(skb->data)) >= PAGE_SIZE) {
++		struct sk_buff *nskb = copy_skb(skb);
++		if (unlikely(nskb == NULL)) {
++			printk(KERN_WARNING "%s dropping packet (failed to copy header)\n",
++				   __func__);
++			goto drop;
++		}
++		/* Copy only the header fields we use in this driver. */
++		nskb->dev = skb->dev;
++		nskb->ip_summed = skb->ip_summed;
++		dev_kfree_skb(skb);
++		skb = nskb;
++	}
+ 
+-	data = skb->data;
+-	len = skb_headlen(skb);
+-	BUG_ON(len == 0);
+-
+-	page_offset = offset_in_page(data);
+-	frag_size = min((unsigned int)PAGE_SIZE - page_offset, len);
+-
+-	frags = 1;
+-	if (page_offset + len > PAGE_SIZE)
+-		frags++;
+-
+-	frags += skb_shinfo(skb)->nr_frags;
++	frags = 1 + skb_shinfo(skb)->nr_frags;
+ 
+ 	if (unlikely(frags > max_skb_slots(netif))) {
+ 		printk("%s: too many fragments\n", __func__);
+ 		goto drop;
+ 	}
+ 
++	prod = p1->front.req_prod_pvt;
++
++	page = virt_to_page(skb->data);
++	page_offset = offset_in_page(skb->data);
++	size = skb_headlen(skb);
++	BUG_ON(page_offset + size > PAGE_SIZE);
++
+ 	tag = allocate_tag(netif);
+ 	BUG_ON(tag == NULL);
+ 
+-	grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
++	grant_tag(netif, tag, skb, page, page_offset, size);
+ 
+ 	req = RING_GET_REQUEST(&p1->front, prod);
+ 
+@@ -663,9 +671,6 @@ void netbk_p1_start_xmit(struct xen_neti
+ 
+ 	prod++;
+ 
+-	data += frag_size;
+-	len -= frag_size;
+-
+ 	if (skb_shinfo(skb)->gso_size) {
+ 		struct xen_netif_extra_info *gso;
+ 
+@@ -687,33 +692,6 @@ void netbk_p1_start_xmit(struct xen_neti
+ 		prod++;
+ 	}
+ 
+-	if (len != 0) {
+-		BUG_ON(page_offset + frag_size != PAGE_SIZE);
+-		BUG_ON(len > PAGE_SIZE);
+-
+-		/* Adjust initial request flags */
+-		req->flags |= NETTXF_more_data;
+-
+-		page_offset = 0;
+-		frag_size = len;
+-
+-		tag = allocate_tag(netif);
+-		BUG_ON(tag == NULL);
+-
+-		grant_tag(netif, tag, skb, virt_to_page(data), page_offset, frag_size);
+-
+-		/* Get a new request for the remaining header */
+-		req = RING_GET_REQUEST(&p1->front, prod);
+-
+-		req->id = tag->id;
+-		req->gref = tag->gref;
+-		req->offset = page_offset;
+-		req->size = frag_size;
+-		req->flags = 0;
+-
+-		prod++;
+-	}
+-
+ 	p1->front.req_prod_pvt = prod;
+ 
+ 	make_frags(netif, skb, req);

@@ -1,0 +1,135 @@
+diff --git a/drivers/xen/pciback/controller.c b/drivers/xen/pciback/controller.c
+index 4c1aaf3..294e48f 100644
+--- a/drivers/xen/pciback/controller.c
++++ b/drivers/xen/pciback/controller.c
+@@ -208,7 +208,7 @@ void pciback_release_pci_dev(struct pciback_device *pdev, struct pci_dev *dev)
+ 	}
+ 
+ 	spin_unlock_irqrestore(&dev_data->lock, flags);
+-	pcistub_put_pci_dev(found_dev, 0);
++	pcistub_put_pci_dev(found_dev);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -396,7 +396,7 @@ void pciback_release_devices(struct pciback_device *pdev)
+ 		list_for_each_entry_safe(dev_entry, d,
+ 					 &cntrl_entry->dev_list, list) {
+ 			list_del(&dev_entry->list);
+-			pcistub_put_pci_dev(dev_entry->dev, 0);
++			pcistub_put_pci_dev(dev_entry->dev);
+ 			kfree(dev_entry);
+ 		}
+ 		list_del(&cntrl_entry->list);
+diff --git a/drivers/xen/pciback/passthrough.c b/drivers/xen/pciback/passthrough.c
+index b9948a5..9e7a0c4 100644
+--- a/drivers/xen/pciback/passthrough.c
++++ b/drivers/xen/pciback/passthrough.c
+@@ -88,7 +88,7 @@ void pciback_release_pci_dev(struct pciback_device *pdev, struct pci_dev *dev)
+ 	spin_unlock_irqrestore(&dev_data->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev, 1);
++		pcistub_put_pci_dev(found_dev);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -157,7 +157,7 @@ void pciback_release_devices(struct pciback_device *pdev)
+ 
+ 	list_for_each_entry_safe(dev_entry, t, &dev_data->dev_list, list) {
+ 		list_del(&dev_entry->list);
+-		pcistub_put_pci_dev(dev_entry->dev, 1);
++		pcistub_put_pci_dev(dev_entry->dev);
+ 		kfree(dev_entry);
+ 	}
+ 
+diff --git a/drivers/xen/pciback/pci_stub.c b/drivers/xen/pciback/pci_stub.c
+index 486034f..fb40598 100644
+--- a/drivers/xen/pciback/pci_stub.c
++++ b/drivers/xen/pciback/pci_stub.c
+@@ -237,7 +237,7 @@ struct pci_dev *pcistub_get_pci_dev(struct pciback_device *pdev,
+ 	return found_dev;
+ }
+ 
+-void pcistub_put_pci_dev(struct pci_dev *dev, int do_flr)
++void pcistub_put_pci_dev(struct pci_dev *dev)
+ {
+ 	struct pcistub_device *psdev, *found_psdev = NULL;
+ 	unsigned long flags;
+@@ -253,17 +253,14 @@ void pcistub_put_pci_dev(struct pci_dev *dev, int do_flr)
+ 
+ 	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
+ 
++	if (found_psdev == NULL)
++		return;
++
+ 	/*hold this lock for avoiding breaking link between
+ 	* pcistub and pciback when AER is in processing
+ 	*/
+ 	down_write(&pcistub_sem);
+ 
+-	/* For pass-through devices, do an FLR (or approximate) for the device
+-	 * before it is put back and ready for the next domain
+-	 */
+-	if (!disable_all_flr && do_flr)
+-		pciback_flr_device(dev);
+-
+ 	/* Cleanup our device
+ 	 * (so it's ready for the next domain)
+ 	 */
+diff --git a/drivers/xen/pciback/pciback.h b/drivers/xen/pciback/pciback.h
+index 5cd967c..f2a50fa 100644
+--- a/drivers/xen/pciback/pciback.h
++++ b/drivers/xen/pciback/pciback.h
+@@ -71,7 +71,7 @@ struct pci_dev *pcistub_get_pci_dev_by_slot(struct pciback_device *pdev,
+ 					    int slot, int func);
+ struct pci_dev *pcistub_get_pci_dev(struct pciback_device *pdev,
+ 				    struct pci_dev *dev);
+-void pcistub_put_pci_dev(struct pci_dev *dev, int do_flr);
++void pcistub_put_pci_dev(struct pci_dev *dev);
+ 
+ /* Reference/unreference PCI Devices and stubs without changing the state */
+ struct pci_dev *pcistub_ref_pci_dev(struct pci_dev *dev);
+diff --git a/drivers/xen/pciback/slot.c b/drivers/xen/pciback/slot.c
+index 9c66633..105a8b6 100644
+--- a/drivers/xen/pciback/slot.c
++++ b/drivers/xen/pciback/slot.c
+@@ -109,7 +109,7 @@ void pciback_release_pci_dev(struct pciback_device *pdev, struct pci_dev *dev)
+ 	spin_unlock_irqrestore(&slot_dev->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev, 0);
++		pcistub_put_pci_dev(found_dev);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -149,7 +149,7 @@ void pciback_release_devices(struct pciback_device *pdev)
+ 		for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
+ 			dev = slot_dev->slots[bus][slot];
+ 			if (dev != NULL)
+-				pcistub_put_pci_dev(dev, 0);
++				pcistub_put_pci_dev(dev);
+ 		}
+ 
+ 	kfree(slot_dev);
+diff --git a/drivers/xen/pciback/vpci.c b/drivers/xen/pciback/vpci.c
+index 259e71d..a5b7ece 100644
+--- a/drivers/xen/pciback/vpci.c
++++ b/drivers/xen/pciback/vpci.c
+@@ -162,7 +162,7 @@ void pciback_release_pci_dev(struct pciback_device *pdev, struct pci_dev *dev)
+ 	spin_unlock_irqrestore(&vpci_dev->lock, flags);
+ 
+ 	if (found_dev)
+-		pcistub_put_pci_dev(found_dev, 0);
++		pcistub_put_pci_dev(found_dev);
+ }
+ 
+ int pciback_init_devices(struct pciback_device *pdev)
+@@ -202,7 +202,7 @@ void pciback_release_devices(struct pciback_device *pdev)
+ 		list_for_each_entry_safe(e, tmp, &vpci_dev->dev_list[slot],
+ 					 list) {
+ 			list_del(&e->list);
+-			pcistub_put_pci_dev(e->dev, 0);
++			pcistub_put_pci_dev(e->dev);
+ 			kfree(e);
+ 		}
+ 	}

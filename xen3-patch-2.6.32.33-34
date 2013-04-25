@@ -1,0 +1,80 @@
+From: Jiri Slaby <jslaby@suse.cz>
+Subject: Linux 2.6.32.34
+Patch-mainline: Linux 2.6.32.34
+References: bnc#558740
+
+Signed-off-by: Jiri Slaby <jslaby@suse.cz>
+Automatically created from "patches.kernel.org/patch-2.6.32.33-34" by xen-port-patches.py
+
+diff -r 6f785a8e40c0 arch/x86/include/mach-xen/asm/pgtable-3level.h
+--- a/arch/x86/include/mach-xen/asm/pgtable-3level.h	Wed Aug 17 15:44:38 2011 +0100
++++ b/arch/x86/include/mach-xen/asm/pgtable-3level.h	Wed Aug 17 15:51:43 2011 +0100
+@@ -71,8 +71,6 @@ static inline void __xen_pte_clear(pte_t
+ 
+ static inline void __xen_pud_clear(pud_t *pudp)
+ {
+-	pgdval_t pgd;
+-
+ 	set_pud(pudp, __pud(0));
+ 
+ 	/*
+@@ -81,13 +79,10 @@ static inline void __xen_pud_clear(pud_t
+ 	 * section 8.1: in PAE mode we explicitly have to flush the
+ 	 * TLB via cr3 if the top-level pgd is changed...
+ 	 *
+-	 * Make sure the pud entry we're updating is within the
+-	 * current pgd to avoid unnecessary TLB flushes.
++	 * Currently all places where pud_clear() is called either have
++	 * flush_tlb_mm() followed or don't need TLB flush (x86_64 code or
++	 * pud_clear_bad()), so we don't need TLB flush here.
+ 	 */
+-	pgd = read_cr3();
+-	if (__pa(pudp) >= pgd && __pa(pudp) <
+-	    (pgd + sizeof(pgd_t)*PTRS_PER_PGD))
+-		xen_tlb_flush();
+ }
+ 
+ #define xen_pud_clear(pudp)			\
+diff -r 6f785a8e40c0 arch/x86/kernel/e820-xen.c
+--- a/arch/x86/kernel/e820-xen.c	Wed Aug 17 15:44:38 2011 +0100
++++ b/arch/x86/kernel/e820-xen.c	Wed Aug 17 15:51:43 2011 +0100
+@@ -1350,6 +1350,9 @@ static int __init parse_memopt(char *p)
+ 
+ 	userdef = 1;
+ 	mem_size = memparse(p, &p);
++	/* don't remove all of memory when handling "mem={invalid}" param */
++	if (mem_size == 0)
++		return -EINVAL;
+ #ifdef CONFIG_XEN
+ 	/*
+ 	 * A little less than 2% of available memory are needed for page
+diff -r 6f785a8e40c0 arch/x86/mm/fault-xen.c
+--- a/arch/x86/mm/fault-xen.c	Wed Aug 17 15:44:38 2011 +0100
++++ b/arch/x86/mm/fault-xen.c	Wed Aug 17 15:51:43 2011 +0100
+@@ -842,6 +842,13 @@ mm_fault_error(struct pt_regs *regs, uns
+ 	       unsigned long address, unsigned int fault)
+ {
+ 	if (fault & VM_FAULT_OOM) {
++		/* Kernel mode? Handle exceptions or die: */
++		if (!(error_code & PF_USER)) {
++			up_read(&current->mm->mmap_sem);
++			no_context(regs, error_code, address);
++			return;
++		}
++
+ 		out_of_memory(regs, error_code, address);
+ 	} else {
+ 		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON))
+diff -r 6f785a8e40c0 arch/x86/mm/pgtable-xen.c
+--- a/arch/x86/mm/pgtable-xen.c	Wed Aug 17 15:44:38 2011 +0100
++++ b/arch/x86/mm/pgtable-xen.c	Wed Aug 17 15:51:43 2011 +0100
+@@ -585,8 +585,7 @@ void pud_populate(struct mm_struct *mm, 
+ 	 * section 8.1: in PAE mode we explicitly have to flush the
+ 	 * TLB via cr3 if the top-level pgd is changed...
+ 	 */
+-	if (mm == current->active_mm)
+-		xen_tlb_flush();
++	flush_tlb_mm(mm);
+ }
+ #else  /* !CONFIG_X86_PAE */
+ 

@@ -1,0 +1,29 @@
+# HG changeset patch
+# Parent 75a3378319ec109a5ff0d4aa0442bb90aeb55386
+
+[Xen-devel] [PATCH] xen-netback: use correct index for invalidation in netbk_tx_check_mop()
+From: Ian Campbell <ian.campbell@citrix.com>
+  To: "netdev@vger.kernel.org" <netdev@vger.kernel.org>
+  CC: "xen-devel@lists.xensource.com" <xen-devel@lists.xensource.com>, Ian Campbell <Ian.Campbell@citrix.com>, Jan Beulich <jbeulich@suse.com>
+  Date: Fri Nov 18 14:34:51 GMT 2011
+   
+From: Jan Beulich <JBeulich@suse.com>
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+---
+ drivers/net/netback/netback.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff -r 75a3378319ec drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Nov 18 14:10:53 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Nov 18 14:32:19 2011 +0000
+@@ -1051,7 +1051,7 @@ static int netbk_tx_check_mop(struct xen
+ 		pending_idx = *((u16 *)skb->data);
+ 		netif_idx_release(netbk, pending_idx);
+ 		for (j = start; j < i; j++) {
+-			pending_idx = (unsigned long)shinfo->frags[i].page;
++			pending_idx = (unsigned long)shinfo->frags[j].page;
+ 			netif_idx_release(netbk, pending_idx);
+ 		}
+ 

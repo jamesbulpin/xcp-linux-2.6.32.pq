@@ -1,0 +1,81 @@
+diff -r 78ee305c56b1 drivers/xen/core/evtchn.c
+--- a/drivers/xen/core/evtchn.c	Wed May 26 15:03:55 2010 +0100
++++ b/drivers/xen/core/evtchn.c	Wed May 26 15:04:27 2010 +0100
+@@ -1353,21 +1353,6 @@
+ }
+ EXPORT_SYMBOL_GPL(notify_remote_via_irq);
+ 
+-int multi_notify_remote_via_irq(multicall_entry_t *mcl, int irq)
+-{
+-	int evtchn = evtchn_from_irq(irq);
+-
+-	BUG_ON(type_from_irq(irq) == IRQT_VIRQ);
+-	BUG_IF_IPI(irq);
+-
+-	if (!VALID_EVTCHN(evtchn))
+-		return -EINVAL;
+-
+-	multi_notify_remote_via_evtchn(mcl, evtchn);
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(multi_notify_remote_via_irq);
+-
+ int irq_to_evtchn_port(int irq)
+ {
+ 	BUG_IF_VIRQ_PER_CPU(irq);
+diff -r 78ee305c56b1 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed May 26 15:03:55 2010 +0100
++++ b/drivers/xen/netback/netback.c	Wed May 26 15:04:27 2010 +0100
+@@ -778,20 +778,10 @@
+ 		npo.meta_cons += nr_frags + 1;
+ 	}
+ 
+-	if (notify_nr == 1) {
+-		irq = *notify_list;
++	while (notify_nr != 0) {
++		irq = notify_list[--notify_nr];
+ 		__clear_bit(irq, rx_notify);
+ 		notify_remote_via_irq(irq + DYNIRQ_BASE);
+-	} else {
+-		for (count = ret = 0; ret < notify_nr; ++ret) {
+-			irq = notify_list[ret];
+-			__clear_bit(irq, rx_notify);
+-			if (!multi_notify_remote_via_irq(rx_mcl + count,
+-							 irq + DYNIRQ_BASE))
+-				++count;
+-		}
+-		if (HYPERVISOR_multicall(rx_mcl, count))
+-			BUG();
+ 	}
+ 
+ 	/* More work to do? */
+diff -r 78ee305c56b1 include/xen/evtchn.h
+--- a/include/xen/evtchn.h	Wed May 26 15:03:55 2010 +0100
++++ b/include/xen/evtchn.h	Wed May 26 15:04:27 2010 +0100
+@@ -193,18 +193,6 @@
+ 	VOID(HYPERVISOR_event_channel_op(EVTCHNOP_send, &send));
+ }
+ 
+-static inline void
+-multi_notify_remote_via_evtchn(multicall_entry_t *mcl, int port)
+-{
+-	struct evtchn_send *send = (void *)(mcl->args + 2);
+-
+-	BUILD_BUG_ON(sizeof(*send) > sizeof(mcl->args) - 2 * sizeof(*mcl->args));
+-	send->port = port;
+-	mcl->op = __HYPERVISOR_event_channel_op;
+-	mcl->args[0] = EVTCHNOP_send;
+-	mcl->args[1] = (unsigned long)send;
+-}
+-
+ /* Clear an irq's pending state, in preparation for polling on it. */
+ void xen_clear_irq_pending(int irq);
+ 
+@@ -223,7 +211,6 @@
+  * by bind_*_to_irqhandler().
+  */
+ void notify_remote_via_irq(int irq);
+-int multi_notify_remote_via_irq(multicall_entry_t *, int irq);
+ int irq_to_evtchn_port(int irq);
+ 
+ #if defined(CONFIG_SMP) && !defined(MODULE) && defined(CONFIG_X86)

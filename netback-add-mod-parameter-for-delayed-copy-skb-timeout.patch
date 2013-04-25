@@ -1,0 +1,46 @@
+# HG changeset patch
+# Parent d01e6d801703cfbd2f21adc82cc0ffb587e83859
+Add a module parameter to configure the Grant Ref to Grant copy timeout in 
+netback.
+
+The Grant Ref to Grant copy timeout was hardcoded to 1 second, this module
+parameter allows for that timeout to be adjusted at boot and runtime.
+
+diff -r d01e6d801703 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -196,6 +196,12 @@ unsigned int MODPARM_netback_max_tx_ring
+ module_param_named(netback_max_tx_ring_page_order, MODPARM_netback_max_tx_ring_page_order, uint, 0);
+ MODULE_PARM_DESC(netback_max_tx_ring_page_order, "Maximum supported transmitter ring page order");
+ 
++unsigned int MODPARM_delayed_copy_timeout = 1000;
++module_param_named(delayed_copy_timeout, MODPARM_delayed_copy_timeout, uint,
++		   S_IWUSR | S_IRUGO);
++MODULE_PARM_DESC(delayed_copy_timeout, "Time delay (in milliseconds) before grant ref's are turned into grant copies");
++
++
+ /*
+  * Netback bottom half handler.
+  * dir indicates the data direction.
+@@ -847,7 +853,9 @@ static inline void net_tx_action_dealloc
+ 			struct pending_tx_info *pending_tx_info;
+ 			pending_tx_info = netbk->pending_tx_info;
+ 
+-			if (time_after(inuse->alloc_time + HZ / 2, jiffies))
++			if (time_after(inuse->alloc_time +
++				msecs_to_jiffies(MODPARM_delayed_copy_timeout) / 2,
++						 jiffies))
+ 				break;
+ 
+ 			pending_idx = inuse - netbk->pending_inuse;
+@@ -1449,8 +1457,8 @@ out:
+ 
+ 		oldest = list_entry(netbk->pending_inuse_head.next,
+ 				    struct netbk_tx_pending_inuse, list);
+-		mod_timer(&netbk->netbk_tx_pending_timer,
+-				oldest->alloc_time + HZ);
++		mod_timer(&netbk->netbk_tx_pending_timer, oldest->alloc_time +
++			  msecs_to_jiffies(MODPARM_delayed_copy_timeout));
+ 	}
+ }
+ 

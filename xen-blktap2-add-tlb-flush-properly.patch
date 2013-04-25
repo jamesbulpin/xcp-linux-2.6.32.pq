@@ -1,0 +1,90 @@
+From 76592effe59427e470cd92347fd3051e95e13c8b Mon Sep 17 00:00:00 2001
+From: Isaku Yamahata <yamahata@valinux.co.jp>
+Date: Fri, 5 Feb 2010 19:19:24 +0000
+Subject: [PATCH 10/23] blktap2: add tlb flush properly
+
+xen_invlpg() flushes tlb on its cpu, but tlb flush is needed on
+all cpus. So replace xen_invlpg() with more proper ones.
+Maybe it would be possible to make tlb flush less.
+this patch also makes blktap2 compile on ia64 because xen_invlpg()
+is x86 specific.
+
+linux-2.6-pvops:
+ * rebase against git-da22857f (port blktap2 from 2.6.18 to tip)
+ * rebase against git-fbbc8527 (wean off of use of the BlkBack pageflag)
+ * gpl-export flush_tlb_page, flush_tlb_all
+
+Signed-off-by: Isaku Yamahata <yamahata@valinux.co.jp>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ arch/x86/mm/tlb.c           |    2 ++
+ drivers/xen/blktap2/device.c |    6 ++++--
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+# diff --git a/arch/x86/mm/tlb.c b/arch/x86/mm/tlb.c
+# index 821e970..a20f694 100644
+# --- a/arch/x86/mm/tlb.c
+# +++ b/arch/x86/mm/tlb.c
+# @@ -274,6 +274,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
+#  
+#  	preempt_enable();
+#  }
+# +EXPORT_SYMBOL_GPL(flush_tlb_page);
+#  
+#  static void do_flush_tlb_all(void *info)
+#  {
+# @@ -288,3 +289,4 @@ void flush_tlb_all(void)
+#  {
+#  	on_each_cpu(do_flush_tlb_all, NULL, 1);
+#  }
+# +EXPORT_SYMBOL_GPL(flush_tlb_all);
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 5207516..a04c9b4 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -4,6 +4,7 @@
+ #include <linux/cdrom.h>
+ #include <linux/hdreg.h>
+ #include <linux/module.h>
++#include <asm/tlbflush.h>
+ 
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_ioctl.h>
+@@ -167,7 +168,6 @@ blktap_map_uaddr_fn(pte_t *ptep, struct page *pmd_page,
+ 
+ 	BTDBG("ptep %p -> %012llx\n", ptep, pte_val(*pte));
+ 	set_pte(ptep, *pte);
+-	__flush_tlb_single(addr);
+ 	return 0;
+ }
+ 
+@@ -186,7 +186,6 @@ blktap_umap_uaddr_fn(pte_t *ptep, struct page *pmd_page,
+ 
+ 	BTDBG("ptep %p\n", ptep);
+ 	pte_clear(mm, addr, ptep);
+-	__flush_tlb_single(addr);
+ 	return 0;
+ }
+ 
+@@ -326,6 +325,7 @@ blktap_unmap(struct blktap *tap, struct blktap_request *request)
+ 		if (request->handles[i].kernel == INVALID_GRANT_HANDLE) {
+ 			kvaddr = request_to_kaddr(request, i);
+ 			blktap_umap_uaddr(&init_mm, kvaddr);
++			flush_tlb_kernel_range(kvaddr, kvaddr + PAGE_SIZE);
+ 			set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT,
+ 					    INVALID_P2M_ENTRY);
+ 		}
+@@ -560,7 +560,9 @@ blktap_map(struct blktap *tap,
+ 
+ 	pte = mk_pte(page, ring->vma->vm_page_prot);
+ 	blktap_map_uaddr(ring->vma->vm_mm, uvaddr, pte_mkwrite(pte));
++	flush_tlb_mm(ring->vma->vm_mm);
+ 	blktap_map_uaddr(&init_mm, kvaddr, mk_pte(page, PAGE_KERNEL));
++	flush_tlb_kernel_range(kvaddr, kvaddr + PAGE_SIZE);
+ 
+ 	set_phys_to_machine(__pa(kvaddr) >> PAGE_SHIFT, pte_mfn(pte));
+ 	request->handles[seg].kernel = INVALID_GRANT_HANDLE;
+-- 
+1.7.0.4
+

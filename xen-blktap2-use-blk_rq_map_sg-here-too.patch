@@ -1,0 +1,144 @@
+From 20e860adf5477ac8f20f4f29f0e5a7764f60787a Mon Sep 17 00:00:00 2001
+From: Jan Beulich <jbeulich@novell.com>
+Date: Fri, 5 Feb 2010 19:19:29 +0000
+Subject: [PATCH 15/23] blktap2: use blk_rq_map_sg() here too
+
+Just like in blkfront, not doing so can cause the maximum number of
+segments check to trigger.
+
+linux-2.6-pvops:
+ * Rebase against git-fbbc8527 (wean off of use of the BlkBack pageflag)
+ * Scatterlist: fix access macro usage, add initcall to device creation.
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    2 +
+ drivers/xen/blktap2/control.c |    1 +
+ drivers/xen/blktap2/device.c  |   43 ++++++++++++++++++-----------------------
+ 3 files changed, 22 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 98dc205..1653f94 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -4,6 +4,7 @@
+ #include <linux/mm.h>
+ #include <linux/fs.h>
+ #include <linux/cdev.h>
++#include <linux/scatterlist.h>
+ #include <xen/blkif.h>
+ #include <xen/grant_table.h>
+ 
+@@ -173,6 +174,7 @@ struct blktap {
+ 
+ 	int                            pending_cnt;
+ 	struct blktap_request         *pending_requests[MAX_PENDING_REQS];
++	struct scatterlist             sg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+ 
+ 	wait_queue_head_t              wq;
+ 	struct list_head               deferred_queue;
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 79eaa05..ba44049 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -23,6 +23,7 @@ blktap_control_initialize_tap(struct blktap *tap)
+ 	init_rwsem(&tap->tap_sem);
+ 	init_waitqueue_head(&tap->wq);
+ 	atomic_set(&tap->refcnt, 0);
++	sg_init_table(tap->sg, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+ 
+ 	tap->minor = minor;
+ }
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 6048377..ec4b356 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -579,10 +579,9 @@ blktap_device_process_request(struct blktap *tap,
+ 			      struct request *req)
+ {
+ 	struct page *page;
+-	struct bio_vec *bvec;
+-	int usr_idx, err;
+-	struct req_iterator iter;
++	int i, usr_idx, err;
+ 	struct blktap_ring *ring;
++	struct scatterlist *sg;
+ 	struct blktap_grant_table table;
+ 	unsigned int fsect, lsect, nr_sects;
+ 	unsigned long offset, uvaddr, kvaddr;
+@@ -609,42 +608,39 @@ blktap_device_process_request(struct blktap *tap,
+ 
+ 	nr_sects = 0;
+ 	request->nr_pages = 0;
+-	blkif_req.nr_segments = 0;
+-	rq_for_each_segment(bvec, req, iter) {
+-			BUG_ON(blkif_req.nr_segments ==
+-			       BLKIF_MAX_SEGMENTS_PER_REQUEST);
+-
+-			fsect     = bvec->bv_offset >> 9;
+-			lsect     = fsect + (bvec->bv_len >> 9) - 1;
+-			nr_sects += bvec->bv_len >> 9;
+-
+-			blkif_req.seg[blkif_req.nr_segments] =
++	blkif_req.nr_segments = blk_rq_map_sg(req->q, req, tap->sg);
++	BUG_ON(blkif_req.nr_segments > BLKIF_MAX_SEGMENTS_PER_REQUEST);
++	for (i = 0; i < blkif_req.nr_segments; ++i) {
++			sg = tap->sg + i;
++			fsect = sg->offset >> 9;
++			lsect = fsect + (sg->length >> 9) - 1;
++			nr_sects += sg->length >> 9;
++
++			blkif_req.seg[i] =
+ 				(struct blkif_request_segment) {
+ 				.gref       = 0,
+ 				.first_sect = fsect,
+ 				.last_sect  = lsect };
+ 
+-			if (blkback_pagemap_contains_page(bvec->bv_page)) {
++			if (blkback_pagemap_contains_page(sg_page(sg))) {
+ 				/* foreign page -- use xen */
+ 				if (blktap_prep_foreign(tap,
+ 							request,
+ 							&blkif_req,
+-							blkif_req.nr_segments,
+-							bvec->bv_page,
++							i,
++							sg_page(sg),
+ 							&table))
+ 					goto out;
+ 			} else {
+ 				/* do it the old fashioned way */
+ 				blktap_map(tap,
+ 					   request,
+-					   blkif_req.nr_segments,
+-					   bvec->bv_page);
++					   i,
++					   sg_page(sg));
+ 			}
+ 
+-			uvaddr = MMAP_VADDR(ring->user_vstart,
+-					    usr_idx, blkif_req.nr_segments);
+-			kvaddr = request_to_kaddr(request,
+-						  blkif_req.nr_segments);
++			uvaddr = MMAP_VADDR(ring->user_vstart, usr_idx, i);
++			kvaddr = request_to_kaddr(request, i);
+ 			offset = (uvaddr - ring->vma->vm_start) >> PAGE_SHIFT;
+ 			page   = pfn_to_page(__pa(kvaddr) >> PAGE_SHIFT);
+ 			ring->foreign_map.map[offset] = page;
+@@ -654,10 +650,9 @@ blktap_device_process_request(struct blktap *tap,
+ 			      uvaddr, page, __pa(kvaddr) >> PAGE_SHIFT);
+ 			BTDBG("offset: 0x%08lx, pending_req: %p, seg: %d, "
+ 			      "page: %p, kvaddr: 0x%08lx, uvaddr: 0x%08lx\n",
+-			      offset, request, blkif_req.nr_segments,
++			      offset, request, i,
+ 			      page, kvaddr, uvaddr);
+ 
+-			blkif_req.nr_segments++;
+ 			request->nr_pages++;
+ 	}
+ 
+-- 
+1.7.0.4
+

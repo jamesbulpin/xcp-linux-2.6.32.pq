@@ -1,0 +1,79 @@
+diff -r b0ef21dd2943 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 17:01:41 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 17:06:38 2010 -0700
+@@ -37,7 +37,6 @@
+ 	unsigned major;
+ 	unsigned minor;
+ 	int group_added;
+-	char *nodename;
+ 	atomic_t refcnt;
+ 	pid_t kthread_pid;
+ 	int shutdown_signalled;
+@@ -275,6 +274,7 @@
+ 
+ static void signal_shutdown(struct backend_info *be)
+ {
++	struct xenbus_device *xbdev = be->dev;
+ 	int err;
+ 
+ 	down(&blkback_dev_sem);
+@@ -282,10 +282,10 @@
+ 	if (be->shutdown_signalled)
+ 		goto out;
+ 
+-	err = xenbus_write(XBT_NIL, be->nodename, "shutdown-done", "");
++	err = xenbus_write(XBT_NIL, xbdev->nodename, "shutdown-done", "");
+ 	if (err)
+ 		WPRINTK("Error writing shutdown-done for %s: %d\n", 
+-			be->nodename, err);
++			xbdev->nodename, err);
+ 
+ 	if (be->dev)
+ 		xenbus_switch_state(be->dev, XenbusStateClosed);
+@@ -315,13 +315,12 @@
+ 		be->blkif = NULL;
+ 	}
+ 
+-	kfree(be->nodename);
+ 	kfree(be);
+ }
+ 
+-static int blkback_remove(struct xenbus_device *dev)
++static int blkback_remove(struct xenbus_device *xbdev)
+ {
+-	struct backend_info *be = dev->dev.driver_data;
++	struct backend_info *be = xbdev->dev.driver_data;
+ 
+ 	down(&blkback_dev_sem);
+ 	be->dev = NULL;
+@@ -346,12 +345,12 @@
+ 	}
+ 
+ 	if (kthread_remove(be))
+-		WPRINTK("BAD REMOVE REQUEST for %s\n", be->nodename);
++		WPRINTK("BAD REMOVE REQUEST for %s\n", xbdev->nodename);
+ 
+-	xenvbd_sysfs_delif(dev);
++	xenvbd_sysfs_delif(xbdev);
+ 	backend_release(be);
+ 
+-	dev->dev.driver_data = NULL;
++	xbdev->dev.driver_data = NULL;
+ 
+ 	return 0;
+ }
+@@ -523,14 +522,6 @@
+ 	dev->dev.driver_data = be;
+ 	atomic_set(&be->refcnt, 1);
+ 
+-	be->nodename = kasprintf(GFP_KERNEL, "%s", dev->nodename);
+-	if (!be->nodename) {
+-		xenbus_dev_fatal(dev, -ENOMEM,
+-				 "allocating backend structure");
+-		kfree(be);
+-		return -ENOMEM;
+-	}
+-
+ 	be->blkif = blkif_alloc(dev->otherend_id);
+ 	if (IS_ERR(be->blkif)) {
+ 		err = PTR_ERR(be->blkif);

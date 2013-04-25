@@ -1,0 +1,20 @@
+# HG changeset patch
+# Parent 84bf1b34b71aabb43a1de8334dc0853e980c3016
+
+[CA-77243] Turn BUG_ON() into error path
+
+diff -r 84bf1b34b71a drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c
++++ b/drivers/xen/netback/tx.c
+@@ -782,7 +782,10 @@ int netbk_p1_setup(struct xen_netif *net
+ 	}
+ 
+ 	rc = gnttab_alloc_grant_references(max_skb_slots(netif), &p1->gref_head);
+-	BUG_ON(rc < 0);
++	if (rc < 0) {
++        kfree(p1->tag);
++        return -ENOMEM;
++    }
+ 
+ 	p1->gref_count = max_skb_slots(netif);
+ 

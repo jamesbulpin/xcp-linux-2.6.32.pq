@@ -1,0 +1,28 @@
+netback: allow configuration of maximum number of groups to use
+limit to 4 by default.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+
+diff -r 3f61ede77686 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu Feb 17 15:25:43 2011 +0000
++++ b/drivers/xen/netback/netback.c	Thu Feb 17 15:26:19 2011 +0000
+@@ -147,6 +147,10 @@ static int MODPARM_netback_kthread = 1;
+ static int MODPARM_netback_kthread = 1;
+ module_param_named(netback_kthread, MODPARM_netback_kthread, bool, 0);
+ MODULE_PARM_DESC(netback_kthread, "Use kernel thread to replace tasklet");
++
++static unsigned int MODPARM_netback_max_groups = 4;
++module_param_named(netback_max_groups, MODPARM_netback_max_groups, uint, 0);
++MODULE_PARM_DESC(netback_max_groups, "Maximum number of netback groups to allocate");
+ 
+ unsigned int MODPARM_netback_max_rx_protocol = NETBK_MAX_RX_PROTOCOL;
+ module_param_named(netback_max_rx_protocol, MODPARM_netback_max_rx_protocol, uint, 0);
+@@ -1581,7 +1585,7 @@ static int __init netback_init(void)
+ 	if (!is_running_on_xen())
+ 		return -ENODEV;
+ 
+-	xen_netbk_group_nr = num_online_cpus();
++	xen_netbk_group_nr = min(num_online_cpus(), MODPARM_netback_max_groups);
+ 	xen_netbk = vmalloc(sizeof(struct xen_netbk) * xen_netbk_group_nr);
+ 	if (!xen_netbk) {
+ 		printk(KERN_ALERT "%s: out of memory\n", __func__);

@@ -1,0 +1,32 @@
+From 89de1669ace055b56f1de1c9f5aca26dd7f17f25 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Fri, 30 Apr 2010 22:01:16 +0000
+Subject: [PATCH] blkfront: Fix backtrace in del_gendisk
+
+The call to del_gendisk follows an non-refcounted gd->queue
+pointer. We release the last ref in blk_cleanup_queue. Fixed by
+reordering releases accordingly.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/block/xen-blkfront.c |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff -r f0dbb10bed6d drivers/block/xen-blkfront.c
+--- a/drivers/block/xen-blkfront.c	Tue Jun 15 18:16:43 2010 -0700
++++ b/drivers/block/xen-blkfront.c	Tue Mar 06 15:00:43 2012 +0000
+@@ -942,11 +942,11 @@ static void blkfront_closing(struct xenb
+ 	/* Flush gnttab callback work. Must be done with no locks held. */
+ 	flush_scheduled_work();
+ 
++	del_gendisk(info->gd);
++
+ 	blk_cleanup_queue(info->rq);
+ 	info->rq = NULL;
+ 
+-	del_gendisk(info->gd);
+-
+  out:
+ 	xenbus_frontend_closed(dev);
+ }

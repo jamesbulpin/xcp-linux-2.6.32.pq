@@ -1,0 +1,353 @@
+diff -r 7e6e23b9a87f block/blk-ioc.c
+--- a/block/blk-ioc.c	Thu Sep 30 01:28:31 2010 -0700
++++ b/block/blk-ioc.c	Thu Sep 30 03:45:44 2010 -0700
+@@ -98,6 +98,7 @@
+ 		ret->last_waited = jiffies; /* doesn't matter... */
+ 		ret->nr_batch_requests = 0; /* because this is 0 */
+ 		ret->aic = NULL;
++		ret->special = NULL;
+ 		INIT_RADIX_TREE(&ret->radix_root, GFP_ATOMIC | __GFP_HIGH);
+ 		INIT_HLIST_HEAD(&ret->cic_list);
+ 		ret->ioc_data = NULL;
+diff -r 7e6e23b9a87f drivers/xen/blktap2/Makefile
+--- a/drivers/xen/blktap2/Makefile	Thu Sep 30 01:28:31 2010 -0700
++++ b/drivers/xen/blktap2/Makefile	Thu Sep 30 03:45:44 2010 -0700
+@@ -1,3 +1,8 @@
+ obj-$(CONFIG_XEN_BLKDEV_TAP) := blktap.o
+ 
+-blktap-objs := control.o ring.o device.o request.o sysfs.o
++blktap-objs := control.o
++blktap-objs += ring.o
++blktap-objs += device.o
++blktap-objs += request.o
++blktap-objs += sysfs.o
++blktap-objs += ioctx.o
+diff -r 7e6e23b9a87f drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Thu Sep 30 01:28:31 2010 -0700
++++ b/drivers/xen/blktap2/blktap.h	Fri Oct 01 00:01:10 2010 -0700
+@@ -44,6 +44,8 @@
+ #define BLKTAP_REQUEST_FREE          0
+ #define BLKTAP_REQUEST_PENDING       1
+ 
++#define BLKTAP2_BIO_POOL_SIZE        32
++
+ /*
+  * The maximum number of requests that can be outstanding at any time
+  * is determined by
+@@ -145,6 +147,7 @@
+ 	struct blktap_ring             ring;
+ 	struct blktap_device           device;
+ 	struct blktap_page_pool       *pool;
++	struct io_context             *ioc;
+ 
+ 	wait_queue_head_t              remove_wait;
+ 	struct work_struct             remove_work;
+@@ -205,5 +208,7 @@
+ void blktap_request_free(struct blktap *, struct blktap_request *);
+ void blktap_request_bounce(struct blktap *, struct blktap_request *, int, int);
+ 
++int blktap_ioctx_attach(struct blktap *, int);
++void blktap_ioctx_detach(struct blktap *);
+ 
+ #endif
+diff -r 7e6e23b9a87f drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Thu Sep 30 01:28:31 2010 -0700
++++ b/drivers/xen/blktap2/device.c	Thu Sep 30 03:45:44 2010 -0700
+@@ -372,6 +372,8 @@
+ 
+ 	blk_cleanup_queue(gd->queue);
+ 
++	blktap_ioctx_detach(tap);
++
+ 	put_disk(gd);
+ 	tapdev->gd = NULL;
+ 
+@@ -473,6 +475,11 @@
+ 		err = -ENOMEM;
+ 		goto fail;
+ 	}
++
++	err = blktap_ioctx_attach(tap, rq->node);
++	if (err)
++		goto fail;
++
+ 	elevator_init(rq, "noop");
+ 
+ 	gd->queue     = rq;
+@@ -493,6 +500,8 @@
+ 	return 0;
+ 
+ fail:
++	blktap_ioctx_detach(tap);
++
+ 	if (gd)
+ 		del_gendisk(gd);
+ 	if (rq)
+diff -r f91a2d5ad06c drivers/xen/blktap2/ioctx.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/drivers/xen/blktap2/ioctx.c	Wed Oct 20 14:51:06 2010 -0700
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (c) 2010 Citrix Systems, Inc.
++ */
++
++#include <linux/bio.h>
++#include <linux/iocontext.h>
++
++#include "blktap.h"
++
++void
++blktap_ioctx_detach(struct blktap *tap)
++{
++	struct special_io_context *sioc;
++	struct io_context *ioc;
++
++	ioc  = tap->ioc;
++	if (!ioc)
++		return;
++
++	sioc = ioc->special;
++	if (sioc && atomic_dec_and_test(&sioc->refs)) {
++		bioset_free(sioc->bs);
++		kfree(sioc);
++		ioc->special = NULL;
++	}
++
++	put_io_context(ioc);
++	tap->ioc = NULL;
++}
++
++int
++blktap_ioctx_attach(struct blktap *tap, int node)
++{
++	struct special_io_context *sioc;
++	struct io_context *ioc;
++	int err;
++
++	err = -ENOMEM;
++
++	ioc = tap->ioc = get_io_context(GFP_KERNEL, node);
++	if (!ioc)
++		goto fail;
++
++	sioc = ioc->special;
++	if (sioc)
++		goto out;
++
++	sioc = kzalloc_node(sizeof(*sioc), GFP_KERNEL, node);
++	if (!sioc)
++		goto fail;
++
++	ioc->special = sioc;
++
++	/* NB. multi-vbd count. */
++	atomic_set(&sioc->refs, 0);
++
++	/* NB. one warning per task and minute. */
++	sioc->rs.interval = 60 * HZ;
++	sioc->rs.burst    = 1;
++
++	sioc->bs = bioset_create(BLKTAP2_BIO_POOL_SIZE, 0);
++	if (!sioc->bs)
++		goto fail;
++
++out:
++	atomic_inc(&sioc->refs);
++	return 0;
++
++fail:
++	blktap_ioctx_detach(tap);
++	return err;
++}
+diff -r 7e6e23b9a87f fs/bio.c
+--- a/fs/bio.c	Thu Sep 30 01:28:31 2010 -0700
++++ b/fs/bio.c	Thu Sep 30 03:45:44 2010 -0700
+@@ -54,6 +54,24 @@
+  */
+ struct bio_set *fs_bio_set;
+ 
++static inline struct bio_set*
++tsk_fs_bio_set(struct task_struct *tsk, gfp_t *gfp_mask)
++{
++	struct special_io_context *sioc;
++	struct bio_set *bs = fs_bio_set;
++
++	sioc = task_ioc_special(tsk);
++	if (unlikely(sioc)) {
++		bs = sioc->bs;
++
++		if (gfp_mask)
++			*gfp_mask &= ~(__GFP_FS | __GFP_IO);
++	}
++
++	return bs;
++}
++
++
+ /*
+  * Our slab pool management
+  */
+@@ -317,7 +335,8 @@
+ 
+ static void bio_fs_destructor(struct bio *bio)
+ {
+-	bio_free(bio, fs_bio_set);
++	struct bio_set *bs = bio->bi_fs_private;
++	bio_free(bio, bs);
+ }
+ 
+ /**
+@@ -341,10 +360,12 @@
+  */
+ struct bio *bio_alloc(gfp_t gfp_mask, int nr_iovecs)
+ {
+-	struct bio *bio = bio_alloc_bioset(gfp_mask, nr_iovecs, fs_bio_set);
+-
+-	if (bio)
++	struct bio_set *bs = tsk_fs_bio_set(current, &gfp_mask);
++	struct bio *bio = bio_alloc_bioset(gfp_mask, nr_iovecs, bs);
++	if (bio) {
+ 		bio->bi_destructor = bio_fs_destructor;
++		bio->bi_fs_private = bs;
++	}
+ 
+ 	return bio;
+ }
+@@ -469,12 +490,14 @@
+  */
+ struct bio *bio_clone(struct bio *bio, gfp_t gfp_mask)
+ {
+-	struct bio *b = bio_alloc_bioset(gfp_mask, bio->bi_max_vecs, fs_bio_set);
++	struct bio_set *bs = tsk_fs_bio_set(current, &gfp_mask);
++	struct bio *b = bio_alloc_bioset(gfp_mask, bio->bi_max_vecs, bs);
+ 
+ 	if (!b)
+ 		return NULL;
+ 
+ 	b->bi_destructor = bio_fs_destructor;
++	b->bi_fs_private = bs;
+ 	__bio_clone(b, bio);
+ 
+ 	if (bio_integrity(bio)) {
+diff -r 85367a2463f1 include/linux/bio.h
+--- a/include/linux/bio.h	Wed Dec 15 12:28:37 2010 -0800
++++ b/include/linux/bio.h	Wed Dec 15 12:29:06 2010 -0800
+@@ -97,6 +97,7 @@
+ 	bio_end_io_t		*bi_end_io;
+ 
+ 	void			*bi_private;
++	void                    *bi_fs_private;
+ #if defined(CONFIG_BLK_DEV_INTEGRITY)
+ 	struct bio_integrity_payload *bi_integrity;  /* data integrity */
+ #endif
+diff -r 321ffe51cb1b include/linux/iocontext.h
+--- a/include/linux/iocontext.h	Thu Sep 30 04:05:11 2010 -0700
++++ b/include/linux/iocontext.h	Tue Oct 05 15:07:04 2010 -0700
+@@ -3,6 +3,7 @@
+ 
+ #include <linux/radix-tree.h>
+ #include <linux/rcupdate.h>
++#include <linux/sched.h>
+ 
+ /*
+  * This is the per-process anticipatory I/O scheduler state.
+@@ -59,6 +60,12 @@
+ 	struct rcu_head rcu_head;
+ };
+ 
++struct special_io_context {
++	atomic_t                refs;
++	struct bio_set         *bs;
++	struct ratelimit_state  rs;
++};
++
+ /*
+  * I/O subsystem state of the associated processes.  It is refcounted
+  * and kmalloc'ed. These could be shared between processes.
+@@ -83,6 +90,8 @@
+ 	struct radix_tree_root radix_root;
+ 	struct hlist_head cic_list;
+ 	void *ioc_data;
++
++	struct special_io_context *special;
+ };
+ 
+ static inline struct io_context *ioc_task_link(struct io_context *ioc)
+@@ -100,6 +109,20 @@
+ }
+ 
+ #ifdef CONFIG_BLOCK
++static inline struct special_io_context *
++task_ioc_special(struct task_struct *tsk)
++{
++	struct special_io_context *sioc = NULL;
++	struct io_context *ioc;
++
++	ioc = tsk->io_context;
++	smp_read_barrier_depends();
++	if (likely(ioc))
++		sioc = ioc->special;
++
++	return sioc;
++}
++
+ int put_io_context(struct io_context *ioc);
+ void exit_io_context(void);
+ struct io_context *get_io_context(gfp_t gfp_flags, int node);
+@@ -115,6 +138,11 @@
+ {
+ 	return 1;
+ }
++
++static inline struct special_io_context *task_io_special(struct task_struct *tsk)
++{
++	return NULL;
++}
+ #endif
+ 
+ #endif
+diff -r f91a2d5ad06c mm/mempool.c
+--- a/mm/mempool.c	Wed Oct 20 12:13:11 2010 -0700
++++ b/mm/mempool.c	Wed Oct 20 14:51:06 2010 -0700
+@@ -233,7 +233,7 @@
+ 		return NULL;
+ 
+ 	/* Now start performing page reclaim */
+-	gfp_temp = gfp_mask;
++	if (!task_ioc_special(current)) gfp_temp = gfp_mask;
+ 	init_wait(&wait);
+ 	prepare_to_wait(&pool->wait, &wait, TASK_UNINTERRUPTIBLE);
+ 	smp_mb();
+diff -r f91a2d5ad06c mm/page-writeback.c
+--- a/mm/page-writeback.c	Wed Oct 20 12:13:11 2010 -0700
++++ b/mm/page-writeback.c	Wed Oct 20 14:51:06 2010 -0700
+@@ -565,6 +565,8 @@
+ 			break;
+ 		if (pages_written >= write_chunk)
+ 			break;		/* We've done our duty */
++		if (task_ioc_special(current))
++			break;          /* Exempt IO processes */
+ 
+ 		__set_current_state(TASK_INTERRUPTIBLE);
+ 		io_schedule_timeout(pause);
+diff -r 7e6e23b9a87f mm/page_alloc.c
+--- a/mm/page_alloc.c	Thu Sep 30 01:28:31 2010 -0700
++++ b/mm/page_alloc.c	Thu Sep 30 03:45:44 2010 -0700
+@@ -1853,6 +1853,7 @@
+ 	unsigned long pages_reclaimed = 0;
+ 	unsigned long did_some_progress;
+ 	struct task_struct *p = current;
++	struct special_io_context *sioc = task_ioc_special(p);
+ 
+ 	/*
+ 	 * In the slowpath, we sanity check order to avoid ever trying to
+@@ -1893,6 +1894,9 @@
+ 	if (page)
+ 		goto got_pg;
+ 
++	if (unlikely(sioc))
++		gfp_mask &= ~(__GFP_FS | __GFP_IO);
++
+ rebalance:
+ 	/* Allocate without watermarks if the context allows */
+ 	if (alloc_flags & ALLOC_NO_WATERMARKS) {

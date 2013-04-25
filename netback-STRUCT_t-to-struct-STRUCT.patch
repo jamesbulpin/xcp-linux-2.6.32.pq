@@ -1,0 +1,84 @@
+Upstream kernel coding style avoids idiom of typedefing a struct name
+with an _t suffix.
+
+Switch various structure variables to use the prefered style:
+  mmu_update_t -> struct mmu_update
+  gnttab_transfer_t -> struct gnttab_transfer
+  gnttab_copy_t -> struct gnttab_copy
+  multicall_entry_t -> struct multicall_entry
+
+sed -i -e 's/\<mmu_update_t\>/struct mmu_update/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<gnttab_transfer_t\>/struct gnttab_transfer/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<gnttab_copy_t\>/struct gnttab_copy/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<multicall_entry_t\>/struct multicall_entry/g' drivers/xen/netback/*.[ch]
+
+diff -r c1b6b7667795 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri May 14 15:47:45 2010 +0100
++++ b/drivers/xen/netback/netback.c	Fri May 14 15:48:20 2010 +0100
+@@ -369,10 +369,10 @@
+ 	unsigned mcl_prod, mcl_cons;
+ 	unsigned copy_prod, copy_cons;
+ 	unsigned meta_prod, meta_cons;
+-	mmu_update_t *mmu;
+-	gnttab_transfer_t *trans;
+-	gnttab_copy_t *copy;
+-	multicall_entry_t *mcl;
++	struct mmu_update *mmu;
++	struct gnttab_transfer *trans;
++	struct gnttab_copy *copy;
++	struct multicall_entry *mcl;
+ 	struct netbk_rx_meta *meta;
+ };
+ 
+@@ -383,10 +383,10 @@
+ 			  struct page *page, unsigned long size,
+ 			  unsigned long offset)
+ {
+-	mmu_update_t *mmu;
+-	gnttab_transfer_t *gop;
+-	gnttab_copy_t *copy_gop;
+-	multicall_entry_t *mcl;
++	struct mmu_update *mmu;
++	struct gnttab_transfer *gop;
++	struct gnttab_copy *copy_gop;
++	struct multicall_entry *mcl;
+ 	struct xen_netif_rx_request *req;
+ 	unsigned long old_mfn, new_mfn;
+ 	int idx = netif_page_index(page);
+@@ -497,9 +497,9 @@
+ static int netbk_check_gop(int nr_frags, domid_t domid,
+ 			   struct netrx_pending_operations *npo)
+ {
+-	multicall_entry_t *mcl;
+-	gnttab_transfer_t *gop;
+-	gnttab_copy_t     *copy_op;
++	struct multicall_entry *mcl;
++	struct gnttab_transfer *gop;
++	struct gnttab_copy     *copy_op;
+ 	int status = NETIF_RSP_OKAY;
+ 	int i;
+ 
+@@ -562,7 +562,7 @@
+ 	s8 status;
+ 	u16 id, irq, flags;
+ 	struct xen_netif_rx_response *resp;
+-	multicall_entry_t *mcl;
++	struct multicall_entry *mcl;
+ 	struct sk_buff_head rxq;
+ 	struct sk_buff *skb;
+ 	int notify_nr = 0;
+@@ -575,10 +575,10 @@
+ 	 * Putting hundreds of bytes on the stack is considered rude.
+ 	 * Static works because a tasklet can only be on one CPU at any time.
+ 	 */
+-	static multicall_entry_t rx_mcl[NET_RX_RING_SIZE+3];
+-	static mmu_update_t rx_mmu[NET_RX_RING_SIZE];
+-	static gnttab_transfer_t grant_trans_op[NET_RX_RING_SIZE];
+-	static gnttab_copy_t grant_copy_op[NET_RX_RING_SIZE];
++	static struct multicall_entry rx_mcl[NET_RX_RING_SIZE+3];
++	static struct mmu_update rx_mmu[NET_RX_RING_SIZE];
++	static struct gnttab_transfer grant_trans_op[NET_RX_RING_SIZE];
++	static struct gnttab_copy grant_copy_op[NET_RX_RING_SIZE];
+ 	static unsigned char rx_notify[NR_IRQS];
+ 	static u16 notify_list[NET_RX_RING_SIZE];
+ 	static struct netbk_rx_meta meta[NET_RX_RING_SIZE];

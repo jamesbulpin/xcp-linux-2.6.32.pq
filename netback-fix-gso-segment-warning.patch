@@ -1,0 +1,21 @@
+# HG changeset patch
+# Parent 991e15c924031610a65d727e94bfcdafcfc7e0c6
+
+diff -r 991e15c92403 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Mon Jan 16 17:49:35 2012 -0800
++++ b/drivers/xen/netback/interface.c	Thu Feb 09 14:44:27 2012 +0000
+@@ -150,7 +150,13 @@ void netif_set_features(struct xen_netif
+ 	if (!(features & NETIF_F_SG) && dev->mtu > ETH_DATA_LEN)
+ 		dev->mtu = ETH_DATA_LEN;
+ 
+-	dev->features = features;
++	/* netdev_fix_features call prevent wrong combination of 
++	 * feature to be set that cause lot of warning from skb_gso_segment.
++	 * This could happen with some Windows PV drivers (5.6 builds 39215,
++	 * 47101 and 53308 are known to have this issue) which set csum to 0
++	 * (feature-no-csum-offload 1) and gso to 1.
++	 */
++	dev->features = netdev_fix_features(features, NULL);
+ }
+ 
+ static int netbk_set_tx_csum(struct net_device *dev, u32 data)

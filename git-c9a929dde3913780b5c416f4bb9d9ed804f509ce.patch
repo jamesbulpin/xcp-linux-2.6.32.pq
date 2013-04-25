@@ -1,0 +1,210 @@
+From c9a929dde3913780b5c416f4bb9d9ed804f509ce Mon Sep 17 00:00:00 2001
+From: Tejun Heo <tj@kernel.org>
+Date: Wed, 19 Oct 2011 14:42:16 +0200
+Subject: [PATCH] block: fix request_queue lifetime handling by making blk_queue_cleanup() properly shutdown
+
+request_queue is refcounted but actually depdends on lifetime
+management from the queue owner - on blk_cleanup_queue(), block layer
+expects that there's no request passing through request_queue and no
+new one will.
+
+This is fundamentally broken.  The queue owner (e.g. SCSI layer)
+doesn't have a way to know whether there are other active users before
+calling blk_cleanup_queue() and other users (e.g. bsg) don't have any
+guarantee that the queue is and would stay valid while it's holding a
+reference.
+
+With delay added in blk_queue_bio() before queue_lock is grabbed, the
+following oops can be easily triggered when a device is removed with
+in-flight IOs.
+
+ sd 0:0:1:0: [sdb] Stopping disk
+ ata1.01: disabled
+ general protection fault: 0000 [#1] PREEMPT SMP
+ CPU 2
+ Modules linked in:
+
+ Pid: 648, comm: test_rawio Not tainted 3.1.0-rc3-work+ #56 Bochs Bochs
+ RIP: 0010:[<ffffffff8137d651>]  [<ffffffff8137d651>] elv_rqhash_find+0x61/0x100
+ ...
+ Process test_rawio (pid: 648, threadinfo ffff880019efa000, task ffff880019ef8a80)
+ ...
+ Call Trace:
+  [<ffffffff8137d774>] elv_merge+0x84/0xe0
+  [<ffffffff81385b54>] blk_queue_bio+0xf4/0x400
+  [<ffffffff813838ea>] generic_make_request+0xca/0x100
+  [<ffffffff81383994>] submit_bio+0x74/0x100
+  [<ffffffff811c53ec>] dio_bio_submit+0xbc/0xc0
+  [<ffffffff811c610e>] __blockdev_direct_IO+0x92e/0xb40
+  [<ffffffff811c39f7>] blkdev_direct_IO+0x57/0x60
+  [<ffffffff8113b1c5>] generic_file_aio_read+0x6d5/0x760
+  [<ffffffff8118c1ca>] do_sync_read+0xda/0x120
+  [<ffffffff8118ce55>] vfs_read+0xc5/0x180
+  [<ffffffff8118cfaa>] sys_pread64+0x9a/0xb0
+  [<ffffffff81afaf6b>] system_call_fastpath+0x16/0x1b
+
+This happens because blk_queue_cleanup() destroys the queue and
+elevator whether IOs are in progress or not and DEAD tests are
+sprinkled in the request processing path without proper
+synchronization.
+
+Similar problem exists for blk-throtl.  On queue cleanup, blk-throtl
+is shutdown whether it has requests in it or not.  Depending on
+timing, it either oopses or throttled bios are lost putting tasks
+which are waiting for bio completion into eternal D state.
+
+The way it should work is having the usual clear distinction between
+shutdown and release.  Shutdown drains all currently pending requests,
+marks the queue dead, and performs partial teardown of the now
+unnecessary part of the queue.  Even after shutdown is complete,
+reference holders are still allowed to issue requests to the queue
+although they will be immmediately failed.  The rest of teardown
+happens on release.
+
+This patch makes the following changes to make blk_queue_cleanup()
+behave as proper shutdown.
+
+* QUEUE_FLAG_DEAD is now set while holding both q->exit_mutex and
+  queue_lock.
+
+* Unsynchronized DEAD check in generic_make_request_checks() removed.
+  This couldn't make any meaningful difference as the queue could die
+  after the check.
+
+* blk_drain_queue() updated such that it can drain all requests and is
+  now called during cleanup.
+
+* blk_throtl updated such that it checks DEAD on grabbing queue_lock,
+  drains all throttled bios during cleanup and free td when queue is
+  released.
+
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Cc: Vivek Goyal <vgoyal@redhat.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+---
+ block/blk-core.c     |   57 +++++++++++++++++++++++++++++++------------------
+ block/blk-sysfs.c    |    1 +
+ block/blk-throttle.c |   50 ++++++++++++++++++++++++++++++++++++++-----
+ block/blk.h          |    6 ++++-
+ block/elevator.c     |    2 +-
+ 5 files changed, 87 insertions(+), 29 deletions(-)
+
+diff -r 19bc093aaae8 block/blk-core.c
+--- a/block/blk-core.c	Wed Oct 19 14:33:05 2011 +0200
++++ b/block/blk-core.c	Fri May 25 11:53:21 2012 +0100
+@@ -256,11 +256,13 @@ EXPORT_SYMBOL(blk_remove_plug);
+ /**
+  * blk_drain_queue - drain requests from request_queue
+  * @q: queue to drain
++ * @drain_all: whether to drain all requests or only the ones w/ ELVPRIV
+  *
+- * Drain ELV_PRIV requests from @q.  The caller is responsible for ensuring
+- * that no new requests which need to be drained are queued.
++ * Drain requests from @q.  If @drain_all is set, all requests are drained.
++ * If not, only ELVPRIV requests are drained.  The caller is responsible
++ * for ensuring that no new requests which need to be drained are queued.
+  */
+-void blk_drain_queue(struct request_queue *q)
++void blk_drain_queue(struct request_queue *q, bool drain_all)
+ {
+ 	while (true) {
+ 		int nr_rqs;
+@@ -270,7 +272,11 @@ void blk_drain_queue(struct request_queu
+ 		elv_drain_elevator(q);
+ 
+ 		__blk_run_queue(q);
+-		nr_rqs = q->rq.elvpriv;
++
++		if (drain_all)
++			nr_rqs = q->rq.count[0] + q->rq.count[1];
++		else
++			nr_rqs = q->rq.elvpriv;
+ 
+ 		spin_unlock_irq(q->queue_lock);
+ 
+@@ -469,29 +475,39 @@ void blk_put_queue(struct request_queue 
+ 	kobject_put(&q->kobj);
+ }
+ 
+-/*
+- * Note: If a driver supplied the queue lock, it is disconnected
+- * by this function. The actual state of the lock doesn't matter
+- * here as the request_queue isn't accessible after this point
+- * (QUEUE_FLAG_DEAD is set) and no other requests will be queued.
++/**
++ * blk_cleanup_queue - shutdown a request queue
++ * @q: request queue to shutdown
++ *
++ * Mark @q DEAD, drain all pending requests, destroy and put it.  All
++ * future requests will be failed immediately with -ENODEV.
+  */
+ void blk_cleanup_queue(struct request_queue *q)
+ {
+-	/*
+-	 * We know we have process context here, so we can be a little
+-	 * cautious and ensure that pending block actions on this device
+-	 * are done before moving on. Going into this function, we should
+-	 * not have processes doing IO to this device.
+-	 */
+-	blk_sync_queue(q);
++	spinlock_t *lock = q->queue_lock;
+ 
++	/* mark @q DEAD, no new request or merges will be allowed afterwards */
+ 	mutex_lock(&q->sysfs_lock);
+ 	queue_flag_set_unlocked(QUEUE_FLAG_DEAD, q);
+ 	mutex_unlock(&q->sysfs_lock);
+ 
++	spin_lock_irq(lock);
++	queue_flag_set(QUEUE_FLAG_NOMERGES, q);
++	queue_flag_set(QUEUE_FLAG_DEAD, q);
++
+ 	if (q->queue_lock != &q->__queue_lock)
+ 		q->queue_lock = &q->__queue_lock;
+ 
++	spin_unlock_irq(lock);
++	mutex_unlock(&q->sysfs_lock);
++
++	/* drain all requests queued before DEAD marking */
++	blk_drain_queue(q, true);
++
++	/* @q won't process any more request, flush async actions */
++	blk_sync_queue(q);
++
++	/* @q is and will stay empty, shutdown and put */
+ 	blk_put_queue(q);
+ }
+ EXPORT_SYMBOL(blk_cleanup_queue);
+@@ -1506,9 +1522,6 @@ static inline void __generic_make_reques
+ 			goto end_io;
+ 		}
+ 
+-		if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
+-			goto end_io;
+-
+ 		if (should_fail_request(bio))
+ 			goto end_io;
+ 
+diff -r 19bc093aaae8 block/blk.h
+--- a/block/blk.h	Wed Oct 19 14:33:05 2011 +0200
++++ b/block/blk.h	Fri May 25 11:53:21 2012 +0100
+@@ -15,7 +15,7 @@ void blk_rq_bio_prep(struct request_queu
+ 			struct bio *bio);
+ int blk_rq_append_bio(struct request_queue *q, struct request *rq,
+ 		      struct bio *bio);
+-void blk_drain_queue(struct request_queue *q);
++void blk_drain_queue(struct request_queue *q, bool drain_all);
+ void blk_dequeue_request(struct request *rq);
+ void __blk_queue_free_tags(struct request_queue *q);
+ 
+diff -r 19bc093aaae8 block/elevator.c
+--- a/block/elevator.c	Wed Oct 19 14:33:05 2011 +0200
++++ b/block/elevator.c	Fri May 25 11:53:21 2012 +0100
+@@ -576,7 +576,7 @@ void elv_quiesce_start(struct request_qu
+ 	queue_flag_set(QUEUE_FLAG_ELVSWITCH, q);
+ 	spin_unlock_irq(q->queue_lock);
+ 
+-	blk_drain_queue(q);
++	blk_drain_queue(q, false);
+ }
+ 
+ void elv_quiesce_end(struct request_queue *q)

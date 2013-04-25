@@ -1,0 +1,46 @@
+From ffec0050842b418b966413e7ecab565af402edeb Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Thu, 19 Mar 2009 12:42:36 -0700
+Subject: [PATCH] xen/netback: use NET_SKB_PAD rather than "16"
+
+There's a constant for the default skb headroom.
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/netback.c |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index f59fadb..400f398 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -203,7 +203,7 @@ static struct sk_buff *netbk_copy_skb(struct sk_buff *skb)
+ 	if (unlikely(!nskb))
+ 		goto err;
+ 
+-	skb_reserve(nskb, 16 + NET_IP_ALIGN);
++	skb_reserve(nskb, NET_SKB_PAD + NET_IP_ALIGN);
+ 	headlen = skb_end_pointer(nskb) - nskb->data;
+ 	if (headlen > skb_headlen(skb))
+ 		headlen = skb_headlen(skb);
+@@ -1353,7 +1353,7 @@ static void net_tx_action(unsigned long unused)
+ 			    ret < MAX_SKB_FRAGS) ?
+ 			PKT_PROT_LEN : txreq.size;
+ 
+-		skb = alloc_skb(data_len + 16 + NET_IP_ALIGN,
++		skb = alloc_skb(data_len + NET_SKB_PAD + NET_IP_ALIGN,
+ 				GFP_ATOMIC | __GFP_NOWARN);
+ 		if (unlikely(skb == NULL)) {
+ 			DPRINTK("Can't allocate a skb in start_xmit.\n");
+@@ -1362,7 +1362,7 @@ static void net_tx_action(unsigned long unused)
+ 		}
+ 
+ 		/* Packets passed to netif_rx() must have some headroom. */
+-		skb_reserve(skb, 16 + NET_IP_ALIGN);
++		skb_reserve(skb, NET_SKB_PAD + NET_IP_ALIGN);
+ 
+ 		if (extras[XEN_NETIF_EXTRA_TYPE_GSO - 1].type) {
+ 			struct xen_netif_extra_info *gso;
+-- 
+1.5.6.5
+

@@ -1,0 +1,118 @@
+From 43223efd9bfd7f190bea95d62bb81d0cca343155 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Tue, 23 Feb 2010 12:10:24 +0000
+Subject: [PATCH] xen: netback: wait for hotplug scripts to complete before signalling connected to frontend
+
+Avoid the situation where the frontend is sending packets but the
+domain 0 bridging (or whatever) is not yet configured (because the
+hotplug scripts are too slow) and so packets get dropped.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Cc: Steven.Smith@citrix.com
+---
+ drivers/xen/netback/common.h |    2 +
+ drivers/xen/netback/xenbus.c |   45 +++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 46 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index ea617b9..51f97c0 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -147,6 +147,8 @@ struct backend_info {
+ 	struct xenbus_device *dev;
+ 	struct xen_netif *netif;
+ 	enum xenbus_state frontend_state;
++	struct xenbus_watch hotplug_status_watch;
++	int have_hotplug_status_watch:1;
+ 
+ 	/* State relating to the netback accelerator */
+ 	void *netback_accel_priv;
+diff --git a/drivers/xen/netback/xenbus.c b/drivers/xen/netback/xenbus.c
+index b114aa4..b89853a 100644
+--- a/drivers/xen/netback/xenbus.c
++++ b/drivers/xen/netback/xenbus.c
+@@ -32,6 +32,7 @@
+ static int connect_rings(struct backend_info *);
+ static void connect(struct backend_info *);
+ static void backend_create_netif(struct backend_info *be);
++static void unregister_hotplug_status_watch(struct backend_info *be);
+ 
+ static int netback_remove(struct xenbus_device *dev)
+ {
+@@ -39,8 +40,10 @@ static int netback_remove(struct xenbus_device *dev)
+ 
+ 	//netback_remove_accelerators(be, dev);
+ 
++	unregister_hotplug_status_watch(be);
+ 	if (be->netif) {
+ 		kobject_uevent(&dev->dev.kobj, KOBJ_OFFLINE);
++		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");
+ 		netif_disconnect(be->netif);
+ 		be->netif = NULL;
+ 	}
+@@ -218,6 +221,7 @@ static void disconnect_backend(struct xenbus_device *dev)
+ 	struct backend_info *be = dev_get_drvdata(&dev->dev);
+ 
+ 	if (be->netif) {
++		xenbus_rm(XBT_NIL, dev->nodename, "hotplug-status");
+ 		netif_disconnect(be->netif);
+ 		be->netif = NULL;
+ 	}
+@@ -337,6 +341,36 @@ static int xen_net_read_mac(struct xenbus_device *dev, u8 mac[])
+ 	return 0;
+ }
+ 
++static void unregister_hotplug_status_watch(struct backend_info *be)
++{
++	if (be->have_hotplug_status_watch) {
++		unregister_xenbus_watch(&be->hotplug_status_watch);
++		kfree(be->hotplug_status_watch.node);
++	}
++	be->have_hotplug_status_watch = 0;
++}
++
++static void hotplug_status_changed(struct xenbus_watch *watch,
++				   const char **vec,
++				   unsigned int vec_size)
++{
++	struct backend_info *be = container_of(watch,
++					       struct backend_info,
++					       hotplug_status_watch);
++	char *str;
++	unsigned int len;
++
++	str = xenbus_read(XBT_NIL, be->dev->nodename, "hotplug-status", &len);
++	if (IS_ERR(str))
++		return;
++	if (len == sizeof("connected")-1 && !memcmp(str, "connected", len)) {
++		xenbus_switch_state(be->dev, XenbusStateConnected);
++		/* Not interested in this watch anymore. */
++		unregister_hotplug_status_watch(be);
++	}
++	kfree(str);
++}
++
+ static void connect(struct backend_info *be)
+ {
+ 	int err;
+@@ -356,7 +390,16 @@ static void connect(struct backend_info *be)
+ 			  &be->netif->credit_usec);
+ 	be->netif->remaining_credit = be->netif->credit_bytes;
+ 
+-	xenbus_switch_state(dev, XenbusStateConnected);
++	unregister_hotplug_status_watch(be);
++	err = xenbus_watch_pathfmt(dev, &be->hotplug_status_watch,
++				   hotplug_status_changed,
++				   "%s/%s", dev->nodename, "hotplug-status");
++	if (err) {
++		/* Switch now, since we can't do a watch. */
++		xenbus_switch_state(dev, XenbusStateConnected);
++	} else {
++		be->have_hotplug_status_watch = 1;
++	}
+ 
+ 	netif_wake_queue(be->netif->dev);
+ }
+-- 
+1.5.6.5
+

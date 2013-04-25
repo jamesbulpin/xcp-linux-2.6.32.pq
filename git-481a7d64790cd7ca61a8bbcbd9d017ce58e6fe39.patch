@@ -1,0 +1,58 @@
+Describe: v3.2-rc5-3-g481a7d6
+commit 481a7d64790cd7ca61a8bbcbd9d017ce58e6fe39
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Dec 14 00:33:37 2011 +0100
+
+    block: fix drain_all condition in blk_drain_queue()
+
+    When trying to drain all requests, blk_drain_queue() checked only
+    q->rq.count[]; however, this only tracks REQ_ALLOCED requests.  This
+    patch updates blk_drain_queue() such that it looks at all the counters
+    and queues so that request_queue is actually empty on completion.
+
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff -r 1247a577c475 block/blk-core.c
+--- a/block/blk-core.c	Wed Dec 14 00:33:37 2011 +0100
++++ b/block/blk-core.c	Fri May 25 12:17:35 2012 +0100
+@@ -265,7 +265,8 @@ EXPORT_SYMBOL(blk_remove_plug);
+ void blk_drain_queue(struct request_queue *q, bool drain_all)
+ {
+ 	while (true) {
+-		int nr_rqs;
++		bool drain = false;
++		int i;
+ 
+ 		spin_lock_irq(q->queue_lock);
+ 
+@@ -280,14 +281,24 @@ void blk_drain_queue(struct request_queu
+ 		if (!list_empty(&q->queue_head))
+ 			__blk_run_queue(q);
+ 
+-		if (drain_all)
+-			nr_rqs = q->rq.count[0] + q->rq.count[1];
+-		else
+-			nr_rqs = q->rq.elvpriv;
++		drain |= q->rq.elvpriv;
++
++		/*
++		 * Unfortunately, requests are queued at and tracked from
++		 * multiple places and there's no single counter which can
++		 * be drained.  Check all the queues and counters.
++		 */
++		if (drain_all) {
++			drain |= !list_empty(&q->queue_head);
++			for (i = 0; i < 2; i++) {
++				drain |= q->rq.count[i];
++				drain |= q->in_flight[i];
++			}
++		}
+ 
+ 		spin_unlock_irq(q->queue_lock);
+ 
+-		if (!nr_rqs)
++		if (!drain)
+ 			break;
+ 		msleep(10);
+ 	}

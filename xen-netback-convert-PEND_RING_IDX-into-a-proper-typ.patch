@@ -1,0 +1,62 @@
+From a190c8798c5e8587d82a6bc6ac02805491510f2a Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Thu, 19 Mar 2009 15:29:30 -0700
+Subject: [PATCH] xen/netback: convert PEND_RING_IDX into a proper typedef name
+
+Rename PEND_RING_IDX to pending_ring_idx_t.  Its not used that much,
+the extra typing won't kill anyone.
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/netback.c |   12 ++++++------
+ 1 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 4095622..8292e96 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -120,19 +120,19 @@ static struct pending_tx_info {
+ 	struct xen_netif *netif;
+ } pending_tx_info[MAX_PENDING_REQS];
+ static u16 pending_ring[MAX_PENDING_REQS];
+-typedef unsigned int PEND_RING_IDX;
++typedef unsigned int pending_ring_idx_t;
+ 
+-static inline PEND_RING_IDX pending_index(unsigned i)
++static inline pending_ring_idx_t pending_index(unsigned i)
+ {
+ 	return i & (MAX_PENDING_REQS-1);
+ }
+ 
+-static PEND_RING_IDX pending_prod, pending_cons;
++static pending_ring_idx_t pending_prod, pending_cons;
+ #define NR_PENDING_REQS (MAX_PENDING_REQS - pending_prod + pending_cons)
+ 
+ /* Freed TX SKBs get batched on this ring before return to pending_ring. */
+ static u16 dealloc_ring[MAX_PENDING_REQS];
+-static PEND_RING_IDX dealloc_prod, dealloc_cons;
++static pending_ring_idx_t dealloc_prod, dealloc_cons;
+ 
+ /* Doubly-linked list of in-use pending entries. */
+ static struct netbk_tx_pending_inuse pending_inuse[MAX_PENDING_REQS];
+@@ -669,7 +669,7 @@ static void tx_credit_callback(unsigned long data)
+ 	netif_schedule_work(netif);
+ }
+ 
+-static inline int copy_pending_req(PEND_RING_IDX pending_idx)
++static inline int copy_pending_req(pending_ring_idx_t pending_idx)
+ {
+ 	return gnttab_copy_grant_page(grant_tx_handle[pending_idx],
+ 				      &mmap_pages[pending_idx]);
+@@ -680,7 +680,7 @@ inline static void net_tx_action_dealloc(void)
+ 	struct netbk_tx_pending_inuse *inuse, *n;
+ 	struct gnttab_unmap_grant_ref *gop;
+ 	u16 pending_idx;
+-	PEND_RING_IDX dc, dp;
++	pending_ring_idx_t dc, dp;
+ 	struct xen_netif *netif;
+ 	int ret;
+ 	LIST_HEAD(list);
+-- 
+1.5.6.5
+

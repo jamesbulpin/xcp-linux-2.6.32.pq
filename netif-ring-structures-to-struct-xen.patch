@@ -1,0 +1,537 @@
+Upstream kernel coding style avoids idiom of typedefing a struct name
+with an _t suffix. Switch netif ring definitions to the preferred
+style and add xen_ namespace prefix.
+
+Manual edit of include/xen/interface/io/netif.h to remove compat names
+
+sed -i -e 's/\<\(netif_.x_back_ring\)_t\>/struct xen_\1/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<\(netif_.x_request\)_t\>/struct xen_\1/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<\(netif_.x_response\)_t\>/struct xen_\1/g' drivers/xen/netback/*.[ch]
+sed -i -e 's/\<\(netif_.x_sring\)_t\>/struct xen_\1/g' drivers/xen/netback/*.[ch]
+
+sed -i -e 's/\<struct \(netif_.x_front_ring\)\>/struct xen_\1/g' drivers/xen/netfront/*.[ch]
+sed -i -e 's/\<\(netif_.x_request\)_t\>/struct xen_\1/g' drivers/xen/netfront/*.[ch]
+sed -i -e 's/\<struct \(netif_.x_request\)\>/struct xen_\1/g' drivers/xen/netfront/*.[ch]
+sed -i -e 's/\<struct \(netif_.x_response\)\>/struct xen_\1/g' drivers/xen/netfront/*.[ch]
+sed -i -e 's/\<struct \(netif_.x_sring\)\>/struct xen_\1/g' drivers/xen/netfront/*.[ch]
+
+sed -i -e 's/\<netif_extra_info\>/xen_netif_extra_info/g' drivers/xen/net{front,back}/*.[ch]
+
+diff -r a2ecb468584a drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Thu Jan 14 14:29:35 2010 +0000
++++ b/drivers/xen/netback/common.h	Thu Jan 14 14:39:44 2010 +0000
+@@ -70,8 +70,8 @@
+ 	unsigned int     irq;
+ 
+ 	/* The shared rings and indexes. */
+-	netif_tx_back_ring_t tx;
+-	netif_rx_back_ring_t rx;
++	struct xen_netif_tx_back_ring tx;
++	struct xen_netif_rx_back_ring rx;
+ 	struct vm_struct *tx_comms_area;
+ 	struct vm_struct *rx_comms_area;
+ 
+@@ -190,8 +190,8 @@
+ void netif_accel_init(void);
+ 
+ 
+-#define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
+-#define NET_RX_RING_SIZE __CONST_RING_SIZE(netif_rx, PAGE_SIZE)
++#define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
++#define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
+ 
+ void netif_disconnect(struct xen_netif *netif);
+ 
+diff -r a2ecb468584a drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Thu Jan 14 14:29:35 2010 +0000
++++ b/drivers/xen/netback/interface.c	Thu Jan 14 14:39:44 2010 +0000
+@@ -307,8 +307,8 @@
+ 	      unsigned long rx_ring_ref, unsigned int evtchn)
+ {
+ 	int err = -ENOMEM;
+-	netif_tx_sring_t *txs;
+-	netif_rx_sring_t *rxs;
++	struct xen_netif_tx_sring *txs;
++	struct xen_netif_rx_sring *rxs;
+ 
+ 	/* Already connected through? */
+ 	if (netif->irq)
+@@ -333,10 +333,10 @@
+ 	netif->irq = err;
+ 	disable_irq(netif->irq);
+ 
+-	txs = (netif_tx_sring_t *)netif->tx_comms_area->addr;
++	txs = (struct xen_netif_tx_sring *)netif->tx_comms_area->addr;
+ 	BACK_RING_INIT(&netif->tx, txs, PAGE_SIZE);
+ 
+-	rxs = (netif_rx_sring_t *)
++	rxs = (struct xen_netif_rx_sring *)
+ 		((char *)netif->rx_comms_area->addr);
+ 	BACK_RING_INIT(&netif->rx, rxs, PAGE_SIZE);
+ 
+diff -r a2ecb468584a drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Thu Jan 14 14:29:35 2010 +0000
++++ b/drivers/xen/netback/netback.c	Thu Jan 14 14:39:44 2010 +0000
+@@ -53,9 +53,9 @@
+ 
+ static void netif_idx_release(u16 pending_idx);
+ static void make_tx_response(struct xen_netif *netif, 
+-			     netif_tx_request_t *txp,
++			     struct xen_netif_tx_request *txp,
+ 			     s8       st);
+-static netif_rx_response_t *make_rx_response(struct xen_netif *netif, 
++static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif, 
+ 					     u16      id, 
+ 					     s8       st,
+ 					     u16      offset,
+@@ -108,7 +108,7 @@
+ #define PKT_PROT_LEN 64
+ 
+ static struct pending_tx_info {
+-	netif_tx_request_t req;
++	struct xen_netif_tx_request req;
+ 	struct xen_netif *netif;
+ } pending_tx_info[MAX_PENDING_REQS];
+ static u16 pending_ring[MAX_PENDING_REQS];
+@@ -387,7 +387,7 @@
+ 	gnttab_transfer_t *gop;
+ 	gnttab_copy_t *copy_gop;
+ 	multicall_entry_t *mcl;
+-	netif_rx_request_t *req;
++	struct xen_netif_rx_request *req;
+ 	unsigned long old_mfn, new_mfn;
+ 	int idx = netif_page_index(page);
+ 
+@@ -561,7 +561,7 @@
+ 	struct xen_netif *netif = NULL;
+ 	s8 status;
+ 	u16 id, irq, flags;
+-	netif_rx_response_t *resp;
++	struct xen_netif_rx_response *resp;
+ 	multicall_entry_t *mcl;
+ 	struct sk_buff_head rxq;
+ 	struct sk_buff *skb;
+@@ -708,8 +708,8 @@
+ 					skb_headlen(skb), flags);
+ 
+ 		if (meta[npo.meta_cons].frag.size) {
+-			struct netif_extra_info *gso =
+-				(struct netif_extra_info *)
++			struct xen_netif_extra_info *gso =
++				(struct xen_netif_extra_info *)
+ 				RING_GET_RESPONSE(&netif->rx,
+ 						  netif->rx.rsp_prod_pvt++);
+ 
+@@ -961,7 +961,7 @@
+ 	}
+ }
+ 
+-static void netbk_tx_err(struct xen_netif *netif, netif_tx_request_t *txp, RING_IDX end)
++static void netbk_tx_err(struct xen_netif *netif, struct xen_netif_tx_request *txp, RING_IDX end)
+ {
+ 	RING_IDX cons = netif->tx.req_cons;
+ 
+@@ -976,8 +976,8 @@
+ 	netif_put(netif);
+ }
+ 
+-static int netbk_count_requests(struct xen_netif *netif, netif_tx_request_t *first,
+-				netif_tx_request_t *txp, int work_to_do)
++static int netbk_count_requests(struct xen_netif *netif, struct xen_netif_tx_request *first,
++				struct xen_netif_tx_request *txp, int work_to_do)
+ {
+ 	RING_IDX cons = netif->tx.req_cons;
+ 	int frags = 0;
+@@ -1018,7 +1018,7 @@
+ 
+ static gnttab_map_grant_ref_t *netbk_get_requests(struct xen_netif *netif,
+ 						  struct sk_buff *skb,
+-						  netif_tx_request_t *txp,
++						  struct xen_netif_tx_request *txp,
+ 						  gnttab_map_grant_ref_t *mop)
+ {
+ 	struct skb_shared_info *shinfo = skb_shinfo(skb);
+@@ -1051,7 +1051,7 @@
+ 	gnttab_map_grant_ref_t *mop = *mopp;
+ 	int pending_idx = *((u16 *)skb->data);
+ 	struct xen_netif *netif = pending_tx_info[pending_idx].netif;
+-	netif_tx_request_t *txp;
++	struct xen_netif_tx_request *txp;
+ 	struct skb_shared_info *shinfo = skb_shinfo(skb);
+ 	int nr_frags = shinfo->nr_frags;
+ 	int i, err, start;
+@@ -1125,7 +1125,7 @@
+ 
+ 	for (i = 0; i < nr_frags; i++) {
+ 		skb_frag_t *frag = shinfo->frags + i;
+-		netif_tx_request_t *txp;
++		struct xen_netif_tx_request *txp;
+ 		unsigned long pending_idx;
+ 
+ 		pending_idx = (unsigned long)frag->page;
+@@ -1145,10 +1145,10 @@
+ 	}
+ }
+ 
+-int netbk_get_extras(struct xen_netif *netif, struct netif_extra_info *extras,
++int netbk_get_extras(struct xen_netif *netif, struct xen_netif_extra_info *extras,
+ 		     int work_to_do)
+ {
+-	struct netif_extra_info extra;
++	struct xen_netif_extra_info extra;
+ 	RING_IDX cons = netif->tx.req_cons;
+ 
+ 	do {
+@@ -1173,7 +1173,7 @@
+ 	return work_to_do;
+ }
+ 
+-static int netbk_set_skb_gso(struct sk_buff *skb, struct netif_extra_info *gso)
++static int netbk_set_skb_gso(struct sk_buff *skb, struct xen_netif_extra_info *gso)
+ {
+ 	if (!gso->u.gso.size) {
+ 		DPRINTK("GSO size must not be zero.\n");
+@@ -1202,9 +1202,9 @@
+ 	struct list_head *ent;
+ 	struct sk_buff *skb;
+ 	struct xen_netif *netif;
+-	netif_tx_request_t txreq;
+-	netif_tx_request_t txfrags[MAX_SKB_FRAGS];
+-	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
++	struct xen_netif_tx_request txreq;
++	struct xen_netif_tx_request txfrags[MAX_SKB_FRAGS];
++	struct xen_netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
+ 	u16 pending_idx;
+ 	RING_IDX i;
+ 	gnttab_map_grant_ref_t *mop;
+@@ -1320,7 +1320,7 @@
+ 		skb_reserve(skb, 16 + NET_IP_ALIGN);
+ 
+ 		if (extras[XEN_NETIF_EXTRA_TYPE_GSO - 1].type) {
+-			struct netif_extra_info *gso;
++			struct xen_netif_extra_info *gso;
+ 			gso = &extras[XEN_NETIF_EXTRA_TYPE_GSO - 1];
+ 
+ 			if (netbk_set_skb_gso(skb, gso)) {
+@@ -1374,7 +1374,7 @@
+ 
+ 	mop = tx_map_ops;
+ 	while ((skb = __skb_dequeue(&tx_queue)) != NULL) {
+-		netif_tx_request_t *txp;
++		struct xen_netif_tx_request *txp;
+ 
+ 		pending_idx = *((u16 *)skb->data);
+ 		netif       = pending_tx_info[pending_idx].netif;
+@@ -1484,11 +1484,11 @@
+ }
+ 
+ static void make_tx_response(struct xen_netif *netif, 
+-			     netif_tx_request_t *txp,
++			     struct xen_netif_tx_request *txp,
+ 			     s8       st)
+ {
+ 	RING_IDX i = netif->tx.rsp_prod_pvt;
+-	netif_tx_response_t *resp;
++	struct xen_netif_tx_response *resp;
+ 	int notify;
+ 
+ 	resp = RING_GET_RESPONSE(&netif->tx, i);
+@@ -1513,7 +1513,7 @@
+ #endif
+ }
+ 
+-static netif_rx_response_t *make_rx_response(struct xen_netif *netif, 
++static struct xen_netif_rx_response *make_rx_response(struct xen_netif *netif, 
+ 					     u16      id, 
+ 					     s8       st,
+ 					     u16      offset,
+@@ -1521,7 +1521,7 @@
+ 					     u16      flags)
+ {
+ 	RING_IDX i = netif->rx.rsp_prod_pvt;
+-	netif_rx_response_t *resp;
++	struct xen_netif_rx_response *resp;
+ 
+ 	resp = RING_GET_RESPONSE(&netif->rx, i);
+ 	resp->offset     = offset;
+diff -r a2ecb468584a drivers/xen/netfront/netfront.c
+--- a/drivers/xen/netfront/netfront.c	Thu Jan 14 14:29:35 2010 +0000
++++ b/drivers/xen/netfront/netfront.c	Thu Jan 14 14:39:44 2010 +0000
+@@ -150,8 +150,8 @@
+ #define GRANT_INVALID_REF	0
+ 
+ struct netfront_rx_info {
+-	struct netif_rx_response rx;
+-	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
++	struct xen_netif_rx_response rx;
++	struct xen_netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
+ };
+ 
+ /*
+@@ -467,8 +467,8 @@
+ 
+ static int setup_device(struct xenbus_device *dev, struct netfront_info *info)
+ {
+-	struct netif_tx_sring *txs;
+-	struct netif_rx_sring *rxs;
++	struct xen_netif_tx_sring *txs;
++	struct xen_netif_rx_sring *rxs;
+ 	int err;
+ 	struct net_device *netdev = info->netdev;
+ 
+@@ -478,7 +478,7 @@
+ 	info->tx.sring = NULL;
+ 	info->irq = 0;
+ 
+-	txs = (struct netif_tx_sring *)get_zeroed_page(GFP_NOIO | __GFP_HIGH);
++	txs = (struct xen_netif_tx_sring *)get_zeroed_page(GFP_NOIO | __GFP_HIGH);
+ 	if (!txs) {
+ 		err = -ENOMEM;
+ 		xenbus_dev_fatal(dev, err, "allocating tx ring page");
+@@ -494,7 +494,7 @@
+ 	}
+ 	info->tx_ring_ref = err;
+ 
+-	rxs = (struct netif_rx_sring *)get_zeroed_page(GFP_NOIO | __GFP_HIGH);
++	rxs = (struct xen_netif_rx_sring *)get_zeroed_page(GFP_NOIO | __GFP_HIGH);
+ 	if (!rxs) {
+ 		err = -ENOMEM;
+ 		xenbus_dev_fatal(dev, err, "allocating rx ring page");
+@@ -659,7 +659,7 @@
+ 		rmb(); /* Ensure we see responses up to 'rp'. */
+ 
+ 		for (cons = np->tx.rsp_cons; cons != prod; cons++) {
+-			struct netif_tx_response *txrsp;
++			struct xen_netif_tx_response *txrsp;
+ 
+ 			txrsp = RING_GET_RESPONSE(&np->tx, cons);
+ 			if (txrsp->status == NETIF_RSP_NULL)
+@@ -723,7 +723,7 @@
+  	unsigned long pfn;
+  	void *vaddr;
+ 	int nr_flips;
+-	netif_rx_request_t *req;
++	struct xen_netif_rx_request *req;
+ 
+ 	if (unlikely(!netfront_carrier_ok(np)))
+ 		return;
+@@ -872,7 +872,7 @@
+ }
+ 
+ static void xennet_make_frags(struct sk_buff *skb, struct net_device *dev,
+-			      struct netif_tx_request *tx)
++			      struct xen_netif_tx_request *tx)
+ {
+ 	struct netfront_info *np = netdev_priv(dev);
+ 	char *data = skb->data;
+@@ -938,8 +938,8 @@
+ {
+ 	unsigned short id;
+ 	struct netfront_info *np = netdev_priv(dev);
+-	struct netif_tx_request *tx;
+-	struct netif_extra_info *extra;
++	struct xen_netif_tx_request *tx;
++	struct xen_netif_extra_info *extra;
+ 	char *data = skb->data;
+ 	RING_IDX i;
+ 	grant_ref_t ref;
+@@ -1000,7 +1000,7 @@
+ 
+ #if HAVE_TSO
+ 	if (skb_shinfo(skb)->gso_size) {
+-		struct netif_extra_info *gso = (struct netif_extra_info *)
++		struct xen_netif_extra_info *gso = (struct xen_netif_extra_info *)
+ 			RING_GET_REQUEST(&np->tx, ++i);
+ 
+ 		if (extra)
+@@ -1086,10 +1086,10 @@
+ }
+ 
+ int xennet_get_extras(struct netfront_info *np,
+-		      struct netif_extra_info *extras, RING_IDX rp)
++		      struct xen_netif_extra_info *extras, RING_IDX rp)
+ 
+ {
+-	struct netif_extra_info *extra;
++	struct xen_netif_extra_info *extra;
+ 	RING_IDX cons = np->rx.rsp_cons;
+ 	int err = 0;
+ 
+@@ -1104,7 +1104,7 @@
+ 			break;
+ 		}
+ 
+-		extra = (struct netif_extra_info *)
++		extra = (struct xen_netif_extra_info *)
+ 			RING_GET_RESPONSE(&np->rx, ++cons);
+ 
+ 		if (unlikely(!extra->type ||
+@@ -1135,8 +1135,8 @@
+ 	int pages_flipped = *pages_flipped_p;
+ 	struct mmu_update *mmu;
+ 	struct multicall_entry *mcl;
+-	struct netif_rx_response *rx = &rinfo->rx;
+-	struct netif_extra_info *extras = rinfo->extras;
++	struct xen_netif_rx_response *rx = &rinfo->rx;
++	struct xen_netif_extra_info *extras = rinfo->extras;
+ 	RING_IDX cons = np->rx.rsp_cons;
+ 	struct sk_buff *skb = xennet_get_rx_skb(np, cons);
+ 	grant_ref_t ref = xennet_get_rx_ref(np, cons);
+@@ -1261,7 +1261,7 @@
+ 	struct sk_buff *nskb;
+ 
+ 	while ((nskb = __skb_dequeue(list))) {
+-		struct netif_rx_response *rx =
++		struct xen_netif_rx_response *rx =
+ 			RING_GET_RESPONSE(&np->rx, ++cons);
+ 
+ 		frag->page = skb_shinfo(nskb)->frags[0].page;
+@@ -1282,7 +1282,7 @@
+ }
+ 
+ static int xennet_set_skb_gso(struct sk_buff *skb,
+-			      struct netif_extra_info *gso)
++			      struct xen_netif_extra_info *gso)
+ {
+ 	if (!gso->u.gso.size) {
+ 		if (net_ratelimit())
+@@ -1321,8 +1321,8 @@
+ 	struct net_device *dev = np->netdev;
+ 	struct sk_buff *skb;
+ 	struct netfront_rx_info rinfo;
+-	struct netif_rx_response *rx = &rinfo.rx;
+-	struct netif_extra_info *extras = rinfo.extras;
++	struct xen_netif_rx_response *rx = &rinfo.rx;
++	struct xen_netif_extra_info *extras = rinfo.extras;
+ 	RING_IDX i, rp;
+ 	struct multicall_entry *mcl;
+ 	int work_done, more_to_do = 1, accel_more_to_do = 1;
+@@ -1369,7 +1369,7 @@
+ 		skb = __skb_dequeue(&tmpq);
+ 
+ 		if (extras[XEN_NETIF_EXTRA_TYPE_GSO - 1].type) {
+-			struct netif_extra_info *gso;
++			struct xen_netif_extra_info *gso;
+ 			gso = &extras[XEN_NETIF_EXTRA_TYPE_GSO - 1];
+ 
+ 			if (unlikely(xennet_set_skb_gso(skb, gso))) {
+@@ -1777,7 +1777,7 @@
+ 	int i, requeue_idx, err;
+ 	struct sk_buff *skb;
+ 	grant_ref_t ref;
+-	netif_rx_request_t *req;
++	struct xen_netif_rx_request *req;
+ 	unsigned int feature_rx_copy, feature_rx_flip;
+ 
+ 	err = xenbus_scanf(XBT_NIL, np->xbdev->otherend,
+diff -r a2ecb468584a drivers/xen/netfront/netfront.h
+--- a/drivers/xen/netfront/netfront.h	Thu Jan 14 14:29:35 2010 +0000
++++ b/drivers/xen/netfront/netfront.h	Thu Jan 14 14:39:44 2010 +0000
+@@ -38,8 +38,8 @@
+ #include <linux/skbuff.h>
+ #include <linux/list.h>
+ 
+-#define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
+-#define NET_RX_RING_SIZE __CONST_RING_SIZE(netif_rx, PAGE_SIZE)
++#define NET_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, PAGE_SIZE)
++#define NET_RX_RING_SIZE __CONST_RING_SIZE(xen_netif_rx, PAGE_SIZE)
+ 
+ #include <xen/xenbus.h>
+ 
+@@ -151,8 +151,8 @@
+ 
+ 	struct net_device_stats stats;
+ 
+-	struct netif_tx_front_ring tx;
+-	struct netif_rx_front_ring rx;
++	struct xen_netif_tx_front_ring tx;
++	struct xen_netif_rx_front_ring rx;
+ 
+ 	spinlock_t   tx_lock;
+ 	spinlock_t   rx_lock;
+diff -r a2ecb468584a include/xen/interface/io/netif.h
+--- a/include/xen/interface/io/netif.h	Thu Jan 14 14:29:35 2010 +0000
++++ b/include/xen/interface/io/netif.h	Thu Jan 14 14:39:44 2010 +0000
+@@ -65,14 +65,13 @@
+ #define _NETTXF_extra_info     (3)
+ #define  NETTXF_extra_info     (1U<<_NETTXF_extra_info)
+ 
+-struct netif_tx_request {
++struct xen_netif_tx_request {
+     grant_ref_t gref;      /* Reference to buffer page */
+     uint16_t offset;       /* Offset within buffer page */
+     uint16_t flags;        /* NETTXF_* */
+     uint16_t id;           /* Echoed in response message. */
+     uint16_t size;         /* Packet size in bytes.       */
+ };
+-typedef struct netif_tx_request netif_tx_request_t;
+ 
+ /* Types of netif_extra_info descriptors. */
+ #define XEN_NETIF_EXTRA_TYPE_NONE      (0)  /* Never used - invalid */
+@@ -92,7 +91,7 @@
+  * This structure needs to fit within both netif_tx_request and
+  * netif_rx_response for compatibility.
+  */
+-struct netif_extra_info {
++struct xen_netif_extra_info {
+     uint8_t type;  /* XEN_NETIF_EXTRA_TYPE_* */
+     uint8_t flags; /* XEN_NETIF_EXTRA_FLAG_* */
+ 
+@@ -141,19 +140,16 @@
+         uint16_t pad[3];
+     } u;
+ };
+-typedef struct netif_extra_info netif_extra_info_t;
+ 
+-struct netif_tx_response {
++struct xen_netif_tx_response {
+     uint16_t id;
+     int16_t  status;       /* NETIF_RSP_* */
+ };
+-typedef struct netif_tx_response netif_tx_response_t;
+ 
+-struct netif_rx_request {
++struct xen_netif_rx_request {
+     uint16_t    id;        /* Echoed in response message.        */
+     grant_ref_t gref;      /* Reference to incoming granted frame */
+ };
+-typedef struct netif_rx_request netif_rx_request_t;
+ 
+ /* Packet data has been validated against protocol checksum. */
+ #define _NETRXF_data_validated (0)
+@@ -171,34 +167,23 @@
+ #define _NETRXF_extra_info     (3)
+ #define  NETRXF_extra_info     (1U<<_NETRXF_extra_info)
+ 
+-struct netif_rx_response {
++struct xen_netif_rx_response {
+     uint16_t id;
+     uint16_t offset;       /* Offset in page of start of received packet  */
+     uint16_t flags;        /* NETRXF_* */
+     int16_t  status;       /* -ve: BLKIF_RSP_* ; +ve: Rx'ed pkt size. */
+ };
+-typedef struct netif_rx_response netif_rx_response_t;
+ 
+ /*
+  * Generate netif ring structures and types.
+  */
+ 
+-#if defined(CONFIG_XEN) || defined(HAVE_XEN_PLATFORM_COMPAT_H)
+-DEFINE_RING_TYPES(netif_tx, struct netif_tx_request, struct netif_tx_response);
+-DEFINE_RING_TYPES(netif_rx, struct netif_rx_request, struct netif_rx_response);
+-#else
+-#define xen_netif_tx_request netif_tx_request
+-#define xen_netif_rx_request netif_rx_request
+-#define xen_netif_tx_response netif_tx_response
+-#define xen_netif_rx_response netif_rx_response
+ DEFINE_RING_TYPES(xen_netif_tx,
+ 		  struct xen_netif_tx_request,
+ 		  struct xen_netif_tx_response);
+ DEFINE_RING_TYPES(xen_netif_rx,
+ 		  struct xen_netif_rx_request,
+ 		  struct xen_netif_rx_response);
+-#define xen_netif_extra_info netif_extra_info
+-#endif
+ 
+ #define NETIF_RSP_DROPPED         -2
+ #define NETIF_RSP_ERROR           -1

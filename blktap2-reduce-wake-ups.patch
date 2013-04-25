@@ -1,0 +1,218 @@
+blktap2: eliminate unnecessary tapdisk process wake-ups
+
+Instead of waiting for pages from the page pool using a per-pool wait
+queue, keep a list of tap devices that have stopped their queues (with
+blk_stop_queue()).  When pages are freed, start the queue of the first
+waiter.  The block layer will call the queue's request callback and
+this will kick tapdisk.
+
+We need to be careful when tearing down a tap that we correctly handle
+cases were another tapdisk as completed a request, freeing pages which
+attempted to wake up the tap being torn-down.
+
+# HG changeset patch
+# Parent 1fa1d6746cf62770d7f62d68b03133f3c79097a0
+
+diff -r 1fa1d6746cf6 drivers/xen/blktap2/blktap.h
+--- a/drivers/xen/blktap2/blktap.h	Mon Aug 13 14:57:01 2012 +0100
++++ b/drivers/xen/blktap2/blktap.h	Tue Sep 04 09:18:17 2012 +0100
+@@ -101,6 +101,8 @@ struct blktap {
+ 	struct blktap_page_pool       *pool;
+ 	struct io_context             *ioc;
+ 
++	struct list_head               node;
++
+ 	wait_queue_head_t              remove_wait;
+ 	struct work_struct             remove_work;
+ 	char                           name[BLKTAP_NAME_MAX];
+@@ -112,7 +114,7 @@ struct blktap_page_pool {
+ 	struct mempool_s              *bufs;
+ 	spinlock_t                     lock;
+ 	struct kobject                 kobj;
+-	wait_queue_head_t              wait;
++	struct list_head               waiters;
+ };
+ 
+ extern struct mutex blktap_lock;
+@@ -149,6 +151,7 @@ int blktap_device_destroy(struct blktap 
+ void blktap_device_destroy_sync(struct blktap *);
+ void blktap_device_run_queue(struct blktap *);
+ void blktap_device_end_request(struct blktap *, struct blktap_request *, int);
++void blktap_device_start_queue(struct blktap *tap);
+ 
+ int blktap_page_pool_init(struct kobject *);
+ void blktap_page_pool_exit(void);
+@@ -159,6 +162,7 @@ struct blktap_request *blktap_request_al
+ int blktap_request_get_pages(struct blktap *, struct blktap_request *, int);
+ void blktap_request_free(struct blktap *, struct blktap_request *);
+ void blktap_request_bounce(struct blktap *, struct blktap_request *, int, int);
++void __page_pool_wake(struct blktap_page_pool *pool);
+ 
+ int blktap_ioctx_attach(struct blktap *, int);
+ void blktap_ioctx_detach(struct blktap *);
+diff -r 1fa1d6746cf6 drivers/xen/blktap2/control.c
+--- a/drivers/xen/blktap2/control.c	Mon Aug 13 14:57:01 2012 +0100
++++ b/drivers/xen/blktap2/control.c	Tue Sep 04 09:18:17 2012 +0100
+@@ -22,6 +22,8 @@ blktap_control_get_minor(void)
+ 	if (unlikely(!tap))
+ 		return NULL;
+ 
++	INIT_LIST_HEAD(&tap->node);
++
+ 	mutex_lock(&blktap_lock);
+ 
+ 	for (minor = 0; minor < blktap_max_minor; minor++)
+diff -r 1fa1d6746cf6 drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Mon Aug 13 14:57:01 2012 +0100
++++ b/drivers/xen/blktap2/device.c	Tue Sep 04 09:18:17 2012 +0100
+@@ -11,6 +11,39 @@ int blktap_device_major;
+ 
+ #define dev_to_blktap(_dev) container_of(_dev, struct blktap, device)
+ 
++/* Call with tap->device.lock held. */
++static void blktap_device_stop_queue(struct blktap *tap)
++{
++	struct blktap_page_pool *pool = tap->pool;
++
++	spin_lock(&pool->lock);
++
++	/*
++	 * If this tap is already in the list of waiters, the queue is
++	 * already stopped.  This can happen if userspace is woken
++	 * early by a signal.
++	 */
++	if (list_empty(&tap->node)) {
++		list_add_tail(&tap->node, &pool->waiters);
++		blk_stop_queue(tap->device.gd->queue);
++	}
++
++	spin_unlock(&pool->lock);
++}
++
++/* Call with tap->device.lock held. */
++void blktap_device_start_queue(struct blktap *tap)
++{
++	struct blktap_page_pool *pool = tap->pool;
++
++	spin_lock(&pool->lock);
++
++	list_del_init(&tap->node);
++	blk_start_queue(tap->device.gd->queue);
++
++	spin_unlock(&pool->lock);
++}
++
+ static int
+ blktap_device_open(struct block_device *bdev, fmode_t mode)
+ {
+@@ -254,7 +287,7 @@ blktap_device_run_queue(struct blktap *t
+ 		spin_lock_irq(&tapdev->lock);
+ 
+ 		if (err == -EBUSY) {
+-			blk_stop_queue(q);
++			blktap_device_stop_queue(tap);
+ 			break;
+ 		}
+ 
+@@ -365,6 +398,20 @@ blktap_device_destroy(struct blktap *tap
+ 		goto out;
+ 	}
+ 
++	/*
++	 * This tap's queue may be been stopped. Remove ourselves from
++	 * the list of pool waiters.
++	 */
++	spin_lock(&tap->pool->lock);
++	list_del_init(&tap->node);
++	spin_unlock(&tap->pool->lock);
++
++	/*
++	 * Another tapdisk might have tried to wake us during teardown
++	 * so try and wake another tapdisk.
++	 */
++	__page_pool_wake(tap->pool);
++
+ 	del_gendisk(gd);
+ 	gd->private_data = NULL;
+ 
+diff -r 1fa1d6746cf6 drivers/xen/blktap2/request.c
+--- a/drivers/xen/blktap2/request.c	Mon Aug 13 14:57:01 2012 +0100
++++ b/drivers/xen/blktap2/request.c	Tue Sep 04 09:18:17 2012 +0100
+@@ -3,6 +3,7 @@
+ #include <linux/mutex.h>
+ #include <linux/sched.h>
+ #include <linux/device.h>
++#include <linux/blkdev.h>
+ 
+ #include "blktap.h"
+ 
+@@ -29,10 +30,12 @@ static DEFINE_MUTEX(pool_set_mutex);
+ static struct kmem_cache *request_cache;
+ static mempool_t *request_pool;
+ 
+-static void
++void
+ __page_pool_wake(struct blktap_page_pool *pool)
+ {
+-	mempool_t *mem = pool->bufs;
++	struct blktap *tap = NULL;
++
++	spin_lock(&pool->lock);
+ 
+ 	/*
+ 	  NB. slightly wasteful to always wait for a full segment
+@@ -41,8 +44,32 @@ __page_pool_wake(struct blktap_page_pool
+ 	  alloc/release cycles would otherwise keep everyone spinning.
+ 	*/
+ 
+-	if (mem->curr_nr >= POOL_MAX_REQUEST_PAGES)
+-		wake_up(&pool->wait);
++	if (pool->bufs->curr_nr >= POOL_MAX_REQUEST_PAGES
++	    && !list_empty(&pool->waiters)) {
++		tap = list_first_entry(&pool->waiters, struct blktap, node);
++		list_del_init(&tap->node);
++	}
++
++	spin_unlock(&pool->lock);
++
++	/*
++	 * We have to drop the pool lock here or
++	 * blktap_device_start_queue() will deadlock.
++	 *
++	 * tap is deleted from the pool waiters list above so a
++	 * another __page_pool_wake() call will wake a different
++	 * process.
++	 *
++	 * blktap_device_stop_queue() may also be called again, so
++	 * blktap_device_start_queue() also deletes the tap from
++	 * pool->waiters.
++	 */
++
++	if (tap) {
++		spin_lock_irq(&tap->device.lock);
++		blktap_device_start_queue(tap);
++		spin_unlock_irq(&tap->device.lock);
++	}
+ }
+ 
+ int
+@@ -336,7 +363,7 @@ blktap_page_pool_create(const char *name
+ 		goto fail;
+ 
+ 	spin_lock_init(&pool->lock);
+-	init_waitqueue_head(&pool->wait);
++	INIT_LIST_HEAD(&pool->waiters);
+ 
+ 	pool->bufs = mempool_create(nr_pages,
+ 				    __mempool_page_alloc, __mempool_page_free,
+diff -r 1fa1d6746cf6 drivers/xen/blktap2/ring.c
+--- a/drivers/xen/blktap2/ring.c	Mon Aug 13 14:57:01 2012 +0100
++++ b/drivers/xen/blktap2/ring.c	Tue Sep 04 09:18:17 2012 +0100
+@@ -443,7 +443,6 @@ static unsigned int blktap_ring_poll(str
+ 	struct blktap_ring *ring = &tap->ring;
+ 	int work;
+ 
+-	poll_wait(filp, &tap->pool->wait, wait);
+ 	poll_wait(filp, &ring->poll_wait, wait);
+ 
+ 	down_read(&current->mm->mmap_sem);

@@ -1,0 +1,28 @@
+(from xen-unstable.hg 24571:1e27e827e6a8)
+
+xenoprof: Make the escape code consistent across 32 and  64-bit xen
+
+At the moment, the xenoprof escape code is defined as "~0UL".
+Unfortunately, this expands to 0xffffffff on 32-bit systems
+and 0xffffffffffffffff on 64-bit systems; with the result that
+while 32-on-32 and 64-in-64 work fine, 32-on-64 (also known as
+"compat mode") is broken.
+
+This patch makes the definition consistent across architectures.
+In so doing, it will break old-32-bit-on-new-Xen, and vice versa;
+but this was seen as an acceptable thing to do.
+
+Signed-off-by: George Dunlap <george.dunlap@eu.citrix.com>
+
+diff -r d1b5f2137655 include/xen/interface/xenoprof.h
+--- a/include/xen/interface/xenoprof.h	Thu Feb 09 18:58:46 2012 +0000
++++ b/include/xen/interface/xenoprof.h	Thu Feb 09 19:03:16 2012 +0000
+@@ -68,7 +68,7 @@ struct event_log {
+ };
+ 
+ /* PC value that indicates a special code */
+-#define XENOPROF_ESCAPE_CODE ~0UL
++#define XENOPROF_ESCAPE_CODE (~0ULL)
+ /* Transient events for the xenoprof->oprofile cpu buf */
+ #define XENOPROF_TRACE_BEGIN 1
+ 

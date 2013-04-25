@@ -1,0 +1,13 @@
+CA-3831: Increase CDROM_STR_SIZE to prevent overflow when 35 cd devices are attached.
+
+--- ref-linux-2.6.18/drivers/cdrom/cdrom.c	2006-09-12 11:02:10.000000000 -0700
++++ linux-2.6.18-xen/drivers/cdrom/cdrom.c	2006-10-12 13:59:52.130038844 -0700
+@@ -3084,7 +3084,7 @@ EXPORT_SYMBOL(cdrom_get_media_event);
+ 
+ #ifdef CONFIG_SYSCTL
+ 
+-#define CDROM_STR_SIZE 1000
++#define CDROM_STR_SIZE 4000
+ 
+ static struct cdrom_sysctl_settings {
+ 	char	info[CDROM_STR_SIZE];	/* general info */

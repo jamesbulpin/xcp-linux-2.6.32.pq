@@ -1,0 +1,85 @@
+From 216b5b0ae195c45f5936669e61e4e01185d64807 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:34 -0700
+Subject: [PATCH 13/18] xen/blktap: Fix request slot congestion deadlocks.
+
+Tapdisks block when the global buffer frame pool dries
+out. Unfortunately blktap never cares to wake them up again, which is
+suboptimal.
+
+As is this patch, because it's waking up all threads when requests are
+freed, which probably wastes a lot of cycles when running large
+numbers of disks. Next revision should probably chain wake blocked
+tapdisks more carefully.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    1 +
+ drivers/xen/blktap2/request.c |    2 ++
+ drivers/xen/blktap2/ring.c    |   11 ++++++++++-
+ 3 files changed, 13 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 209d5fe..229ee3d 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -178,6 +178,7 @@ void blktap_ring_exit(void);
+ int blktap_ring_create(struct blktap *);
+ int blktap_ring_destroy(struct blktap *);
+ void blktap_ring_kick_user(struct blktap *);
++void blktap_ring_kick_all(void);
+ 
+ int blktap_sysfs_init(void);
+ void blktap_sysfs_exit(void);
+diff --git a/drivers/xen/blktap2/request.c b/drivers/xen/blktap2/request.c
+index 4efd013..eee7100 100644
+--- a/drivers/xen/blktap2/request.c
++++ b/drivers/xen/blktap2/request.c
+@@ -244,6 +244,8 @@ blktap_request_free(struct blktap *tap, struct blktap_request *request)
+ 
+ 	if (free)
+ 		wake_up(&pool.wait_queue);
++
++	blktap_ring_kick_all();
+ }
+ 
+ void
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 913ac24..1d90ece 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -17,6 +17,8 @@
+ int blktap_ring_major;
+ static struct cdev blktap_ring_cdev;
+ 
++static DECLARE_WAIT_QUEUE_HEAD(blktap_poll_wait);
++
+ static inline struct blktap *
+ vma_to_blktap(struct vm_area_struct *vma)
+ {
+@@ -384,6 +386,7 @@ static unsigned int blktap_ring_poll(struct file *filp, poll_table *wait)
+ 	struct blktap_ring *ring = &tap->ring;
+ 	int work = 0;
+ 
++	poll_wait(filp, &blktap_poll_wait, wait);
+ 	poll_wait(filp, &ring->poll_wait, wait);
+ 
+ 	down_read(&current->mm->mmap_sem);
+@@ -411,7 +414,13 @@ static struct file_operations blktap_ring_file_operations = {
+ void
+ blktap_ring_kick_user(struct blktap *tap)
+ {
+-	wake_up_interruptible(&tap->ring.poll_wait);
++	wake_up(&tap->ring.poll_wait);
++}
++
++void
++blktap_ring_kick_all(void)
++{
++	wake_up(&blktap_poll_wait);
+ }
+ 
+ int
+-- 
+1.7.0.4
+

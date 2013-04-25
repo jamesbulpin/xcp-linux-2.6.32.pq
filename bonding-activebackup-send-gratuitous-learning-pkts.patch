@@ -1,0 +1,50 @@
+Subject: bonding: Send gratuitous learning packets when in active/backup mode
+
+Index: linux-2.6.32.hg/drivers/net/bonding/bond_main.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/net/bonding/bond_main.c	2010-10-21 14:50:46.018883149 +0100
++++ linux-2.6.32.hg/drivers/net/bonding/bond_main.c	2010-10-21 15:07:31.630807307 +0100
+@@ -2426,6 +2426,10 @@ static void bond_miimon_commit(struct bo
+ 				bond_alb_handle_link_change(bond, slave,
+ 							    BOND_LINK_DOWN);
+ 
++			/* If BOND_LINK_DOWN then send out gratituous ARP's */
++			if (bond->params.mode == BOND_MODE_ACTIVEBACKUP)
++				slb_send_learning_packets(bond);
++
+ 			if (slave == bond->curr_active_slave)
+ 				goto do_failover;
+ 
+Index: linux-2.6.32.hg/drivers/net/bonding/bond_alb.c
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/net/bonding/bond_alb.c	2010-10-21 14:50:46.006798723 +0100
++++ linux-2.6.32.hg/drivers/net/bonding/bond_alb.c	2010-10-21 15:03:11.743117282 +0100
+@@ -119,7 +119,7 @@ static inline struct arp_pkt *arp_pkt(co
+ 
+ /* Forward declaration */
+ static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[]);
+-static void slb_send_learning_packets(struct bonding *bond);
++void slb_send_learning_packets(struct bonding *bond);
+ 
+ static inline u8 _simple_hash(const u8 *hash_start, int hash_size)
+ {
+@@ -316,7 +316,7 @@ static struct slave *tlb_choose_channel(
+ 
+ /*********************** slb specific functions ***************************/
+ 
+-static void slb_send_learning_packets(struct bonding *bond)
++void slb_send_learning_packets(struct bonding *bond)
+ {
+ 	struct vlan_entry *vlan;
+ 	struct net_device *vlan_dev;
+Index: linux-2.6.32.hg/drivers/net/bonding/bond_alb.h
+===================================================================
+--- linux-2.6.32.hg.orig/drivers/net/bonding/bond_alb.h	2010-10-21 14:50:46.010863781 +0100
++++ linux-2.6.32.hg/drivers/net/bonding/bond_alb.h	2010-10-21 15:03:11.743117282 +0100
+@@ -130,5 +130,6 @@ int bond_alb_xmit(struct sk_buff *skb, s
+ void bond_alb_monitor(struct work_struct *);
+ int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr);
+ void bond_alb_clear_vlan(struct bonding *bond, unsigned short vlan_id);
++void slb_send_learning_packets(struct bonding *bond);
+ #endif /* __BOND_ALB_H__ */
+ 

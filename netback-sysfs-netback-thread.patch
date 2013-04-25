@@ -1,0 +1,83 @@
+CA-81450: Expose VIFs' allocation to netback groups in sysfs
+
+Because allocation of VIFs to netback groups is static, it's easy to end up with a pathologically bad allocation in which VIFs carrying a lot of traffic are forced to share a netback thread whilst other netback threads go unused. (This problem is described in CA-48771.)
+
+To compound the problem, it was not previously easily possible to find out which netback thread a VIF is allocated to. In order to do this, you needed either arcane knowledge of netback's allocation mechanism or to do some forensic experimentation.
+
+This patch makes it possible to find out which netback thread a VIF is allocated to, by exposing this information in dom0 sysfs. For example, to find out the group to which VIF 2 of domain 1 belongs to:
+
+$ cat /sys/devices/xen-backend/vif-1-2/group
+2
+
+Note that this patch becomes redundant when moving to a thread-per-VIF model.
+
+Signed-off-by: Jonathan Davies <jonathan.davies@citrix.com>
+
+diff -r 23fbd54cd94a drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Wed Mar 14 10:48:24 2012 +0000
++++ b/drivers/xen/netback/xenbus.c	Wed Mar 14 10:48:49 2012 +0000
+@@ -36,6 +36,8 @@ static void unregister_hotplug_status_wa
+ static void disconnect_backend(struct backend_info *be);
+ static void unregister_gso_watch(struct backend_info *be);
+ static void unregister_gso_prefix_watch(struct backend_info *be);
++static int netif_sysfs_addif(struct xenbus_device *dev);
++static void netif_sysfs_delif(struct xenbus_device *dev);
+ 
+ static int netback_remove(struct xenbus_device *dev)
+ {
+@@ -43,6 +45,7 @@ static int netback_remove(struct xenbus_
+ 
+ 	netback_remove_accelerators(be, dev);
+ 
++	netif_sysfs_delif(dev);
+ 	unregister_hotplug_status_watch(be);
+ 	disconnect_backend(be);
+ 	kfree(be);
+@@ -72,6 +75,12 @@ static int netback_probe(struct xenbus_d
+ 	be->dev = dev;
+ 	dev_set_drvdata(&dev->dev, be);
+ 
++	err = netif_sysfs_addif(dev);
++	if (err) {
++		xenbus_dev_fatal(dev, err, "creating sysfs entries");
++		goto fail;
++	}
++
+ 	sg = 1;
+ 	if (netbk_copy_skb_mode == NETBK_ALWAYS_COPY_SKB)
+ 		sg = 0;
+@@ -731,6 +740,34 @@ static int connect_rings(struct backend_
+ 	return 0;
+ }
+ 
++/**
++ * Create a sysfs node called 'group' exposing the netif's group.
++ */
++static ssize_t show_group(struct device *_dev,
++                          struct device_attribute *attr,
++			  char *buf)
++{
++	ssize_t ret = -ENODEV;
++	struct backend_info *be;
++
++	if (!get_device(_dev))
++		return ret;
++	if ((be = dev_get_drvdata(_dev)) != NULL)
++		ret = sprintf(buf, "%d\n", be->netif->group);
++	put_device(_dev);
++	return ret;
++}
++static DEVICE_ATTR(group, S_IRUGO, show_group, NULL);
++
++static int netif_sysfs_addif(struct xenbus_device *dev)
++{
++	return sysfs_create_file(&dev->dev.kobj, &dev_attr_group);
++}
++
++static void netif_sysfs_delif(struct xenbus_device *dev)
++{
++	sysfs_remove_file(&dev->dev.kobj, &dev_attr_group);
++}
+ 
+ /* ** Driver Registration ** */
+ 

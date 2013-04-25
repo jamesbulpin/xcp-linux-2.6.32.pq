@@ -1,0 +1,66 @@
+CA-30778: Bind sysfs create/remove to backend init/exit
+
+Moves the per-backend sysfs create/remove code into backend
+init/exit. Attribute existence bound to guest ring connection state
+does not seem to serve any particular purpose, and keeping
+backend_changed() small makes later extensions, such as switching the
+physical node in VBD paused state, more straightforward.
+
+diff -r 336053aae576 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jul 15 17:20:14 2009 -0700
++++ b/drivers/xen/blkback/xenbus.c	Wed Jul 15 17:23:19 2009 -0700
+@@ -194,7 +194,7 @@
+ VBD_SHOW(physical_device, "%x:%x\n", be->major, be->minor);
+ VBD_SHOW(mode, "%s\n", be->mode);
+ 
+-int xenvbd_sysfs_addif(struct xenbus_device *dev)
++static int xenvbd_sysfs_addif(struct xenbus_device *dev)
+ {
+ 	int error;
+ 	struct backend_info *be = dev->dev.driver_data;
+@@ -221,7 +221,7 @@
+ 	return error;
+ }
+ 
+-void xenvbd_sysfs_delif(struct xenbus_device *dev)
++static void xenvbd_sysfs_delif(struct xenbus_device *dev)
+ {
+ 	struct backend_info *be = dev->dev.driver_data;
+ 	if (be->group_added == 0)
+@@ -341,8 +341,6 @@
+ 	blkif->be->major = 0;
+ 	blkif->be->minor = 0;
+ 	blkif->remove_requested = 0;
+-	if (blkif->be->dev)
+-		xenvbd_sysfs_delif(blkif->be->dev);
+ 
+ 	up(&blkback_dev_sem);
+ 
+@@ -516,6 +514,12 @@
+ 	/* setup back pointer */
+ 	be->blkif->be = be;
+ 
++	err = xenvbd_sysfs_addif(dev);
++	if (err) {
++		xenbus_dev_fatal(dev, err, "creating sysfs entries");
++		goto fail;
++	}
++
+ 	err = xenbus_watch_path2(dev, dev->nodename, "physical-device",
+ 				 &be->backend_watch, backend_changed);
+ 	if (err)
+@@ -673,14 +677,6 @@
+ 		if (err)
+ 			return;
+ 
+-		err = xenvbd_sysfs_addif(dev);
+-		if (err) {
+-			vbd_free(&be->blkif->vbd);
+-			be->major = be->minor = 0;
+-			xenbus_dev_fatal(dev, err, "creating sysfs entries");
+-			return;
+-		}
+-
+ 		/* We're potentially connected now */
+ 		update_blkif_status(be->blkif);
+ 	}

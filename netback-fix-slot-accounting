@@ -1,0 +1,126 @@
+Remove half-assumption that meta_slots and copy_slots are equivalent
+
+This may be true at the moment but could easily become false and some
+odd breakage would then ensue.
+
+diff -r 4dc99e34233a drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Mar 11 10:34:59 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Mar 11 10:39:20 2011 +0000
+@@ -286,6 +286,11 @@ static void netbk_gop_frag_copy(struct x
+ 	}
+ }
+ 
++struct skb_cb_overlay {
++	int copy_slots_used;
++	int meta_slots_used;
++};
++
+ /* Prepare an SKB to be transmitted to the frontend.  This is
+    responsible for allocating grant operations, meta structures, etc.
+    It returns the number of meta structures consumed.  The number of
+@@ -293,8 +298,8 @@ static void netbk_gop_frag_copy(struct x
+    plus the number of GSO descriptors used.  Currently, we use either
+    zero GSO descriptors (for non-GSO packets) or one descriptor (for
+    frontend-side LRO). */
+-static int netbk_gop_skb(struct sk_buff *skb,
+-			 struct netrx_pending_operations *npo)
++static void netbk_gop_skb(struct sk_buff *skb,
++			  struct netrx_pending_operations *npo)
+ {
+ 	struct xen_netif *netif = netdev_priv(skb->dev);
+ 	struct netbk_protocol0 *p0 = &netif->rx.p0;
+@@ -302,8 +307,11 @@ static int netbk_gop_skb(struct sk_buff 
+ 	int i;
+ 	struct xen_netif_rx_request *req;
+ 	struct netbk_rx_meta *meta;
++	int old_copy_prod;
+ 	int old_meta_prod;
++	struct skb_cb_overlay *sco;
+ 
++	old_copy_prod = npo->copy_prod;
+ 	old_meta_prod = npo->meta_prod;
+ 
+ 	BUG_ON(skb_shinfo(skb)->gso_size &&
+@@ -348,21 +356,24 @@ static int netbk_gop_skb(struct sk_buff 
+ 				    0);
+ 	}
+ 
+-	return npo->meta_prod - old_meta_prod;
++
++	sco = (struct skb_cb_overlay *)skb->cb;
++	sco->copy_slots_used = npo->copy_prod - old_copy_prod;
++	sco->meta_slots_used = npo->meta_prod - old_meta_prod;
+ }
+ 
+ /* This is a twin to netbk_gop_skb.  Assume that netbk_gop_skb was
+    used to set up the operations on the top of
+    netrx_pending_operations, which have since been done.  Check that
+    they didn't give any errors and advance over them. */
+-static int netbk_check_gop(int nr_meta_slots, domid_t domid,
++static int netbk_check_gop(int nr_copy_slots, domid_t domid,
+ 			   struct netrx_pending_operations *npo)
+ {
+ 	struct gnttab_copy     *copy_op;
+ 	int status = NETIF_RSP_OKAY;
+ 	int i;
+ 
+-	for (i = 0; i < nr_meta_slots; i++) {
++	for (i = 0; i < nr_copy_slots; i++) {
+ 		copy_op = npo->copy + npo->copy_cons++;
+ 		if (copy_op->status != GNTST_okay) {
+ 				DPRINTK("Bad status %d from copy to DOM%d.\n",
+@@ -394,10 +405,6 @@ static void netbk_add_frag_responses(str
+ 	}
+ }
+ 
+-struct skb_cb_overlay {
+-	int meta_slots_used;
+-};
+-
+ static void net_rx_action(unsigned long data)
+ {
+ 	struct xen_netif *netif = NULL;
+@@ -412,7 +419,6 @@ static void net_rx_action(unsigned long 
+ 	int nr_frags;
+ 	int count;
+ 	unsigned long offset;
+-	struct skb_cb_overlay *sco;
+ 
+ 	struct netrx_pending_operations npo = {
+ 		.copy  = netbk->grant_copy_op,
+@@ -428,8 +434,7 @@ static void net_rx_action(unsigned long 
+ 
+ 		nr_frags = skb_shinfo(skb)->nr_frags;
+ 
+-		sco = (struct skb_cb_overlay *)skb->cb;
+-		sco->meta_slots_used = netbk_gop_skb(skb, &npo);
++		netbk_gop_skb(skb, &npo);
+ 
+ 		count += nr_frags + 1;
+ 
+@@ -451,6 +456,7 @@ static void net_rx_action(unsigned long 
+ 	BUG_ON(ret != 0);
+ 
+ 	while ((skb = __skb_dequeue(&rxq)) != NULL) {
++		struct skb_cb_overlay *sco;
+ 		struct netbk_protocol0 *p0;
+ 
+ 		sco = (struct skb_cb_overlay *)skb->cb;
+@@ -477,7 +483,7 @@ static void net_rx_action(unsigned long 
+ 		netif->stats.tx_bytes += skb->len;
+ 		netif->stats.tx_packets++;
+ 
+-		status = netbk_check_gop(sco->meta_slots_used,
++		status = netbk_check_gop(sco->copy_slots_used,
+ 					 netif->domid, &npo);
+ 
+ 		if (sco->meta_slots_used == 1)
+@@ -548,6 +554,8 @@ static void net_rx_action(unsigned long 
+ 		npo.meta_cons += sco->meta_slots_used;
+ 		dev_kfree_skb(skb);
+ 	}
++	BUG_ON(npo.copy_cons != npo.copy_prod);
++	BUG_ON(npo.meta_cons != npo.meta_prod);
+ 
+ 	while (notify_nr != 0) {
+ 		irq = netbk->notify_list[--notify_nr];

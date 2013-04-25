@@ -1,0 +1,217 @@
+From f9ffd7e5d03c93b74889caffe8f9719b6f9b5724 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Thu, 3 Jun 2010 03:12:39 +0000
+Subject: [PATCH 7/7] blktap: Remove passthrough mode
+
+blktap: Remove passthrough mode.
+
+Signed-off-by: Jake Wires <jake.wires@citrix.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h |    2 -
+ drivers/xen/blktap2/device.c |  105 -------------------------------------------
+ drivers/xen/blktap2/sysfs.c  |   44 ------------------
+ 3 files changed, 0 insertions(+), 151 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 3574f53..33603cd 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -9,8 +9,6 @@
+ #include <xen/blkif.h>
+ #include <xen/grant_table.h>
+ 
+-//#define ENABLE_PASSTHROUGH
+-
+ extern int blktap_debug_level;
+ 
+ #define BTPRINTK(level, tag, force, _f, _a...)				\
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 352cf32..1756f7c 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -646,98 +646,6 @@ out:
+ 	return err;
+ }
+ 
+-#ifdef ENABLE_PASSTHROUGH
+-#define rq_for_each_bio_safe(_bio, _tmp, _req)				\
+-	if ((_req)->bio)						\
+-		for (_bio = (_req)->bio;				\
+-		     _bio && ((_tmp = _bio->bi_next) || 1);		\
+-		     _bio = _tmp)
+-
+-static void
+-blktap_device_forward_request(struct blktap *tap, struct request *req)
+-{
+-	struct bio *bio, *tmp;
+-	struct blktap_device *dev;
+-
+-	dev = &tap->device;
+-
+-	rq_for_each_bio_safe(bio, tmp, req) {
+-		bio->bi_bdev = dev->bdev;
+-		submit_bio(bio->bi_rw, bio);
+-	}
+-}
+-
+-static void
+-blktap_device_close_bdev(struct blktap *tap)
+-{
+-	struct blktap_device *dev;
+-
+-	dev = &tap->device;
+-
+-	if (dev->bdev)
+-		blkdev_put(dev->bdev);
+-
+-	dev->bdev = NULL;
+-	clear_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse);
+-}
+-
+-static int
+-blktap_device_open_bdev(struct blktap *tap, u32 pdev)
+-{
+-	struct block_device *bdev;
+-	struct blktap_device *dev;
+-
+-	dev = &tap->device;
+-
+-	bdev = open_by_devnum(pdev, FMODE_WRITE);
+-	if (IS_ERR(bdev)) {
+-		BTERR("opening device %x:%x failed: %ld\n",
+-		      MAJOR(pdev), MINOR(pdev), PTR_ERR(bdev));
+-		return PTR_ERR(bdev);
+-	}
+-
+-	if (!bdev->bd_disk) {
+-		BTERR("device %x:%x doesn't exist\n",
+-		      MAJOR(pdev), MINOR(pdev));
+-		blkdev_put(dev->bdev);
+-		return -ENOENT;
+-	}
+-
+-	dev->bdev = bdev;
+-	set_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse);
+-
+-	/* TODO: readjust queue parameters */
+-
+-	BTINFO("set device %d to passthrough on %x:%x\n",
+-	       tap->minor, MAJOR(pdev), MINOR(pdev));
+-
+-	return 0;
+-}
+-
+-int
+-blktap_device_enable_passthrough(struct blktap *tap,
+-				 unsigned major, unsigned minor)
+-{
+-	u32 pdev;
+-	struct blktap_device *dev;
+-
+-	dev  = &tap->device;
+-	pdev = MKDEV(major, minor);
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse))
+-		return -EINVAL;
+-
+-	if (dev->bdev) {
+-		if (pdev)
+-			return -EINVAL;
+-		blktap_device_close_bdev(tap);
+-		return 0;
+-	}
+-
+-	return blktap_device_open_bdev(tap, pdev);
+-}
+-#endif
+-
+ /*
+  * called from tapdisk context
+  */
+@@ -769,14 +677,6 @@ blktap_device_run_queue(struct blktap *tap)
+ 			continue;
+ 		}
+ 
+-#ifdef ENABLE_PASSTHROUGH
+-		if (test_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse)) {
+-			blkdev_dequeue_request(req);
+-			blktap_device_forward_request(tap, req);
+-			continue;
+-		}
+-#endif
+-
+ 		if (RING_FULL(&ring->ring)) {
+ 		wait:
+ 			/* Avoid pointless unplugs. */
+@@ -927,11 +827,6 @@ blktap_device_destroy(struct blktap *tap)
+ 	dev->gd = NULL;
+ 	spin_unlock_irq(&dev->lock);
+ 
+-#ifdef ENABLE_PASSTHROUGH
+-	if (dev->bdev)
+-		blktap_device_close_bdev(tap);
+-#endif
+-
+ 	del_gendisk(gd);
+ 	blk_cleanup_queue(gd->queue);
+ 	put_disk(gd);
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index ff7fb9a..49f5e67 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -114,50 +114,6 @@ blktap_sysfs_remove_device(struct device *dev,
+ }
+ CLASS_DEVICE_ATTR(remove, S_IWUSR, NULL, blktap_sysfs_remove_device);
+ 
+-#ifdef ENABLE_PASSTHROUGH
+-static ssize_t
+-blktap_sysfs_enable_passthrough(struct device *dev,
+-				const char *buf, size_t size)
+-{
+-	int err;
+-	unsigned major, minor;
+-	struct blktap *tap = (struct blktap *)dev_get_drvdata(dev);
+-
+-	BTINFO("passthrough request enabled\n");
+-
+-	blktap_sysfs_enter(tap);
+-
+-	if (!tap->ring.dev ||
+-	    test_bit(BLKTAP_SHUTDOWN_REQUESTED, &tap->dev_inuse)) {
+-		err = -ENODEV;
+-		goto out;
+-	}
+-
+-	if (!test_bit(BLKTAP_PAUSED, &tap->dev_inuse)) {
+-		err = -EINVAL;
+-		goto out;
+-	}
+-
+-	if (test_bit(BLKTAP_PASSTHROUGH, &tap->dev_inuse)) {
+-		err = -EINVAL;
+-		goto out;
+-	}
+-
+-	err = sscanf(buf, "%x:%x", &major, &minor);
+-	if (err != 2) {
+-		err = -EINVAL;
+-		goto out;
+-	}
+-
+-	err = blktap_device_enable_passthrough(tap, major, minor);
+-
+-out:
+-	blktap_sysfs_exit(tap);
+-	BTDBG("returning %d\n", (err ? err : size));
+-	return (err ? err : size);
+-}
+-#endif
+-
+ static ssize_t
+ blktap_sysfs_debug_device(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-- 
+1.7.0.4
+

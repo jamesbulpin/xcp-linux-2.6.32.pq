@@ -1,0 +1,126 @@
+# HG changeset patch
+# Parent 231950f8aae2b42f97dfed7b1c0bb25ac39248e5
+
+Dynamically allocate p1 tags.
+
+There's no need for a maximally sized array inlined in the netif. Instead,
+allocate a correctly sized array during the setup call.
+
+diff -r 231950f8aae2 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Tue Dec 13 11:11:45 2011 +0000
++++ b/drivers/xen/netback/common.h	Tue Dec 13 11:20:37 2011 +0000
+@@ -121,7 +121,7 @@ struct netbk_protocol0 {
+ struct netbk_protocol1 {
+ 	struct xen_netif_tx_front_ring front;
+ 	spinlock_t lock;
+-	struct netbk_tag tag[NETIF_MAX_TX_RING_SIZE];
++	struct netbk_tag *tag;
+ 	struct netbk_tag *tag_freelist;
+ 	grant_ref_t gref_head;
+ 	unsigned int gref_count;
+@@ -186,7 +186,7 @@ struct xen_netif {
+ 
+ 	wait_queue_head_t waiting_to_free;
+ 
+-	void (*setup)(struct xen_netif *);
++	int (*setup)(struct xen_netif *);
+ 	void (*start_xmit)(struct xen_netif *, struct sk_buff *);
+ 	void (*teardown)(struct xen_netif *);
+ 	void (*event)(struct xen_netif *);
+@@ -300,12 +300,12 @@ void netif_put_page_ext(struct page_ext 
+ 
+ int netbk_p0_queue_full(struct xen_netif *netif);
+ void netbk_p0_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
+-void netbk_p0_setup(struct xen_netif *netif);
++int netbk_p0_setup(struct xen_netif *netif);
+ void netbk_p0_teardown(struct xen_netif *netif);
+ void netbk_p0_event(struct xen_netif *netif);
+ 
+ void netbk_p1_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
+-void netbk_p1_setup(struct xen_netif *netif);
++int netbk_p1_setup(struct xen_netif *netif);
+ void netbk_p1_teardown(struct xen_netif *netif);
+ void netbk_p1_event(struct xen_netif *netif);
+ 
+diff -r 231950f8aae2 drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Tue Dec 13 11:11:45 2011 +0000
++++ b/drivers/xen/netback/interface.c	Tue Dec 13 11:20:37 2011 +0000
+@@ -479,7 +479,8 @@ int netif_map(struct xen_netif *netif, u
+ 		goto err_rx_protocol;
+ 	}
+ 
+-	netif->setup(netif);
++	if (netif->setup(netif) < 0)
++		goto err_setup;
+ 
+ 	err = bind_interdomain_evtchn_to_irqhandler(
+ 		netif->domid, evtchn, netbk_int, 0,
+@@ -502,6 +503,8 @@ int netif_map(struct xen_netif *netif, u
+ 
+ err_hypervisor:
+ 	DPRINTK("err_hypervisor");
++err_setup:
++	DPRINTK("err_setup");
+ err_rx_protocol:
+ 	DPRINTK("err_rx_protocol");
+ 	unmap_frontend_pages(&netif->rx_comms);
+diff -r 231950f8aae2 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Tue Dec 13 11:11:45 2011 +0000
++++ b/drivers/xen/netback/tx.c	Tue Dec 13 11:20:37 2011 +0000
+@@ -261,7 +261,7 @@ void netbk_p0_start_xmit(struct xen_neti
+ 	dev_kfree_skb(skb);
+ }
+ 
+-void netbk_p0_setup(struct xen_netif *netif)
++int netbk_p0_setup(struct xen_netif *netif)
+ {
+ 	struct netbk_protocol0 *p0 = &netif->rx.p0;
+ 	struct xen_netif_rx_sring *sring;
+@@ -270,6 +270,8 @@ void netbk_p0_setup(struct xen_netif *ne
+ 
+ 	sring = (struct xen_netif_rx_sring *)netif->rx_comms.ring_area->addr;
+ 	BACK_RING_INIT(&p0->back, sring, PAGE_SIZE * netif->rx_comms.nr_handles);
++
++	return 0;
+ }
+ 
+ void netbk_p0_teardown(struct xen_netif *netif)
+@@ -735,13 +737,19 @@ static void tasklet(unsigned long data)
+ 	spin_unlock_irqrestore(&p1->lock, flags);
+ }
+ 
+-void netbk_p1_setup(struct xen_netif *netif)
++int netbk_p1_setup(struct xen_netif *netif)
+ {
+ 	struct netbk_protocol1 *p1 = &netif->rx.p1;
+ 	struct xen_netif_tx_sring *sring;
+ 	int i;
+ 	int rc;
+ 
++	p1->tag = kzalloc(sizeof (struct netbk_tag) *
++			  NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles),
++			  GFP_KERNEL);
++	if (p1->tag == NULL)
++		return -ENOMEM;
++
+ 	sring = (struct xen_netif_tx_sring *)netif->rx_comms.ring_area->addr;
+ 	FRONT_RING_INIT(&p1->front, sring, PAGE_SIZE * netif->rx_comms.nr_handles);
+ 	SHARED_RING_INIT(sring);
+@@ -777,6 +785,8 @@ void netbk_p1_setup(struct xen_netif *ne
+ 	BUG_ON(rc < 0);
+ 
+ 	p1->gref_count = max_skb_slots(netif);
++
++	return 0;
+ }
+ 
+ void netbk_p1_teardown(struct xen_netif *netif)
+@@ -807,6 +817,8 @@ void netbk_p1_teardown(struct xen_netif 
+ 		i++;
+ 	}
+ 	BUG_ON(i != NETIF_TX_RING_SIZE(netif->rx_comms.nr_handles));
++
++	kfree(p1->tag);
+ }
+ 
+ void netbk_p1_event(struct xen_netif *netif)

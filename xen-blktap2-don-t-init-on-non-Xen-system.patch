@@ -1,0 +1,29 @@
+From e116b213442f6eacafcd068415e85afd89c5462c Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Wed, 9 Dec 2009 16:59:35 -0800
+Subject: [PATCH 09/23] xen/blktap2: don't init on non-Xen system
+
+Don't init blktap unless we're running under Xen.
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/control.c |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 1575816..79eaa05 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -248,6 +248,9 @@ blktap_init(void)
+ {
+ 	int err;
+ 
++	if (!xen_domain())
++		return -ENODEV;
++
+ 	err = blktap_request_pool_init();
+ 	if (err)
+ 		return err;
+-- 
+1.7.0.4
+

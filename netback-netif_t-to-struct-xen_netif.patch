@@ -1,0 +1,491 @@
+Upstream kernel coding style avoids idiom of typedefing a struct name
+with an _t suffix. Switch netif_t to the preferred style and add xen_
+namespace prefix.
+
+sed -i -e 's/\<netif_t\>/struct xen_netif/g' drivers/xen/netback/*.[ch]
+
+diff -r 419bbedb164e drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Wed May 26 16:17:53 2010 +0100
++++ b/drivers/xen/netback/common.h	Wed May 26 16:19:41 2010 +0100
+@@ -55,7 +55,7 @@
+ #define WPRINTK(fmt, args...)				\
+ 	printk(KERN_WARNING "xen_net: " fmt, ##args)
+ 
+-typedef struct netif_st {
++struct xen_netif {
+ 	/* Unique identifier for this interface. */
+ 	domid_t          domid;
+ 	unsigned int     handle;
+@@ -106,7 +106,7 @@
+ 	unsigned int carrier;
+ 
+ 	wait_queue_head_t waiting_to_free;
+-} netif_t;
++};
+ 
+ /*
+  * Implement our own carrier flag: the network stack's version causes delays
+@@ -144,7 +144,7 @@
+ 
+ struct backend_info {
+ 	struct xenbus_device *dev;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ 	enum xenbus_state frontend_state;
+ 
+ 	/* State relating to the netback accelerator */
+@@ -180,10 +180,10 @@
+ #define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
+ #define NET_RX_RING_SIZE __CONST_RING_SIZE(netif_rx, PAGE_SIZE)
+ 
+-void netif_disconnect(netif_t *netif);
++void netif_disconnect(struct xen_netif *netif);
+ 
+-netif_t *netif_alloc(struct device *parent, domid_t domid, unsigned int handle);
+-int netif_map(netif_t *netif, unsigned long tx_ring_ref,
++struct xen_netif *netif_alloc(struct device *parent, domid_t domid, unsigned int handle);
++int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref,
+ 	      unsigned long rx_ring_ref, unsigned int evtchn);
+ 
+ #define netif_get(_b) (atomic_inc(&(_b)->refcnt))
+@@ -198,8 +198,8 @@
+ #define netif_schedulable(netif)				\
+ 	(netif_running((netif)->dev) && netback_carrier_ok(netif))
+ 
+-void netif_schedule_work(netif_t *netif);
+-void netif_deschedule_work(netif_t *netif);
++void netif_schedule_work(struct xen_netif *netif);
++void netif_deschedule_work(struct xen_netif *netif);
+ 
+ int netif_be_start_xmit(struct sk_buff *skb, struct net_device *dev);
+ struct net_device_stats *netif_be_get_stats(struct net_device *dev);
+@@ -207,13 +207,13 @@
+ 
+ static inline int netbk_can_queue(struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 	return netif->can_queue;
+ }
+ 
+ static inline int netbk_can_sg(struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 	return netif->features & NETIF_F_SG;
+ }
+ 
+diff -r 419bbedb164e drivers/xen/netback/interface.c
+--- a/drivers/xen/netback/interface.c	Wed May 26 16:17:53 2010 +0100
++++ b/drivers/xen/netback/interface.c	Wed May 26 16:19:41 2010 +0100
+@@ -52,13 +52,13 @@
+ static unsigned long netbk_queue_length = 32;
+ module_param_named(queue_length, netbk_queue_length, ulong, 0644);
+ 
+-static void __netif_up(netif_t *netif)
++static void __netif_up(struct xen_netif *netif)
+ {
+ 	enable_irq(netif->irq);
+ 	netif_schedule_work(netif);
+ }
+ 
+-static void __netif_down(netif_t *netif)
++static void __netif_down(struct xen_netif *netif)
+ {
+ 	disable_irq(netif->irq);
+ 	netif_deschedule_work(netif);
+@@ -66,7 +66,7 @@
+ 
+ static int net_open(struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 	if (netback_carrier_ok(netif)) {
+ 		__netif_up(netif);
+ 		netif_start_queue(dev);
+@@ -76,7 +76,7 @@
+ 
+ static int net_close(struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 	if (netback_carrier_ok(netif))
+ 		__netif_down(netif);
+ 	netif_stop_queue(dev);
+@@ -96,7 +96,7 @@
+ static int netbk_set_sg(struct net_device *dev, u32 data)
+ {
+ 	if (data) {
+-		netif_t *netif = netdev_priv(dev);
++		struct xen_netif *netif = netdev_priv(dev);
+ 
+ 		if (!(netif->features & NETIF_F_SG))
+ 			return -ENOSYS;
+@@ -108,7 +108,7 @@
+ static int netbk_set_tso(struct net_device *dev, u32 data)
+ {
+ 	if (data) {
+-		netif_t *netif = netdev_priv(dev);
++		struct xen_netif *netif = netdev_priv(dev);
+ 
+ 		if (!(netif->features & NETIF_F_TSO))
+ 			return -ENOSYS;
+@@ -128,7 +128,7 @@
+ 	char name[ETH_GSTRING_LEN];
+ 	u16 offset;
+ } netbk_stats[] = {
+-	{ "copied_skbs", offsetof(netif_t, nr_copied_skbs) },
++	{ "copied_skbs", offsetof(struct xen_netif, nr_copied_skbs) },
+ };
+ 
+ static int netbk_get_stats_count(struct net_device *dev)
+@@ -184,15 +184,15 @@
+ 	.ndo_get_stats          = netif_be_get_stats,
+ };
+ 
+-netif_t *netif_alloc(struct device *parent, domid_t domid, unsigned int handle)
++struct xen_netif *netif_alloc(struct device *parent, domid_t domid, unsigned int handle)
+ {
+ 	int err = 0;
+ 	struct net_device *dev;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ 	char name[IFNAMSIZ] = {};
+ 
+ 	snprintf(name, IFNAMSIZ - 1, "vif%u.%u", domid, handle);
+-	dev = alloc_netdev(sizeof(netif_t), name, ether_setup);
++	dev = alloc_netdev(sizeof(struct xen_netif), name, ether_setup);
+ 	if (dev == NULL) {
+ 		DPRINTK("Could not create netif: out of memory\n");
+ 		return ERR_PTR(-ENOMEM);
+@@ -249,7 +249,7 @@
+ }
+ 
+ static int map_frontend_pages(
+-	netif_t *netif, grant_ref_t tx_ring_ref, grant_ref_t rx_ring_ref)
++	struct xen_netif *netif, grant_ref_t tx_ring_ref, grant_ref_t rx_ring_ref)
+ {
+ 	struct gnttab_map_grant_ref op;
+ 
+@@ -295,7 +295,7 @@
+ 	return 0;
+ }
+ 
+-static void unmap_frontend_pages(netif_t *netif)
++static void unmap_frontend_pages(struct xen_netif *netif)
+ {
+ 	struct gnttab_unmap_grant_ref op;
+ 
+@@ -312,7 +312,7 @@
+ 		BUG();
+ }
+ 
+-int netif_map(netif_t *netif, unsigned long tx_ring_ref,
++int netif_map(struct xen_netif *netif, unsigned long tx_ring_ref,
+ 	      unsigned long rx_ring_ref, unsigned int evtchn)
+ {
+ 	int err = -ENOMEM;
+@@ -369,7 +369,7 @@
+ 	return err;
+ }
+ 
+-void netif_disconnect(netif_t *netif)
++void netif_disconnect(struct xen_netif *netif)
+ {
+ 	if (netback_carrier_ok(netif)) {
+ 		rtnl_lock();
+diff -r 419bbedb164e drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Wed May 26 16:17:53 2010 +0100
++++ b/drivers/xen/netback/netback.c	Wed May 26 16:19:41 2010 +0100
+@@ -52,10 +52,10 @@
+ };
+ 
+ static void netif_idx_release(u16 pending_idx);
+-static void make_tx_response(netif_t *netif, 
++static void make_tx_response(struct xen_netif *netif, 
+ 			     netif_tx_request_t *txp,
+ 			     s8       st);
+-static netif_rx_response_t *make_rx_response(netif_t *netif, 
++static netif_rx_response_t *make_rx_response(struct xen_netif *netif, 
+ 					     u16      id, 
+ 					     s8       st,
+ 					     u16      offset,
+@@ -109,7 +109,7 @@
+ 
+ static struct pending_tx_info {
+ 	netif_tx_request_t req;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ } pending_tx_info[MAX_PENDING_REQS];
+ static u16 pending_ring[MAX_PENDING_REQS];
+ typedef unsigned int PEND_RING_IDX;
+@@ -262,14 +262,14 @@
+ 	return NULL;
+ }
+ 
+-static inline int netbk_max_required_rx_slots(netif_t *netif)
++static inline int netbk_max_required_rx_slots(struct xen_netif *netif)
+ {
+ 	if (netif->features & (NETIF_F_SG|NETIF_F_TSO))
+ 		return MAX_SKB_FRAGS + 2; /* header + extra_info + frags */
+ 	return 1; /* all in one */
+ }
+ 
+-static inline int netbk_queue_full(netif_t *netif)
++static inline int netbk_queue_full(struct xen_netif *netif)
+ {
+ 	RING_IDX peek   = netif->rx_req_cons_peek;
+ 	RING_IDX needed = netbk_max_required_rx_slots(netif);
+@@ -280,14 +280,14 @@
+ 
+ static void tx_queue_callback(unsigned long data)
+ {
+-	netif_t *netif = (netif_t *)data;
++	struct xen_netif *netif = (struct xen_netif *)data;
+ 	if (netif_schedulable(netif))
+ 		netif_wake_queue(netif->dev);
+ }
+ 
+ int netif_be_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 
+ 	BUG_ON(skb->dev != dev);
+ 
+@@ -381,7 +381,7 @@
+ 
+ /* Set up the grant operations for this fragment.  If it's a flipping
+    interface, we also set up the unmap request from here. */
+-static u16 netbk_gop_frag(netif_t *netif, struct netbk_rx_meta *meta,
++static u16 netbk_gop_frag(struct xen_netif *netif, struct netbk_rx_meta *meta,
+ 			  int i, struct netrx_pending_operations *npo,
+ 			  struct page *page, unsigned long size,
+ 			  unsigned long offset)
+@@ -452,7 +452,7 @@
+ static void netbk_gop_skb(struct sk_buff *skb,
+ 			  struct netrx_pending_operations *npo)
+ {
+-	netif_t *netif = netdev_priv(skb->dev);
++	struct xen_netif *netif = netdev_priv(skb->dev);
+ 	int nr_frags = skb_shinfo(skb)->nr_frags;
+ 	int i;
+ 	int extra;
+@@ -546,7 +546,7 @@
+ 	return status;
+ }
+ 
+-static void netbk_add_frag_responses(netif_t *netif, int status,
++static void netbk_add_frag_responses(struct xen_netif *netif, int status,
+ 				     struct netbk_rx_meta *meta, int nr_frags)
+ {
+ 	int i;
+@@ -567,7 +567,7 @@
+ 
+ static void net_rx_action(unsigned long unused)
+ {
+-	netif_t *netif = NULL;
++	struct xen_netif *netif = NULL;
+ 	s8 status;
+ 	u16 id, irq, flags;
+ 	netif_rx_response_t *resp;
+@@ -609,7 +609,7 @@
+ 		*(int *)skb->cb = nr_frags;
+ 
+ 		if (!xen_feature(XENFEAT_auto_translated_physmap) &&
+-		    !((netif_t *)netdev_priv(skb->dev))->copying_receiver &&
++		    !((struct xen_netif *)netdev_priv(skb->dev))->copying_receiver &&
+ 		    check_mfn(nr_frags + 1)) {
+ 			/* Memory squeeze? Back off for an arbitrary while. */
+ 			if ( net_ratelimit() )
+@@ -802,16 +802,16 @@
+ 
+ struct net_device_stats *netif_be_get_stats(struct net_device *dev)
+ {
+-	netif_t *netif = netdev_priv(dev);
++	struct xen_netif *netif = netdev_priv(dev);
+ 	return &netif->stats;
+ }
+ 
+-static int __on_net_schedule_list(netif_t *netif)
++static int __on_net_schedule_list(struct xen_netif *netif)
+ {
+ 	return netif->list.next != NULL;
+ }
+ 
+-static void remove_from_net_schedule_list(netif_t *netif)
++static void remove_from_net_schedule_list(struct xen_netif *netif)
+ {
+ 	spin_lock_irq(&net_schedule_list_lock);
+ 	if (likely(__on_net_schedule_list(netif))) {
+@@ -822,7 +822,7 @@
+ 	spin_unlock_irq(&net_schedule_list_lock);
+ }
+ 
+-static void add_to_net_schedule_list_tail(netif_t *netif)
++static void add_to_net_schedule_list_tail(struct xen_netif *netif)
+ {
+ 	if (__on_net_schedule_list(netif))
+ 		return;
+@@ -844,7 +844,7 @@
+  * If we may be buffer transmit buffers for any reason then we must be rather
+  * more conservative and treat this as the final check for pending work.
+  */
+-void netif_schedule_work(netif_t *netif)
++void netif_schedule_work(struct xen_netif *netif)
+ {
+ 	int more_to_do;
+ 
+@@ -860,13 +860,13 @@
+ 	}
+ }
+ 
+-void netif_deschedule_work(netif_t *netif)
++void netif_deschedule_work(struct xen_netif *netif)
+ {
+ 	remove_from_net_schedule_list(netif);
+ }
+ 
+ 
+-static void tx_add_credit(netif_t *netif)
++static void tx_add_credit(struct xen_netif *netif)
+ {
+ 	unsigned long max_burst, max_credit;
+ 
+@@ -888,7 +888,7 @@
+ 
+ static void tx_credit_callback(unsigned long data)
+ {
+-	netif_t *netif = (netif_t *)data;
++	struct xen_netif *netif = (struct xen_netif *)data;
+ 	tx_add_credit(netif);
+ 	netif_schedule_work(netif);
+ }
+@@ -924,7 +924,7 @@
+ 	gnttab_unmap_grant_ref_t *gop;
+ 	u16 pending_idx;
+ 	PEND_RING_IDX dc, dp;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ 	int ret;
+ 	LIST_HEAD(list);
+ 
+@@ -1013,7 +1013,7 @@
+ 	}
+ }
+ 
+-static void netbk_tx_err(netif_t *netif, netif_tx_request_t *txp, RING_IDX end)
++static void netbk_tx_err(struct xen_netif *netif, netif_tx_request_t *txp, RING_IDX end)
+ {
+ 	RING_IDX cons = netif->tx.req_cons;
+ 
+@@ -1028,7 +1028,7 @@
+ 	netif_put(netif);
+ }
+ 
+-static int netbk_count_requests(netif_t *netif, netif_tx_request_t *first,
++static int netbk_count_requests(struct xen_netif *netif, netif_tx_request_t *first,
+ 				netif_tx_request_t *txp, int work_to_do)
+ {
+ 	RING_IDX cons = netif->tx.req_cons;
+@@ -1068,7 +1068,7 @@
+ 	return frags;
+ }
+ 
+-static gnttab_map_grant_ref_t *netbk_get_requests(netif_t *netif,
++static gnttab_map_grant_ref_t *netbk_get_requests(struct xen_netif *netif,
+ 						  struct sk_buff *skb,
+ 						  netif_tx_request_t *txp,
+ 						  gnttab_map_grant_ref_t *mop)
+@@ -1102,7 +1102,7 @@
+ {
+ 	gnttab_map_grant_ref_t *mop = *mopp;
+ 	int pending_idx = *((u16 *)skb->data);
+-	netif_t *netif = pending_tx_info[pending_idx].netif;
++	struct xen_netif *netif = pending_tx_info[pending_idx].netif;
+ 	netif_tx_request_t *txp;
+ 	struct skb_shared_info *shinfo = skb_shinfo(skb);
+ 	int nr_frags = shinfo->nr_frags;
+@@ -1195,7 +1195,7 @@
+ 	}
+ }
+ 
+-int netbk_get_extras(netif_t *netif, struct netif_extra_info *extras,
++int netbk_get_extras(struct xen_netif *netif, struct netif_extra_info *extras,
+ 		     int work_to_do)
+ {
+ 	struct netif_extra_info extra;
+@@ -1251,7 +1251,7 @@
+ {
+ 	struct list_head *ent;
+ 	struct sk_buff *skb;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ 	netif_tx_request_t txreq;
+ 	netif_tx_request_t txfrags[MAX_SKB_FRAGS];
+ 	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
+@@ -1268,7 +1268,7 @@
+ 		!list_empty(&net_schedule_list)) {
+ 		/* Get a netif from the list with work to do. */
+ 		ent = net_schedule_list.next;
+-		netif = list_entry(ent, netif_t, list);
++		netif = list_entry(ent, struct xen_netif, list);
+ 		netif_get(netif);
+ 		remove_from_net_schedule_list(netif);
+ 
+@@ -1530,7 +1530,7 @@
+ 
+ irqreturn_t netif_be_int(int irq, void *dev_id)
+ {
+-	netif_t *netif = dev_id;
++	struct xen_netif *netif = dev_id;
+ 
+ 	add_to_net_schedule_list_tail(netif);
+ 	maybe_schedule_tx_action();
+@@ -1541,7 +1541,7 @@
+ 	return IRQ_HANDLED;
+ }
+ 
+-static void make_tx_response(netif_t *netif, 
++static void make_tx_response(struct xen_netif *netif, 
+ 			     netif_tx_request_t *txp,
+ 			     s8       st)
+ {
+@@ -1571,7 +1571,7 @@
+ #endif
+ }
+ 
+-static netif_rx_response_t *make_rx_response(netif_t *netif, 
++static netif_rx_response_t *make_rx_response(struct xen_netif *netif, 
+ 					     u16      id, 
+ 					     s8       st,
+ 					     u16      offset,
+@@ -1598,14 +1598,14 @@
+ static irqreturn_t netif_be_dbg(int irq, void *dev_id)
+ {
+ 	struct list_head *ent;
+-	netif_t *netif;
++	struct xen_netif *netif;
+ 	int i = 0;
+ 
+ 	printk(KERN_ALERT "netif_schedule_list:\n");
+ 	spin_lock_irq(&net_schedule_list_lock);
+ 
+ 	list_for_each (ent, &net_schedule_list) {
+-		netif = list_entry(ent, netif_t, list);
++		netif = list_entry(ent, struct xen_netif, list);
+ 		printk(KERN_ALERT " %d: private(rx_req_cons=%08x "
+ 		       "rx_resp_prod=%08x\n",
+ 		       i, netif->rx.req_cons, netif->rx.rsp_prod_pvt);
+diff -r 419bbedb164e drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Wed May 26 16:17:53 2010 +0100
++++ b/drivers/xen/netback/xenbus.c	Wed May 26 16:19:41 2010 +0100
+@@ -152,7 +152,7 @@
+ static int netback_uevent(struct xenbus_device *xdev, struct kobj_uevent_env *env)
+ {
+ 	struct backend_info *be = dev_get_drvdata(&xdev->dev);
+-	netif_t *netif = be->netif;
++	struct xen_netif *netif = be->netif;
+ 	char *val;
+ 
+ 	DPRINTK("netback_uevent");

@@ -1,0 +1,379 @@
+From 359983287bb33057df3a5f4cfff938b83a345b67 Mon Sep 17 00:00:00 2001
+From: Ben Pfaff <blp@nicira.com>
+Date: Fri, 25 Feb 2011 16:47:48 -0800
+Subject: [PATCH] 8021q: Add kluge to support 802.1Q VLANs on devices with buggy drivers.
+
+Some Linux network drivers support a feature called "VLAN
+acceleration", associated with a data structure called a "vlan_group".
+A vlan_group is, abstractly, a dictionary that maps from a VLAN ID (in
+the range 0...4095) to a VLAN device, that is, a Linux network device
+associated with a particular VLAN, e.g. "eth0.9" for VLAN 9 on eth0.
+
+Some drivers that support VLAN acceleration have bugs that fall
+roughly into the following categories:
+
+    * Some NICs strip VLAN tags on receive if no vlan_group is
+      registered, so that the tag is completely lost.
+
+    * Some drivers size their receive buffers based on whether a
+      vlan_group is enabled, meaning that a maximum size packet with a
+      VLAN tag will not fit if a vlan_group is not configured.
+
+    * On transmit some drivers expect that VLAN acceleration will be
+      used if it is available (which can only be done if a vlan_group
+      is configured).  In these cases, the driver may fail to parse
+      the packet and correctly setup checksum offloading and/or TSO.
+
+The correct long term solution is to fix these driver bugs.
+
+This commit implements a workaround, which has been tested to work with the
+"igb" driver, which does not otherwise work with VLANs on Open vSwitch:
+
+    * Implement a new VLAN device ioctl that sets up a vlan_group in
+      which all 4096 VLANs point back to the physical device.
+
+    * In the code that handles received VLAN-accelerated packets, save
+      the VLAN on which the packet was received to a new sk_buff
+      member before clearing the VLAN number.
+
+    * Check the value of the new member in the OVS kernel module
+      packet receive code.
+
+This requires only minimal, low-risk changes to the core of the kernel
+network stack, as well as minimal changes to the Open vSwitch kernel
+module.
+
+Driver Details
+--------------
+
+The following drivers in linux-2.6.32.12-0.7.1.xs1.0.0.311.170586 are
+the ones that use "vlan_group" and are relevant to Open vSwitch on
+XenServer.  We have not tested any version of most of these drivers,
+so we do not know whether they have a VLAN problem that needs to be
+fixed:
+
+    8139cp
+    acenic
+    amd8111e
+    atl1c
+    atl1e
+    atl1
+    atl2
+    be2net
+    bna
+    bnx2
+    bnx2x
+    cnic
+    cxgb
+    cxgb3
+    e1000
+    e1000e
+    enic
+    forcedeth
+    gianfar
+    igb
+    igbvf
+    ixgb
+    ixgbe
+    jme
+    mlx4_en
+    ns83820
+    qlge
+    r8169
+    s2io
+    sky2
+    starfire
+    tehuti
+    tg3
+    typhoon
+    via-velocity
+    vxge
+
+Of the drivers that use "vlan_group" listed above, the following
+drivers inspect vlan devices in ways that imply that the VLAN
+workaround would not work for them.  These drivers have not yet been
+tested, so we do not know whether they need to use the VLAN workaround
+anyhow:
+
+    cnic
+    cxgb3
+
+Of the drivers that use "vlan_group" listed above, the following
+drivers appear to have bugs that would limit them to VLANs with VIDs
+in the range 0...63 with the kernel patch fix.  This is based on quick
+code inspection, so it is not necessarily an exhaustive list.  The
+drivers on this list have not yet been tested, so we do not know
+whether they need to use the VLAN workaround anyhow:
+
+    via-velocity
+
+The following drivers use "vlan_group" but are irrelevant to Open
+vSwitch on XenServer:
+
+    bonding (not used with Open vSwitch)
+    ehea (cannot be built on x86; IBM Power architecture only)
+    stmmac (cannot be built on x86; SH4 architecture)
+    vmxnet3 (not shipped with XenServer; for use inside VMware VMs only)
+
+Signed-off-by: Ben Pfaff <blp@nicira.com>
+---
+ include/linux/if_vlan.h |    5 +
+ net/8021q/vlan.c        |  131 +++++++++++++++++++++++++++++++++++++++++++++---
+ net/8021q/vlan_core.c   |    8 ++
+ net/core/dev.c          |    1
+ 4 files changed, 137 insertions(+), 8 deletions(-)
+
+diff -r d56d6a04c41b include/linux/if_vlan.h
+--- a/include/linux/if_vlan.h
++++ b/include/linux/if_vlan.h
+@@ -84,6 +84,7 @@
+ 	struct hlist_node	hlist;	/* linked list */
+ 	struct net_device **vlan_devices_arrays[VLAN_GROUP_ARRAY_SPLIT_PARTS];
+ 	struct rcu_head		rcu;
++	bool			loopback;
+ };
+ 
+ static inline struct net_device *vlan_group_get_device(struct vlan_group *vg,
+@@ -325,7 +326,9 @@
+ 	SET_VLAN_NAME_TYPE_CMD,
+ 	SET_VLAN_FLAG_CMD,
+ 	GET_VLAN_REALDEV_NAME_CMD, /* If this works, you know it's a VLAN device, btw */
+-	GET_VLAN_VID_CMD /* Get the VID of this VLAN (specified by name) */
++	GET_VLAN_VID_CMD, /* Get the VID of this VLAN (specified by name) */
++	ADD_ALL_VLANS_CMD,
++	DEL_ALL_VLANS_CMD
+ };
+ 
+ enum vlan_flags {
+diff -r d56d6a04c41b net/8021q/vlan.c
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -101,7 +101,8 @@
+ 	kfree(grp);
+ }
+ 
+-static struct vlan_group *vlan_group_alloc(struct net_device *real_dev)
++static struct vlan_group *vlan_group_alloc(struct net_device *real_dev,
++					   bool loopback)
+ {
+ 	struct vlan_group *grp;
+ 
+@@ -110,6 +111,7 @@
+ 		return NULL;
+ 
+ 	grp->real_dev = real_dev;
++	grp->loopback = loopback;
+ 	hlist_add_head_rcu(&grp->hlist,
+ 			&vlan_group_hash[vlan_grp_hashfn(real_dev->ifindex)]);
+ 	return grp;
+@@ -242,7 +244,7 @@
+ 
+ 	grp = __vlan_find_group(real_dev);
+ 	if (!grp) {
+-		ngrp = grp = vlan_group_alloc(real_dev);
++		ngrp = grp = vlan_group_alloc(real_dev, false);
+ 		if (!grp)
+ 			return -ENOBUFS;
+ 		err = vlan_gvrp_init_applicant(real_dev);
+@@ -363,6 +365,90 @@
+ 	return err;
+ }
+ 
++/* Attach a "loopback" VLAN device to every VLAN on dev.
++ * Returns 0 if successful, a negative error code otherwise.
++ */
++static int register_all_vlans(struct net_device *dev)
++{
++	struct net_device **array;
++	struct vlan_group *grp;
++	unsigned int size;
++	int err;
++	int i;
++
++	ASSERT_RTNL();
++
++	if (__vlan_find_group(dev))
++		return -EBUSY;
++
++	err = vlan_check_real_dev(dev, 0);
++	if (err < 0)
++		return err;
++
++	grp = vlan_group_alloc(dev, true);
++	if (!grp)
++		return -ENOBUFS;
++
++	size = sizeof(struct net_device *) * VLAN_GROUP_ARRAY_PART_LEN;
++	array = kmalloc(size, GFP_KERNEL);
++	if (array == NULL)
++		return -ENOBUFS;
++	for (i = 0; i < VLAN_GROUP_ARRAY_PART_LEN; i++)
++		array[i] = dev;
++	for (i = 0; i < VLAN_GROUP_ARRAY_SPLIT_PARTS; i++)
++		grp->vlan_devices_arrays[i] = array;
++
++	/* Account for reference in struct vlan_dev_info */
++	dev_hold(dev);
++
++	grp->nr_vlans = VLAN_GROUP_ARRAY_LEN;
++
++	if (dev->features & NETIF_F_HW_VLAN_RX)
++		dev->netdev_ops->ndo_vlan_rx_register(dev, grp);
++	if (dev->features & NETIF_F_HW_VLAN_FILTER)
++		for (i = 0; i < VLAN_GROUP_ARRAY_LEN; i++)
++			dev->netdev_ops->ndo_vlan_rx_add_vid(dev, i);
++
++	return 0;
++}
++
++static int unregister_all_vlans(struct net_device *dev)
++{
++	struct vlan_group *grp;
++	int i;
++
++	ASSERT_RTNL();
++
++	grp = __vlan_find_group(dev);
++	if (!grp || !grp->loopback)
++		return -EINVAL;
++
++	/* Take it out of our own structures, but be sure to interlock with
++	 * HW accelerating devices or SW vlan input packet processing.
++	 */
++	if (dev->features & NETIF_F_HW_VLAN_FILTER)
++		for (i = 0; i < VLAN_GROUP_ARRAY_LEN; i++)
++			dev->netdev_ops->ndo_vlan_rx_kill_vid(dev, i);
++
++	for (i = 0; i < VLAN_GROUP_ARRAY_PART_LEN; i++)
++		vlan_group_set_device(grp, i, NULL);
++	grp->nr_vlans = 0;
++
++	if (dev->features & NETIF_F_HW_VLAN_RX)
++		dev->netdev_ops->ndo_vlan_rx_register(dev, NULL);
++
++	hlist_del_rcu(&grp->hlist);
++
++	synchronize_net();
++	kfree(grp->vlan_devices_arrays[0]);
++	kfree(grp);
++
++	/* Get rid of the vlan's reference to dev */
++	dev_put(dev);
++
++	return 0;
++}
++
+ static void vlan_sync_address(struct net_device *dev,
+ 			      struct net_device *vlandev)
+ {
+@@ -444,6 +530,12 @@
+ 	 * as we run under the RTNL lock.
+ 	 */
+ 
++	if (grp->loopback) {
++		if (event == NETDEV_UNREGISTER)
++			unregister_all_vlans(dev);
++		goto out;
++	}
++
+ 	switch (event) {
+ 	case NETDEV_CHANGE:
+ 		/* Propagate real device state to vlan devices */
+@@ -581,13 +673,18 @@
+ 	case DEL_VLAN_CMD:
+ 	case GET_VLAN_REALDEV_NAME_CMD:
+ 	case GET_VLAN_VID_CMD:
++	case ADD_ALL_VLANS_CMD:
++	case DEL_ALL_VLANS_CMD:
+ 		err = -ENODEV;
+ 		dev = __dev_get_by_name(net, args.device1);
+ 		if (!dev)
+ 			goto out;
+ 
+ 		err = -EINVAL;
+-		if (args.cmd != ADD_VLAN_CMD && !is_vlan_dev(dev))
++		if (args.cmd != ADD_VLAN_CMD &&
++		    args.cmd != ADD_ALL_VLANS_CMD &&
++		    args.cmd != DEL_ALL_VLANS_CMD &&
++		    !is_vlan_dev(dev))
+ 			goto out;
+ 	}
+ 
+@@ -667,6 +764,20 @@
+ 		      err = -EFAULT;
+ 		break;
+ 
++	case ADD_ALL_VLANS_CMD:
++		err = -EPERM;
++		if (!capable(CAP_NET_ADMIN))
++			break;
++		err = register_all_vlans(dev);
++		break;
++
++	case DEL_ALL_VLANS_CMD:
++		err = -EPERM;
++		if (!capable(CAP_NET_ADMIN))
++			break;
++		err = unregister_all_vlans(dev);
++		break;
++
+ 	default:
+ 		err = -EOPNOTSUPP;
+ 		break;
+@@ -769,9 +880,17 @@
+ 
+ 	dev_remove_pack(&vlan_packet_type);
+ 
+-	/* This table must be empty if there are no module references left. */
+-	for (i = 0; i < VLAN_GRP_HASH_SIZE; i++)
+-		BUG_ON(!hlist_empty(&vlan_group_hash[i]));
++	for (i = 0; i < VLAN_GRP_HASH_SIZE; i++) {
++		struct hlist_head *hlist = &vlan_group_hash[i];
++		while (!hlist_empty(hlist)) {
++			struct vlan_group *grp;
++			int err;
++
++			grp = hlist_entry(hlist->first, struct vlan_group, hlist);
++			err = unregister_all_vlans(grp->real_dev);
++			BUG_ON(err);
++		}
++	}
+ 
+ 	unregister_pernet_gen_device(vlan_net_id, &vlan_net_ops);
+ 	rcu_barrier(); /* Wait for completion of call_rcu()'s */
+diff -r d56d6a04c41b net/8021q/vlan_core.c
+--- a/net/8021q/vlan_core.c
++++ b/net/8021q/vlan_core.c
+@@ -33,6 +33,11 @@
+ 	struct net_device *dev = skb->dev;
+ 	struct net_device_stats *stats;
+ 
++	if (!is_vlan_dev(dev)) {
++		skb->pkt_type = PACKET_OTHERHOST;
++		return 0;
++	}
++
+ 	skb->dev = vlan_dev_info(dev)->real_dev;
+ 	netif_nit_deliver(skb);
+ 
+@@ -90,7 +95,8 @@
+ 
+ 	for (p = napi->gro_list; p; p = p->next) {
+ 		NAPI_GRO_CB(p)->same_flow =
+-			p->dev == skb->dev && !compare_ether_header(
++			p->dev == skb->dev && p->vlan_tci == skb->vlan_tci &&
++			!compare_ether_header(
+ 				skb_mac_header(p), skb_gro_mac_header(skb));
+ 		NAPI_GRO_CB(p)->flush = 0;
+ 	}
+diff -r d56d6a04c41b net/core/dev.c
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -2704,6 +2704,7 @@
+ 	skb_reserve(skb, NET_IP_ALIGN - skb_headroom(skb));
+ 	skb->dev = napi->dev;
+ 	skb->iif = 0;
++	skb->vlan_tci = 0;
+ 
+ 	napi->skb = skb;
+ }

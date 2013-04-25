@@ -1,0 +1,27 @@
+CONFIG_XEN_NETDEV_PIPELINED_TRANSMITTER support is removed in a
+subsequent backport from the pvops kernel however the Kconfig parts
+were never present upstream so that patch does not remove them. Remove
+here instead.
+
+diff -r d6231e2b499c drivers/xen/Kconfig
+--- a/drivers/xen/Kconfig	Wed Jan 13 16:45:32 2010 +0000
++++ b/drivers/xen/Kconfig	Wed Jan 13 16:49:54 2010 +0000
+@@ -89,18 +89,6 @@
+ 	  The network-device backend driver allows the kernel to export its
+ 	  network devices to other guests via a high-performance shared-memory
+ 	  interface.
+-
+-config XEN_NETDEV_PIPELINED_TRANSMITTER
+-	bool "Pipelined transmitter (DANGEROUS)"
+-	depends on XEN_NETDEV_BACKEND
+-	help
+-	  If the net backend is a dumb domain, such as a transparent Ethernet
+-	  bridge with no local IP interface, it is safe to say Y here to get
+-	  slightly lower network overhead.
+-	  If the backend has a local IP interface; or may be doing smart things
+-	  like reassembling packets to perform firewall filtering; or if you
+-	  are unsure; or if you experience network hangs when this option is
+-	  enabled; then you must say N here.
+ 
+ config XEN_NETDEV_ACCEL_SFC_BACKEND
+ 	tristate "Network-device backend driver acceleration for Solarflare NICs"

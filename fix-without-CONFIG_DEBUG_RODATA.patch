@@ -1,0 +1,12 @@
+diff -r 02109f99b3c7 arch/x86/include/asm/cacheflush.h
+--- a/arch/x86/include/asm/cacheflush.h	Tue Jun 22 15:47:56 2010 +0100
++++ b/arch/x86/include/asm/cacheflush.h	Tue Jun 22 15:51:50 2010 +0100
+@@ -189,8 +189,6 @@
+ void set_kernel_text_rw(void);
+ void set_kernel_text_ro(void);
+ #else
+-static inline void mark_rodata_ro(void) { }
+-static inline void mark_rodata_rw(void) { }
+ static inline void set_kernel_text_rw(void) { }
+ static inline void set_kernel_text_ro(void) { }
+ #endif

@@ -1,0 +1,51 @@
+From 3d314dd2fe47c10be12699b6e2917d3ccbcfe2e3 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Wed, 21 Jul 2010 13:36:36 -0700
+Subject: [PATCH] xen/netback: make protocol specific usage of shared sring explicit
+
+I don't think protocol specific data't really belongs in this header
+but since it is already there and we seem to be stuck with it lets at
+least make the users explicit lest people get caught out by future new
+fields moving the pad field around.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/netback/netback.c |   13 ++++++-------
+ 1 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 4768ed8..4121062 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -716,11 +716,10 @@ static void net_rx_action(unsigned long data)
+ 		 * netfront_smartpoll_active indicates whether
+ 		 * netfront timer is active.
+ 		 */
+-		if ((netif->smart_poll == 1)) {
+-			if (!(netif->rx.sring->netfront_smartpoll_active)) {
+-				notify_remote_via_irq(irq);
+-				netif->rx.sring->netfront_smartpoll_active = 1;
+-			}
++		if ((netif->smart_poll == 1) &&
++		    !(netif->rx.sring->private.netif.smartpoll_active)) {
++			notify_remote_via_irq(irq);
++			netif->rx.sring->private.netif.smartpoll_active = 1;
+ 		}
+ 
+ 		netif_put(netif);
+@@ -1599,9 +1598,9 @@ static void make_tx_response(struct xen_netif *netif,
+ 	 * is active.
+ 	 */
+ 	if ((netif->smart_poll == 1)) {
+-		if (!(netif->rx.sring->netfront_smartpoll_active)) {
++		if (!(netif->rx.sring->private.netif.smartpoll_active)) {
+ 			notify_remote_via_irq(netif->irq);
+-			netif->rx.sring->netfront_smartpoll_active = 1;
++			netif->rx.sring->private.netif.smartpoll_active = 1;
+ 		}
+ 	} else if (notify)
+ 		notify_remote_via_irq(netif->irq);
+-- 
+1.7.0.4
+

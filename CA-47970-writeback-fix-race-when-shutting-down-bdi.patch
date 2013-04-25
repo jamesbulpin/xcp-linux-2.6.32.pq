@@ -1,0 +1,114 @@
+From patchwork Fri Jul 16 12:45:00 2010
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [RFC,04/16] writeback: fix possible race when shutting down bdi
+Date: Fri, 16 Jul 2010 12:45:00 -0000
+From: Artem Bityutskiy <dedekind1@gmail.com>
+X-Patchwork-Id: 112435
+Message-Id: <1279284312-2411-5-git-send-email-dedekind1@gmail.com>
+To: Jens Axboe <axboe@kernel.dk>
+Cc: linux-fsdevel@vger.kernel.org, linux-kernel@vger.kernel.org
+
+From: Artem Bityutskiy <Artem.Bityutskiy@nokia.com>
+
+Current bdi code has the following race between 'bdi_wb_shutdown()'
+and 'bdi_forker_thread()'.
+
+Initial condition: BDI_pending is cleaned, bdi has no writeback thread,
+because it was inactive and exited, 'bdi_wb_shutdown()' and
+'bdi_forker_thread()' are executed concurrently.
+
+1. bdi_wb_shutdown() executes  wait_on_bit(), tests the BDI_pending bit,
+   it is clean, so it does not wait for anything.
+
+2. 'bdi_forker_thread()' takes the 'bdi_lock', finds out that bdi has
+   work to do, takes it out of the 'bdi_list', sets the BDI_pending flag,
+   unlocks the 'bdi_lock' lock
+
+3. 'bdi_wb_shutdown()' takes the lock, and nasty things start happening:
+   a) it removes the bdi from bdi->bdi_list, but the bdi is not in any
+      list
+   b) it starts deleting the bdi, but 'bdi_forker_thread()' is still working
+      with it.
+
+Note, it is very difficult to hit this race, and I never observed it, so it
+is quite theoretical, but it is still a race. Also note, this race exist
+without my previous clean-ups as well.
+
+This patch fixes this race by making 'bdi_wb_shutdown()' first search for
+the bdi in the 'bdi_list', and only if it is there, remove it from 'bdi_list'
+and destroy. But if it is not there, assume it is in transit and re-try
+waiting on the BDI_pending bit.
+
+Signed-off-by: Artem Bityutskiy <Artem.Bityutskiy@nokia.com>
+
+---
+mm/backing-dev.c |   41 ++++++++++++++++++++++++++++-------------
+ 1 files changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/mm/backing-dev.c b/mm/backing-dev.c
+index b34c12a..a445ff0 100644
+--- a/mm/backing-dev.c
++++ b/mm/backing-dev.c
+@@ -456,15 +456,26 @@ void static bdi_add_default_flusher_thread(struct backing_dev_info *bdi)
+ }
+ 
+ /*
+- * Remove bdi from bdi_list, and ensure that it is no longer visible
++ * Look up for bdi in the bdi_list. If found, remove it, ensure that it is
++ * no longer visible, and return 0. If not found, return 1.
+  */
+-static void bdi_remove_from_list(struct backing_dev_info *bdi)
++static int bdi_remove_from_list(struct backing_dev_info *me)
+ {
++	struct backing_dev_info *bdi;
++
+ 	spin_lock_bh(&bdi_lock);
+-	list_del_rcu(&bdi->bdi_list);
++	list_for_each_entry(bdi, &bdi_list, bdi_list) {
++		if (bdi == me) {
++			list_del_rcu(&me->bdi_list);
++			spin_unlock_bh(&bdi_lock);
++			synchronize_rcu();
++			return 0;
++		}
++
++	}
+ 	spin_unlock_bh(&bdi_lock);
++	return 1;
+ 
+-	synchronize_rcu();
+ }
+ 
+ int bdi_register(struct backing_dev_info *bdi, struct device *parent,
+@@ -532,16 +543,20 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
+ 	if (!bdi_cap_writeback_dirty(bdi))
+ 		return;
+ 
+-	/*
+-	 * If setup is pending, wait for that to complete first
+-	 */
+-	wait_on_bit(&bdi->state, BDI_pending, bdi_sched_wait,
+-			TASK_UNINTERRUPTIBLE);
++	do {
++		/*
++		 * If setup is pending, wait for that to complete first
++		 */
++		wait_on_bit(&bdi->state, BDI_pending, bdi_sched_wait,
++				TASK_UNINTERRUPTIBLE);
+ 
+-	/*
+-	 * Make sure nobody finds us on the bdi_list anymore
+-	 */
+-	bdi_remove_from_list(bdi);
++		/*
++		 * Make sure nobody finds us on the bdi_list anymore. However,
++		 * bdi may be temporary be not in the bdi_list but be in transit
++		 * in bdi_forker_thread. Namely, this may happen if we race
++		 * with the forker thread.
++		 */
++	} while (bdi_remove_from_list(bdi));
+ 
+ 	/*
+ 	 * Finally, kill the kernel thread. We don't need to be RCU

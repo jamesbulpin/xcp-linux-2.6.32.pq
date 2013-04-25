@@ -1,0 +1,12 @@
+diff -r 74dbbc4b4b42 drivers/xen/Kconfig
+--- a/drivers/xen/Kconfig	Mon Jul 06 16:18:17 2009 +0100
++++ b/drivers/xen/Kconfig	Tue Jul 07 11:09:14 2009 +0100
+@@ -332,3 +332,8 @@
+ 	  If security is not a concern then you may increase performance by
+ 	  saying N.
+ 	  If in doubt, say yes.
++
++config XEN_SAVE_RESTORE
++       bool
++       depends on XEN && PM
++       default y

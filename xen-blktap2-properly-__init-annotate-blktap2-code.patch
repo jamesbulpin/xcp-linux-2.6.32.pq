@@ -1,0 +1,97 @@
+From 6020404df6e6b6915826b1c540687bf8bc3513f4 Mon Sep 17 00:00:00 2001
+From: Jan Beulich <jbeulich@novell.com>
+Date: Fri, 5 Feb 2010 19:19:32 +0000
+Subject: [PATCH 18/23] blktap2: properly __init-annotate blktap2 code
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    1 +
+ drivers/xen/blktap2/control.c |    2 +-
+ drivers/xen/blktap2/device.c  |    2 +-
+ drivers/xen/blktap2/request.c |    2 +-
+ drivers/xen/blktap2/ring.c    |    2 +-
+ drivers/xen/blktap2/sysfs.c   |    2 +-
+ 6 files changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 1653f94..430a4f3 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -4,6 +4,7 @@
+ #include <linux/mm.h>
+ #include <linux/fs.h>
+ #include <linux/cdev.h>
++#include <linux/init.h>
+ #include <linux/scatterlist.h>
+ #include <xen/blkif.h>
+ #include <xen/grant_table.h>
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index ba44049..a4852f7 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -206,7 +206,7 @@ blktap_control_destroy_device(struct blktap *tap)
+ 	return err;
+ }
+ 
+-static int
++static int __init
+ blktap_control_init(void)
+ {
+ 	int err;
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index 75a9bb5..d5ac755 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -1112,7 +1112,7 @@ blktap_device_create(struct blktap *tap)
+ 	return err;
+ }
+ 
+-int
++int __init
+ blktap_device_init(int *maj)
+ {
+ 	int major;
+diff --git a/drivers/xen/blktap2/request.c b/drivers/xen/blktap2/request.c
+index ec1ed00..b94dbd8 100644
+--- a/drivers/xen/blktap2/request.c
++++ b/drivers/xen/blktap2/request.c
+@@ -272,7 +272,7 @@ blktap_request_pool_free(void)
+ 	spin_unlock_irqrestore(&pool.lock, flags);
+ }
+ 
+-int
++int __init
+ blktap_request_pool_init(void)
+ {
+ 	int i, err;
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 3217793..74a7aa7 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -589,7 +589,7 @@ blktap_ring_create(struct blktap *tap)
+ 	return blktap_sysfs_create(tap);
+ }
+ 
+-int
++int __init
+ blktap_ring_init(int *major)
+ {
+ 	int err;
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 2ebe3a5..6a164ac 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -424,7 +424,7 @@ blktap_sysfs_free(void)
+ 	class_destroy(class);
+ }
+ 
+-int
++int __init
+ blktap_sysfs_init(void)
+ {
+ 	struct class *cls;
+-- 
+1.7.0.4
+

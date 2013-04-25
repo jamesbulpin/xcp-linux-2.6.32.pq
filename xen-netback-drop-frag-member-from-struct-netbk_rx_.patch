@@ -1,0 +1,52 @@
+From 89bca004389eec2cd29af94a636315b1691653ec Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 11 Jun 2010 10:51:01 +0100
+Subject: [PATCH] xen: netback: drop frag member from struct netbk_rx_meta
+
+It has been unused since c3219dc "xen/netback: completely drop flip
+support", as has netbk_free_pages().
+
+(Although it now has only a single member struct netbk_rx_meta will
+gain other members in a subsequent patch so there is no point
+reworking to get rid of the struct)
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+---
+ drivers/xen/netback/common.h  |    1 -
+ drivers/xen/netback/netback.c |    8 --------
+ 2 files changed, 0 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/xen/netback/common.h b/drivers/xen/netback/common.h
+index 81050a6..84b527d 100644
+--- a/drivers/xen/netback/common.h
++++ b/drivers/xen/netback/common.h
+@@ -232,7 +232,6 @@ struct pending_tx_info {
+ typedef unsigned int pending_ring_idx_t;
+ 
+ struct netbk_rx_meta {
+-	skb_frag_t frag;
+ 	int id;
+ };
+ 
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index 8cd7875..6de29d2 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -411,14 +411,6 @@ static void netbk_gop_skb(struct sk_buff *skb,
+ 	netif->rx.req_cons += nr_frags + extra;
+ }
+ 
+-static inline void netbk_free_pages(int nr_frags, struct netbk_rx_meta *meta)
+-{
+-	int i;
+-
+-	for (i = 0; i < nr_frags; i++)
+-		put_page(meta[i].frag.page);
+-}
+-
+ /* This is a twin to netbk_gop_skb.  Assume that netbk_gop_skb was
+    used to set up the operations on the top of
+    netrx_pending_operations, which have since been done.  Check that
+-- 
+1.5.6.5
+

@@ -1,0 +1,235 @@
+blkback: Remove vbd_resize and a couple macros belonging into the port.
+
+diff -r e5a73cc5b866 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jun 30 05:10:44 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Wed Jun 30 05:16:16 2010 -0700
+@@ -207,7 +207,6 @@
+ int blkif_schedule(void *arg)
+ {
+ 	blkif_t *blkif = arg;
+-	struct vbd *vbd = &blkif->vbd;
+ 
+ 	blkif_get(blkif);
+ 
+@@ -217,8 +216,6 @@
+ 	while (!kthread_should_stop()) {
+ 		if (try_to_freeze())
+ 			continue;
+-		if (unlikely(vbd->size != vbd_size(vbd)))
+-			vbd_resize(blkif);
+ 
+ 		wait_event_interruptible(
+ 			blkif->wq,
+@@ -489,7 +486,7 @@
+ 
+ 	for (i = 0; i < nseg; i++) {
+ 		if (((int)preq.sector_number|(int)seg[i].nsec) &
+-		    ((bdev_logical_block_size(preq.bdev) >> 9) - 1)) {
++		    ((bdev_hardsect_size(preq.bdev) >> 9) - 1)) {
+ 			DPRINTK("Misaligned I/O request from domain %d",
+ 				blkif->domid);
+ 			goto fail_put_bio;
+diff -r e5a73cc5b866 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Jun 30 05:10:44 2010 -0700
++++ b/drivers/xen/blkback/common.h	Wed Jun 30 05:16:16 2010 -0700
+@@ -56,7 +56,6 @@
+ 	unsigned char  type;        /* VDISK_xxx */
+ 	u32            pdevice;     /* phys device that this vbd maps to */
+ 	struct block_device *bdev;
+-	sector_t       size;        /* Cached size parameter */
+ };
+ 
+ struct backend_info;
+@@ -83,8 +82,6 @@
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+ 	struct request_queue *plug;
+-    int                 is_suspended_req;
+-    blkif_request_t     suspended_req;
+ 
+ 	/* statistics */
+ 	unsigned long       st_print;
+@@ -101,21 +98,10 @@
+ 	grant_ref_t    shmem_ref;
+ } blkif_t;
+ 
+-struct backend_info
+-{
+-	struct xenbus_device *dev;
+-	blkif_t *blkif;
+-	struct xenbus_watch backend_watch;
+-	unsigned major;
+-	unsigned minor;
+-	char *mode;
+-};
+-
+ blkif_t *blkif_alloc(domid_t domid);
+ void blkif_disconnect(blkif_t *blkif);
+ void blkif_free(blkif_t *blkif);
+ int blkif_map(blkif_t *blkif, unsigned long shared_page, unsigned int evtchn);
+-void vbd_resize(blkif_t *blkif);
+ 
+ #define blkif_get(_b) (atomic_inc(&(_b)->refcnt))
+ #define blkif_put(_b)					\
+diff -r e5a73cc5b866 drivers/xen/blkback/vbd.c
+--- a/drivers/xen/blkback/vbd.c	Wed Jun 30 05:10:44 2010 -0700
++++ b/drivers/xen/blkback/vbd.c	Wed Jun 30 05:16:16 2010 -0700
+@@ -33,7 +33,7 @@
+ #include "common.h"
+ 
+ #define vbd_sz(_v)   ((_v)->bdev->bd_part ?				\
+-	(_v)->bdev->bd_part->nr_sects : get_capacity((_v)->bdev->bd_disk))
++	(_v)->bdev->bd_part->nr_sects : (_v)->bdev->bd_disk->capacity)
+ 
+ unsigned long long vbd_size(struct vbd *vbd)
+ {
+@@ -47,7 +47,7 @@
+ 
+ unsigned long vbd_secsize(struct vbd *vbd)
+ {
+-	return bdev_logical_block_size(vbd->bdev);
++	return bdev_hardsect_size(vbd->bdev);
+ }
+ 
+ int vbd_create(blkif_t *blkif, blkif_vdev_t handle, unsigned major,
+@@ -73,7 +73,6 @@
+ 	}
+ 
+ 	vbd->bdev = bdev;
+-	vbd->size = vbd_size(vbd);
+ 
+ 	if (vbd->bdev->bd_disk == NULL) {
+ 		DPRINTK("vbd_creat: device %08x doesn't exist.\n",
+@@ -95,8 +94,7 @@
+ void vbd_free(struct vbd *vbd)
+ {
+ 	if (vbd->bdev)
+-		blkdev_put(vbd->bdev,
+-			   vbd->readonly ? FMODE_READ : FMODE_WRITE);
++		blkdev_put(vbd->bdev);
+ 	vbd->bdev = NULL;
+ }
+ 
+@@ -118,45 +116,3 @@
+  out:
+ 	return rc;
+ }
+-
+-void vbd_resize(blkif_t *blkif)
+-{
+-	struct vbd *vbd = &blkif->vbd;
+-	struct xenbus_transaction xbt;
+-	int err;
+-	struct xenbus_device *dev = blkif->be->dev;
+-	unsigned long long new_size = vbd_size(vbd);
+-
+-	printk(KERN_INFO "VBD Resize: new size %Lu\n", new_size);
+-	vbd->size = new_size;
+-again:
+-	err = xenbus_transaction_start(&xbt);
+-	if (err) {
+-		printk(KERN_WARNING "Error starting transaction");
+-		return;
+-	}
+-	err = xenbus_printf(xbt, dev->nodename, "sectors", "%Lu",
+-			    vbd_size(vbd));
+-	if (err) {
+-		printk(KERN_WARNING "Error writing new size");
+-		goto abort;
+-	}
+-	/*
+-	 * Write the current state; we will use this to synchronize
+-	 * the front-end. If the current state is "connected" the
+-	 * front-end will get the new size information online.
+-	 */
+-	err = xenbus_printf(xbt, dev->nodename, "state", "%d", dev->state);
+-	if (err) {
+-		printk(KERN_WARNING "Error writing the state");
+-		goto abort;
+-	}
+-
+-	err = xenbus_transaction_end(xbt, 0);
+-	if (err == -EAGAIN)
+-		goto again;
+-	if (err)
+-		printk(KERN_WARNING "Error ending transaction");
+-abort:
+-	xenbus_transaction_end(xbt, 1);
+-}
+diff -r e5a73cc5b866 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jun 30 05:10:44 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Wed Jun 30 05:16:16 2010 -0700
+@@ -27,6 +27,16 @@
+ 	pr_debug("blkback/xenbus (%s:%d) " fmt ".\n",	\
+ 		 __FUNCTION__, __LINE__, ##args)
+ 
++struct backend_info
++{
++	struct xenbus_device *dev;
++	blkif_t *blkif;
++	struct xenbus_watch backend_watch;
++	unsigned major;
++	unsigned minor;
++	char *mode;
++};
++
+ static void connect(struct backend_info *);
+ static int connect_ring(struct backend_info *);
+ static void backend_changed(struct xenbus_watch *, const char **,
+@@ -101,17 +111,10 @@
+ 				   struct device_attribute *attr,	\
+ 				   char *buf)				\
+ 	{								\
+-		ssize_t ret = -ENODEV;					\
+-		struct xenbus_device *dev;				\
+-		struct backend_info *be;				\
++		struct xenbus_device *dev = to_xenbus_device(_dev);	\
++		struct backend_info *be = dev->dev.driver_data;		\
+ 									\
+-		if (!get_device(_dev))					\
+-			return ret;					\
+-		dev = to_xenbus_device(_dev);				\
+-		if ((be = dev_get_drvdata(&dev->dev)) != NULL)		\
+-			ret = sprintf(buf, format, ##args);		\
+-		put_device(_dev);					\
+-		return ret;						\
++		return sprintf(buf, format, ##args);			\
+ 	}								\
+ 	static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
+ 
+@@ -173,7 +176,7 @@
+ 
+ static int blkback_remove(struct xenbus_device *dev)
+ {
+-	struct backend_info *be = dev_get_drvdata(&dev->dev);
++	struct backend_info *be = dev->dev.driver_data;
+ 
+ 	DPRINTK("");
+ 
+@@ -194,7 +197,7 @@
+ 	}
+ 
+ 	kfree(be);
+-	dev_set_drvdata(&dev->dev, NULL);
++	dev->dev.driver_data = NULL;
+ 	return 0;
+ }
+ 
+@@ -229,7 +232,7 @@
+ 		return -ENOMEM;
+ 	}
+ 	be->dev = dev;
+-	dev_set_drvdata(&dev->dev, be);
++	dev->dev.driver_data = be;
+ 
+ 	be->blkif = blkif_alloc(dev->otherend_id);
+ 	if (IS_ERR(be->blkif)) {
+@@ -352,7 +355,7 @@
+ static void frontend_changed(struct xenbus_device *dev,
+ 			     enum xenbus_state frontend_state)
+ {
+-	struct backend_info *be = dev_get_drvdata(&dev->dev);
++	struct backend_info *be = dev->dev.driver_data;
+ 	int err;
+ 
+ 	DPRINTK("%s", xenbus_strstate(frontend_state));

@@ -1,0 +1,50 @@
+diff -r d79580f0ae30 drivers/xen/blktap2/device.c
+--- a/drivers/xen/blktap2/device.c	Mon Aug 02 18:30:24 2010 -0700
++++ b/drivers/xen/blktap2/device.c	Mon Aug 02 18:30:37 2010 -0700
+@@ -12,8 +12,9 @@
+ #define dev_to_blktap(_dev) container_of(_dev, struct blktap, device)
+ 
+ static int
+-blktap_device_open(struct block_device *bdev, fmode_t mode)
++blktap_device_open(struct inode *inode, struct file *filep)
+ {
++	struct block_device *bdev = inode->i_bdev;
+ 	struct gendisk *disk = bdev->bd_disk;
+ 	struct blktap_device *tapdev = disk->private_data;
+ 
+@@ -28,14 +29,13 @@
+ }
+ 
+ static int
+-blktap_device_release(struct gendisk *disk, fmode_t mode)
++blktap_device_release(struct inode *inode, struct file *filep)
+ {
++	struct block_device *bdev = inode->i_bdev;
++	struct gendisk *disk = bdev->bd_disk;
+ 	struct blktap_device *tapdev = disk->private_data;
+-	struct block_device *bdev = bdget_disk(disk, 0);
+ 	struct blktap *tap = dev_to_blktap(tapdev);
+ 
+-	bdput(bdev);
+-
+ 	if (!bdev->bd_openers) {
+ 		set_bit(BLKTAP_DEVICE_CLOSED, &tap->dev_inuse);
+ 		blktap_ring_kick_user(tap);
+@@ -62,7 +62,7 @@
+ }
+ 
+ static int
+-blktap_device_ioctl(struct block_device *bd, fmode_t mode,
++blktap_device_ioctl(struct inode *inode, struct file *filep,
+ 		    unsigned command, unsigned long argument)
+ {
+ 	int i;
+@@ -325,7 +325,7 @@
+ 	set_capacity(dev->gd, params->capacity);
+ 
+ 	/* Hard sector size and max sectors impersonate the equiv. hardware. */
+-	blk_queue_logical_block_size(rq, params->sector_size);
++	blk_queue_hardsect_size(rq, params->sector_size);
+ 	blk_queue_max_sectors(rq, 512);
+ 
+ 	/* Each segment in a request is up to an aligned page in size. */

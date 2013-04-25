@@ -1,0 +1,12 @@
+diff -r 59b2dfc43a0e drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Aug 01 10:23:47 2007 +0100
++++ b/drivers/xen/blkback/xenbus.c	Wed Aug 01 17:22:05 2007 +0100
+@@ -507,7 +507,7 @@ static void frontend_changed(struct xenb
+ 		/* Ensure we connect even when two watches fire in 
+ 		   close successsion and we miss the intermediate value 
+ 		   of frontend_state. */
+-		if (dev->state != XenbusStateConnected) {
++		if (dev->state != XenbusStateConnected && dev->state != XenbusStateClosing) {
+ 			err = connect_ring(be);
+ 			if (err)
+ 				break;

@@ -1,0 +1,35 @@
+From b47d19de2c714020ba8f5545a6e7d4968f37eb45 Mon Sep 17 00:00:00 2001
+From: Arun Bharadwaj <arun@linux.vnet.ibm.com>
+Date: Thu, 18 Nov 2010 10:36:43 +0000
+Subject: [PATCH] Pure nfs client performance using odirect.
+
+When an application opens a file with O_DIRECT flag, if the size of
+the data that is written is equal to wsize, the client sends a
+WRITE RPC with stable flag set to UNSTABLE followed by a single
+COMMIT RPC rather than sending a single WRITE RPC with the stable
+flag set to FILE_SYNC. This a bug.
+
+Patch to fix this.
+
+Signed-off-by: Arun R Bharadwaj <arun@linux.vnet.ibm.com>
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+---
+ fs/nfs/direct.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/fs/nfs/direct.c b/fs/nfs/direct.c
+index 84d3c8b..e6ace0d 100644
+--- a/fs/nfs/direct.c
++++ b/fs/nfs/direct.c
+@@ -867,7 +867,7 @@ static ssize_t nfs_direct_write(struct kiocb *iocb, const struct iovec *iov,
+ 		goto out;
+ 	nfs_alloc_commit_data(dreq);
+ 
+-	if (dreq->commit_data == NULL || count < wsize)
++	if (dreq->commit_data == NULL || count <= wsize)
+ 		sync = NFS_FILE_SYNC;
+ 
+ 	dreq->inode = inode;
+-- 
+1.7.6.5
+

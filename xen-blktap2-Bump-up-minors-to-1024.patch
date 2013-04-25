@@ -1,0 +1,243 @@
+From 7c10e7aaa38495e1401dd7a783d859050f1aac27 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:32 -0700
+Subject: [PATCH 04/18] xen/blktap: Bump up minors to 1024.
+
+Grow the minor map dynamically, to save a page or two on smaller
+systems.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    6 +++-
+ drivers/xen/blktap2/control.c |   61 ++++++++++++++++++++++++++++++++---------
+ drivers/xen/blktap2/device.c  |   17 ++++++++---
+ drivers/xen/blktap2/ring.c    |   15 +++-------
+ drivers/xen/blktap2/sysfs.c   |    6 +++-
+ 5 files changed, 73 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 618e387..a303847 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -23,7 +23,7 @@ extern int blktap_debug_level;
+ #define BTWARN(_f, _a...)            BTPRINTK(0, KERN_WARNING, 0, _f, ##_a)
+ #define BTERR(_f, _a...)             BTPRINTK(0, KERN_ERR, 0, _f, ##_a)
+ 
+-#define MAX_BLKTAP_DEVICE            512
++#define MAX_BLKTAP_DEVICE            1024
+ 
+ #define BLKTAP_CONTROL               1
+ #define BLKTAP_RING_FD               2
+@@ -166,7 +166,9 @@ struct blktap {
+ 	struct blktap_statistics       stats;
+ };
+ 
+-extern struct blktap *blktaps[MAX_BLKTAP_DEVICE];
++extern struct mutex blktap_lock;
++extern struct blktap **blktaps;
++extern int blktap_max_minor;
+ 
+ static inline int
+ blktap_active(struct blktap *tap)
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 7eecc0c..5a7fab4 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -6,12 +6,13 @@
+ 
+ #include "blktap.h"
+ 
+-static DEFINE_MUTEX(blktap_lock);
+-struct blktap *blktaps[MAX_BLKTAP_DEVICE];
++DEFINE_MUTEX(blktap_lock);
++
++struct blktap **blktaps;
++int blktap_max_minor;
+ 
+ static int ring_major;
+ static int device_major;
+-static int blktap_control_registered;
+ 
+ static void
+ blktap_control_initialize_tap(struct blktap *tap)
+@@ -41,14 +42,27 @@ blktap_control_create_tap(void)
+ 
+ 	mutex_lock(&blktap_lock);
+ 
+-	for (minor = 0; minor < MAX_BLKTAP_DEVICE; minor++)
++	for (minor = 0; minor < blktap_max_minor; minor++)
+ 		if (!blktaps[minor])
+ 			break;
+ 
+-	if (minor == MAX_BLKTAP_DEVICE) {
+-		kfree(tap);
+-		tap = NULL;
+-		goto out;
++	if (minor == MAX_BLKTAP_DEVICE)
++		goto fail;
++
++	if (minor == blktap_max_minor) {
++		void *p;
++		int n;
++
++		n = min(2 * blktap_max_minor, MAX_BLKTAP_DEVICE);
++		p = krealloc(blktaps, n * sizeof(blktaps[0]), GFP_KERNEL);
++		if (!p)
++			goto fail;
++
++		blktaps          = p;
++		minor            = blktap_max_minor;
++		blktap_max_minor = n;
++
++		memset(&blktaps[minor], 0, (n - minor) * sizeof(blktaps[0]));
+ 	}
+ 
+ 	tap->minor = minor;
+@@ -57,6 +71,12 @@ blktap_control_create_tap(void)
+ out:
+ 	mutex_unlock(&blktap_lock);
+ 	return tap;
++
++fail:
++	mutex_unlock(&blktap_lock);
++	kfree(tap);
++	tap = NULL;
++	goto out;
+ }
+ 
+ static struct blktap *
+@@ -196,31 +216,44 @@ blktap_control_init(void)
+ 
+ 	err = misc_register(&blktap_misc);
+ 	if (err) {
++		blktap_misc.minor = MISC_DYNAMIC_MINOR;
+ 		BTERR("misc_register failed for control device");
+ 		return err;
+ 	}
+ 
+-	blktap_control_registered = 1;
++	blktap_max_minor = min(64, MAX_BLKTAP_DEVICE);
++	blktaps = kzalloc(blktap_max_minor * sizeof(blktaps[0]), GFP_KERNEL);
++	if (!blktaps) {
++		BTERR("failed to allocate blktap minor map");
++		return -ENOMEM;
++	}
++
+ 	return 0;
+ }
+ 
+ static void
+-blktap_control_free(void)
++blktap_control_exit(void)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < MAX_BLKTAP_DEVICE; i++)
+ 		blktap_control_destroy_device(blktaps[i]);
+ 
+-	if (blktap_control_registered)
+-		if (misc_deregister(&blktap_misc) < 0)
+-			BTERR("misc_deregister failed for control device");
++	if (blktaps) {
++		kfree(blktaps);
++		blktaps = NULL;
++	}
++
++	if (blktap_misc.minor != MISC_DYNAMIC_MINOR) {
++		misc_deregister(&blktap_misc);
++		blktap_misc.minor = MISC_DYNAMIC_MINOR;
++	}
+ }
+ 
+ static void
+ blktap_exit(void)
+ {
+-	blktap_control_free();
++	blktap_control_exit();
+ 	blktap_ring_exit();
+ 	blktap_sysfs_free();
+ 	blktap_device_free();
+diff --git a/drivers/xen/blktap2/device.c b/drivers/xen/blktap2/device.c
+index d2a4501..26027a8 100644
+--- a/drivers/xen/blktap2/device.c
++++ b/drivers/xen/blktap2/device.c
+@@ -888,11 +888,18 @@ blktap_device_create(struct blktap *tap, struct blktap_params *params)
+ 		goto fail;
+ 	}
+ 
+-	if (minor < 26)
+-		sprintf(gd->disk_name, "tapdev%c", 'a' + minor);
+-	else
+-		sprintf(gd->disk_name, "tapdev%c%c",
+-			'a' + ((minor / 26) - 1), 'a' + (minor % 26));
++	if (minor < 26) {
++		sprintf(gd->disk_name, "td%c", 'a' + minor % 26);
++	} else if (minor < (26 + 1) * 26) {
++		sprintf(gd->disk_name, "td%c%c",
++			'a' + minor / 26 - 1,'a' + minor % 26);
++	} else {
++		const unsigned int m1 = (minor / 26 - 1) / 26 - 1;
++		const unsigned int m2 = (minor / 26 - 1) % 26;
++		const unsigned int m3 =  minor % 26;
++		sprintf(gd->disk_name, "td%c%c%c",
++			'a' + m1, 'a' + m2, 'a' + m3);
++	}
+ 
+ 	gd->major = blktap_device_major;
+ 	gd->first_minor = minor;
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 74641fe..c14a82f 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -179,18 +179,13 @@ static struct vm_operations_struct blktap_ring_vm_operations = {
+ static int
+ blktap_ring_open(struct inode *inode, struct file *filp)
+ {
+-	int idx;
+-	struct blktap *tap;
+-
+-	idx = iminor(inode);
+-	if (idx < 0 || idx > MAX_BLKTAP_DEVICE || blktaps[idx] == NULL) {
+-		BTERR("unable to open device blktap%d\n", idx);
+-		return -ENODEV;
+-	}
++	struct blktap *tap = NULL;
++	int minor;
+ 
+-	tap = blktaps[idx];
++	minor = iminor(inode);
+ 
+-	BTINFO("opening device blktap%d\n", idx);
++	if (minor < blktap_max_minor)
++		tap = blktaps[minor];
+ 
+ 	if (!test_bit(BLKTAP_CONTROL, &tap->dev_inuse))
+ 		return -ENODEV;
+diff --git a/drivers/xen/blktap2/sysfs.c b/drivers/xen/blktap2/sysfs.c
+index 07a4a03..9a4ea97 100644
+--- a/drivers/xen/blktap2/sysfs.c
++++ b/drivers/xen/blktap2/sysfs.c
+@@ -262,8 +262,10 @@ blktap_sysfs_show_devices(struct class *class, char *buf)
+ 	int i, ret;
+ 	struct blktap *tap;
+ 
++	mutex_lock(&blktap_lock);
++
+ 	ret = 0;
+-	for (i = 0; i < MAX_BLKTAP_DEVICE; i++) {
++	for (i = 0; i < blktap_max_minor; i++) {
+ 		tap = blktaps[i];
+ 		if (!tap)
+ 			continue;
+@@ -274,6 +276,8 @@ blktap_sysfs_show_devices(struct class *class, char *buf)
+ 		ret += sprintf(buf + ret, "%d %s\n", tap->minor, tap->name);
+ 	}
+ 
++	mutex_unlock(&blktap_lock);
++
+ 	return ret;
+ }
+ CLASS_ATTR(devices, S_IRUSR, blktap_sysfs_show_devices, NULL);
+-- 
+1.7.0.4
+

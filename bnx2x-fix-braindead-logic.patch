@@ -1,0 +1,20 @@
+# HG changeset patch
+# Parent 74bc06afc58916a53448cf3666753b4130f0d4de
+
+diff -r 74bc06afc589 drivers/net/bnx2x/bnx2x_compat.h
+--- a/drivers/net/bnx2x/bnx2x_compat.h
++++ b/drivers/net/bnx2x/bnx2x_compat.h
+@@ -1316,13 +1316,6 @@ static inline int netif_set_real_num_rx_
+ #define SLES11_SP1_UP1
+ #endif
+ 
+-#if !defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE < 0x020623) && defined(BNX2X_MULTI_QUEUE) && (!defined(SLES_DISTRO) || (SLES_DISTRO < 0x1102) && !defined(SLES11_SP1_UP1))
+-static inline void netif_set_real_num_tx_queues(struct net_device *dev,
+-						unsigned int txq)
+-{
+-	dev->real_num_tx_queues = txq;
+-}
+-#endif
+ 
+ /* vlan structure defines*/
+ #ifndef VLAN_PRIO_MASK

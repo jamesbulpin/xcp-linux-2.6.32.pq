@@ -1,0 +1,17 @@
+# HG changeset patch
+# Parent a1e96c9df958c849911b4ea26292530f382cae07
+CA-89588: Disable ixgbe's use of packet split because this causes a performance regression on XenServer workloads.
+
+diff -r a1e96c9df958 drivers/net/ixgbe/kcompat.h
+--- a/drivers/net/ixgbe/kcompat.h
++++ b/drivers/net/ixgbe/kcompat.h
+@@ -59,6 +59,9 @@
+ /* with ip forwarding and bridging.  See release notes. */
+ #define IXGBE_NO_LRO
+ 
++/* Disable PACKET_SPLIT for XenServer as this cause's a performance regresssion */
++#define DISABLE_PACKET_SPLIT
++
+ /* NAPI enable/disable flags here */
+ /* enable NAPI for ixgbe by default */
+ #undef CONFIG_IXGBE_NAPI

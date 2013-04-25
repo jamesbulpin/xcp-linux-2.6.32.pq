@@ -1,0 +1,27 @@
+From 09f4e819903c6adb83e7b30e4690fe14be3d5483 Mon Sep 17 00:00:00 2001
+From: Benjamin Poirier <bpoirier@suse.de>
+Date: Fri, 15 Jun 2012 14:59:23 +0000
+Subject: - patches.fixes/Fix-memory-leak-corruption-on-VLAN-GRO_DROP.patch:
+
+  core: Fix memory leak/corruption on VLAN GRO_DROP (bnc#758058).
+
+suse-commit: 2d50a13a806ae3dbae7bd089f5617c742d63c00d
+---
+(limited to 'net/core/dev.c')
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 622140b..6f5270a 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -2802,7 +2802,8 @@ int napi_frags_finish(struct napi_struct *napi, struct sk_buff *skb, int ret)
+ 
+ 	case GRO_DROP:
+ 		err = NET_RX_DROP;
+-		/* fall through */
++		kfree_skb(skb);
++		break;
+ 
+ 	case GRO_MERGED_FREE:
+ 		napi_reuse_skb(napi, skb);
+--
+cgit v0.9

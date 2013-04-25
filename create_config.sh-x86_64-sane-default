@@ -1,0 +1,11 @@
+diff -r cf9f2aa26372 buildconfigs/create_config.sh
+--- a/buildconfigs/create_config.sh	Fri Feb 29 15:02:41 2008 +0000
++++ b/buildconfigs/create_config.sh	Fri Feb 29 15:03:58 2008 +0000
+@@ -19,6 +19,7 @@ systype=$4
+ # Derive from linux-defconfig_xen_x86_32 otherwise.
+ #
+ skeleton=buildconfigs/linux-defconfig_${extraversion#-}_${target_arch}${systype}
++[ -r $skeleton ] || skeleton=buildconfigs/linux-defconfig_xen_${target_arch}
+ [ -r $skeleton ] || skeleton=buildconfigs/linux-defconfig_xen_x86_32
+ [ -r $skeleton.local ] && skeleton=$skeleton.local
+ cp $skeleton $config_file

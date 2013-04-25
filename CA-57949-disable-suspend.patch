@@ -1,0 +1,20 @@
+# HG changeset patch
+# Parent 279938dd907fce0100f4c701d42a7e5214a309e5
+
+diff -r 279938dd907f drivers/xen/core/reboot.c
+--- a/drivers/xen/core/reboot.c	Tue Jun 28 10:27:32 2011 +0100
++++ b/drivers/xen/core/reboot.c	Tue Jun 28 16:59:43 2011 +0100
+@@ -188,6 +188,13 @@ static void shutdown_handler(struct xenb
+ 		return;
+ 	}
+ 
++	/* CA-57949 - we cant suspend so reject xapi's request by not accepting it
++	 * A 1 minute timeout is substantially better than a 1 hour timeout. */
++	if ( strcmp(str, "suspend") == 0 ) {
++		xenbus_transaction_end(xbt, 1);
++		return;
++	}
++
+ 	xenbus_write(xbt, "control", "shutdown", "");
+ 
+ 	err = xenbus_transaction_end(xbt, 0);

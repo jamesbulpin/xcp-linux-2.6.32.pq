@@ -1,0 +1,192 @@
+Add a new ioctl to /proc/xen/privcmd which allows HVM operations to be
+performed on restricted domains.
+
+diff -r 976105eeb258 arch/x86/include/mach-xen/asm/hypercall_32.h
+--- a/arch/x86/include/mach-xen/asm/hypercall_32.h	Fri Jan 14 17:41:49 2011 +0000
++++ b/arch/x86/include/mach-xen/asm/hypercall_32.h	Fri Jan 14 17:47:34 2011 +0000
+@@ -68,3 +68,9 @@ HYPERVISOR_domctl(
+         return _hypercall1(int, domctl, xd);
+ }
+ 
++static inline unsigned long __must_check
++HYPERVISOR_hvm_op(
++	int op, void *arg)
++{
++	return _hypercall2(unsigned long, hvm_op, op, arg);
++}
+diff -r 976105eeb258 arch/x86/include/mach-xen/asm/hypercall_64.h
+--- a/arch/x86/include/mach-xen/asm/hypercall_64.h	Fri Jan 14 17:41:49 2011 +0000
++++ b/arch/x86/include/mach-xen/asm/hypercall_64.h	Fri Jan 14 17:47:34 2011 +0000
+@@ -60,3 +60,9 @@ HYPERVISOR_domctl(
+ 	return _hypercall1(int, domctl, xd);
+ }
+ 
++static inline unsigned long __must_check
++HYPERVISOR_hvm_op(
++	int op, void *arg)
++{
++	return _hypercall2(unsigned long, hvm_op, op, arg);
++}
+diff -r 976105eeb258 drivers/xen/privcmd/privcmd.c
+--- a/drivers/xen/privcmd/privcmd.c	Fri Jan 14 17:41:49 2011 +0000
++++ b/drivers/xen/privcmd/privcmd.c	Fri Jan 14 17:47:34 2011 +0000
+@@ -25,6 +25,7 @@
+ #include <asm/uaccess.h>
+ #include <asm/tlb.h>
+ #include <asm/hypervisor.h>
++#include <xen/interface/hvm/hvm_op.h>
+ #include <xen/public/privcmd.h>
+ #include <xen/interface/xen.h>
+ #include <xen/xen_proc.h>
+@@ -449,6 +450,64 @@ static long privcmd_ioctl(struct file *f
+         }
+         break;
+ 
++        case IOCTL_PRIVCMD_HVMOP: {
++                privcmd_hvmop_t pht;
++
++                if (copy_from_user(&pht, udata, sizeof(pht)))
++                        return -EFAULT;
++
++                if (fdata->restrict_domid != UNRESTRICTED_DOMID) {
++                        switch (pht.cmd) {
++                        case HVMOP_set_param:
++                        case HVMOP_get_param:
++                                if (pht.u.param.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case HVMOP_set_pci_intx_level:
++                                if (pht.u.set_pci_intx_level.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case HVMOP_set_isa_irq_level:
++                                if (pht.u.set_isa_irq_level.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        case HVMOP_set_pci_link_route:
++                                if (pht.u.set_isa_irq_level.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++			case HVMOP_modified_memory:
++                                if (pht.u.modified_memory.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++			case HVMOP_set_mem_type:
++                                if (pht.u.set_mem_type.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++			case HVMOP_track_dirty_vram:
++                                if (pht.u.track_dirty_vram.domid !=
++                                    fdata->restrict_domid)
++                                        return -EACCES;
++                                break;
++                        default:
++                                return -EACCES;
++                        }
++                }
++
++                ret = HYPERVISOR_hvm_op(pht.cmd, &pht.u);
++                if (ret >= 0) {
++                        if (copy_to_user(udata, &pht, sizeof(pht)))
++                                ret = -EFAULT;
++                }
++                break;
++        }
++        break;
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff -r 976105eeb258 include/xen/interface/arch-x86/xen-x86_32.h
+--- a/include/xen/interface/arch-x86/xen-x86_32.h	Fri Jan 14 17:41:49 2011 +0000
++++ b/include/xen/interface/arch-x86/xen-x86_32.h	Fri Jan 14 17:47:34 2011 +0000
+@@ -101,7 +101,6 @@
+ #endif
+ 
+ /* 32-/64-bit invariability for control interfaces (domctl/sysctl). */
+-#if defined(__XEN__) || defined(__XEN_TOOLS__)
+ #undef ___DEFINE_XEN_GUEST_HANDLE
+ #define ___DEFINE_XEN_GUEST_HANDLE(name, type)                  \
+     typedef struct { type *p; }                                 \
+@@ -116,7 +115,6 @@
+ #define uint64_aligned_t uint64_t __attribute__((aligned(8)))
+ #define __XEN_GUEST_HANDLE_64(name) __guest_handle_64_ ## name
+ #define XEN_GUEST_HANDLE_64(name) __XEN_GUEST_HANDLE_64(name)
+-#endif
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff -r 976105eeb258 include/xen/interface/xen.h
+--- a/include/xen/interface/xen.h	Fri Jan 14 17:41:49 2011 +0000
++++ b/include/xen/interface/xen.h	Fri Jan 14 17:47:34 2011 +0000
+@@ -692,11 +692,10 @@ __DEFINE_XEN_GUEST_HANDLE(uint64, uint64
+ #endif /* !__ASSEMBLY__ */
+ 
+ /* Default definitions for macros used by domctl/sysctl. */
+-#if defined(__XEN__) || defined(__XEN_TOOLS__)
+-
+ #ifndef uint64_aligned_t
+ #define uint64_aligned_t uint64_t
+ #endif
++
+ #ifndef XEN_GUEST_HANDLE_64
+ #define XEN_GUEST_HANDLE_64(name) XEN_GUEST_HANDLE(name)
+ #endif
+@@ -708,8 +707,6 @@ struct xenctl_cpumap {
+ };
+ #endif
+ 
+-#endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
+-
+ #endif /* __XEN_PUBLIC_XEN_H__ */
+ 
+ /*
+diff -r 976105eeb258 include/xen/public/privcmd.h
+--- a/include/xen/public/privcmd.h	Fri Jan 14 17:41:49 2011 +0000
++++ b/include/xen/public/privcmd.h	Fri Jan 14 17:47:34 2011 +0000
+@@ -34,6 +34,11 @@
+ #define __LINUX_PUBLIC_PRIVCMD_H__
+ 
+ #include <linux/types.h>
++#ifdef __KERNEL__
++#include <xen/hvm.h>
++#else
++#include <xen/hvm/hvm_op.h>
++#endif
+ 
+ #ifndef __user
+ #define __user
+@@ -86,6 +91,19 @@ typedef struct privcmd_domctl {
+ 	} u  __attribute__((aligned(8)));
+ } privcmd_domctl_t;
+ 
++typedef struct privcmd_hvmop {
++        unsigned cmd;
++        union {
++                xen_hvm_param_t param;
++                xen_hvm_set_pci_intx_level_t set_pci_intx_level;
++                xen_hvm_set_isa_irq_level_t set_isa_irq_level;
++                xen_hvm_set_pci_link_route_t set_pci_link_route;
++                xen_hvm_modified_memory_t modified_memory;
++                xen_hvm_set_mem_type_t set_mem_type;
++                xen_hvm_track_dirty_vram_t track_dirty_vram;
++        } u;
++} privcmd_hvmop_t;
++
+ /*
+  * @cmd: IOCTL_PRIVCMD_HYPERCALL
+  * @arg: &privcmd_hypercall_t
+@@ -103,5 +121,7 @@ typedef struct privcmd_domctl {
+ 	_IOC(_IOC_NONE, 'P', 100, sizeof(privcmd_restrict_domid_t))
+ #define IOCTL_PRIVCMD_DOMCTL				\
+ 	_IOC(_IOC_NONE, 'P', 101, sizeof(privcmd_domctl_t))
++#define IOCTL_PRIVCMD_HVMOP					\
++	_IOC(_IOC_NONE, 'P', 102, sizeof(privcmd_hvmop_t))
+ 
+ #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

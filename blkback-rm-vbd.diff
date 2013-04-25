@@ -1,0 +1,571 @@
+blkback: Inline the vbd struct.
+
+Fields not either redundant better go into the blkif struct.
+Especially since the bdev pointer displays open/closed state, and the
+xenbus state machines depend on it.
+
+Comes with a more expensive physical-device node in sysfs, but this
+should rather evolve into a symlink to /sys/block anyway.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r b5c4c432ed20 drivers/xen/blkback/Makefile
+--- a/drivers/xen/blkback/Makefile	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/Makefile	Thu Jun 24 23:16:48 2010 -0700
+@@ -1,4 +1,4 @@
+ obj-$(CONFIG_XEN_BLKDEV_BACKEND) := blkbk.o
+ obj-$(CONFIG_XEN_BLKBACK_PAGEMAP) += blkback-pagemap.o
+ 
+-blkbk-y	:= blkback.o xenbus.o interface.o vbd.o
++blkbk-y	:= blkback.o xenbus.o interface.o
+diff -r b5c4c432ed20 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Thu Jun 24 23:16:48 2010 -0700
+@@ -117,6 +117,90 @@
+ static void make_response(blkif_t *blkif, u64 id,
+ 			  unsigned short op, int st);
+ 
++int
++blkif_bdev_open(blkif_t *blkif, dev_t dev, int mode, int cdrom)
++{
++	struct block_device *bdev = blkif->bdev;
++
++	if (bdev)
++		return -EALREADY;
++
++	bdev = open_by_devnum(dev, mode);
++	if (IS_ERR(bdev))
++		return PTR_ERR(bdev);
++
++	blkif->mode  = mode;
++	blkif->cdrom = cdrom;
++	blkif->bdev  = bdev;
++
++	return 0;
++}
++
++void
++blkif_bdev_close(blkif_t *blkif)
++{
++	struct block_device *bdev = blkif->bdev;
++
++	if (bdev) {
++		blkdev_put(bdev);
++		blkif->bdev = NULL;
++	}
++}
++
++unsigned int
++blkif_info(blkif_t *blkif)
++{
++	struct gendisk *disk = blkif->bdev->bd_disk;
++	unsigned int type = 0;
++
++	if (disk->flags & GENHD_FL_CD || blkif->cdrom)
++		type |= VDISK_CDROM;
++
++	if (disk->flags & GENHD_FL_REMOVABLE)
++		type |= VDISK_REMOVABLE;
++
++	if (!(blkif->mode & FMODE_WRITE))
++		type |= VDISK_READONLY;
++
++	return type;
++}
++
++int
++blkif_sector_size(blkif_t *blkif)
++{
++	return bdev_hardsect_size(blkif->bdev);
++}
++
++sector_t
++blkif_size(blkif_t *blkif)
++{
++	struct block_device *bdev = blkif->bdev;
++
++	if (bdev->bd_part)
++		return bdev->bd_part->nr_sects;
++
++	return bdev->bd_disk->capacity;
++}
++
++static inline int
++blkif_translate(blkif_t *blkif, struct phys_req *req, int operation)
++{
++	struct block_device *bdev = blkif->bdev;
++	sector_t size;
++
++	if (operation != READ && unlikely(!(blkif->mode & FMODE_WRITE)))
++		return -EACCES;
++
++	size = blkif_size(blkif);
++	if (unlikely(req->sector_number + req->nr_sects > size))
++		return -EACCES;
++
++	req->dev  = bdev->bd_inode->i_rdev;
++	req->bdev = bdev;
++
++	return 0;
++}
++
+ /******************************************************************
+  * misc small helpers
+  */
+@@ -581,11 +665,12 @@
+ 	if (ret)
+ 		goto fail_flush;
+ 
+-	if (vbd_translate(&preq, blkif, operation) != 0) {
+-		DPRINTK("access denied: %s of [%llu,%llu] on dev=%04x\n", 
++	ret = blkif_translate(blkif, &preq, operation);
++	if (ret) {
++		DPRINTK("access denied: %s of [%llu,%llu] on dev=%04x: %d\n", 
+ 			operation == READ ? "read" : "write",
+ 			preq.sector_number,
+-			preq.sector_number + preq.nr_sects, preq.dev);
++			preq.sector_number + preq.nr_sects, preq.dev, ret);
+ 		goto fail_flush;
+ 	}
+ 
+diff -r b5c4c432ed20 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/common.h	Thu Jun 24 23:16:48 2010 -0700
+@@ -60,14 +60,6 @@
+ #define QUEUE_PAUSE_REQUESTED   2
+ #define QUEUE_PAUSED            3
+ 
+-struct vbd {
+-	blkif_vdev_t   handle;      /* what the domain refers to this vbd as */
+-	unsigned char  readonly;    /* Non-zero -> read-only */
+-	unsigned char  type;        /* VDISK_xxx */
+-	u32            pdevice;     /* phys device that this vbd maps to */
+-	struct block_device *bdev;
+-};
+-
+ struct backend_info;
+ 
+ #define	BLKIF_MAX_RING_PAGE_ORDER 2
+@@ -83,8 +75,12 @@
+ 	enum blkif_protocol blk_protocol;
+ 	blkif_back_rings_t  blk_rings;
+ 	struct vm_struct   *blk_ring_area;
+-	/* The VBD attached to this interface. */
+-	struct vbd        vbd;
++
++	/* The block device attached to this interface. */
++	struct block_device *bdev;
++	int                  mode;
++	int                  cdrom;
++
+ 	/* Back pointer to the backend_info. */
+ 	struct backend_info *be;
+ 	/* Private fields. */
+@@ -135,15 +131,11 @@
+ 			wake_up(&(_b)->waiting_to_free);\
+ 	} while (0)
+ 
+-/* Create a vbd. */
+-int vbd_create(blkif_t *blkif, blkif_vdev_t vdevice, unsigned major,
+-	       unsigned minor, int readonly, int cdrom);
+-void vbd_free(struct vbd *vbd);
+-void vbd_sync(struct vbd *vbd);
+-
+-unsigned long long vbd_size(struct vbd *vbd);
+-unsigned int vbd_info(struct vbd *vbd);
+-unsigned long vbd_secsize(struct vbd *vbd);
++int blkif_bdev_open(blkif_t *blkif, dev_t dev, int mode, int cdrom);
++void blkif_bdev_close(blkif_t *blkif);
++sector_t blkif_size(blkif_t *blkif);
++int blkif_sector_size(blkif_t *blkif);
++unsigned int blkif_info(blkif_t *blkif);
+ 
+ struct phys_req {
+ 	unsigned short       dev;
+diff -r b5c4c432ed20 drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/interface.c	Thu Jun 24 23:16:48 2010 -0700
+@@ -213,6 +213,7 @@
+ 
+ void blkif_free(blkif_t *blkif)
+ {
++	BUG_ON(blkif->bdev);
+ 	if (!atomic_dec_and_test(&blkif->refcnt))
+ 		BUG();
+ 	kmem_cache_free(blkif_cachep, blkif);
+diff -r b5c4c432ed20 drivers/xen/blkback/vbd.c
+--- a/drivers/xen/blkback/vbd.c	Thu Jun 24 17:32:56 2010 -0700
++++ /dev/null	Thu Jan 01 00:00:00 1970 +0000
+@@ -1,133 +0,0 @@
+-/******************************************************************************
+- * blkback/vbd.c
+- * 
+- * Routines for managing virtual block devices (VBDs).
+- * 
+- * Copyright (c) 2003-2005, Keir Fraser & Steve Hand
+- * 
+- * This program is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public License version 2
+- * as published by the Free Software Foundation; or, when distributed
+- * separately from the Linux kernel or incorporated into other
+- * software packages, subject to the following license:
+- * 
+- * Permission is hereby granted, free of charge, to any person obtaining a copy
+- * of this source file (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy, modify,
+- * merge, publish, distribute, sublicense, and/or sell copies of the Software,
+- * and to permit persons to whom the Software is furnished to do so, subject to
+- * the following conditions:
+- * 
+- * The above copyright notice and this permission notice shall be included in
+- * all copies or substantial portions of the Software.
+- * 
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+- * IN THE SOFTWARE.
+- */
+-
+-#include "common.h"
+-#include <linux/fs.h>
+-#include <linux/buffer_head.h>
+-
+-#define vbd_sz(_v)   ((_v)->bdev->bd_part ?				\
+-	(_v)->bdev->bd_part->nr_sects : (_v)->bdev->bd_disk->capacity)
+-
+-unsigned long long vbd_size(struct vbd *vbd)
+-{
+-	return vbd_sz(vbd);
+-}
+-
+-unsigned int vbd_info(struct vbd *vbd)
+-{
+-	return vbd->type | (vbd->readonly?VDISK_READONLY:0);
+-}
+-
+-unsigned long vbd_secsize(struct vbd *vbd)
+-{
+-	return bdev_hardsect_size(vbd->bdev);
+-}
+-
+-int vbd_create(blkif_t *blkif, blkif_vdev_t handle, unsigned major,
+-	       unsigned minor, int readonly, int cdrom)
+-{
+-	struct vbd *vbd;
+-	struct block_device *bdev;
+-
+-	vbd = &blkif->vbd;
+-	vbd->handle   = handle; 
+-	vbd->readonly = readonly;
+-	vbd->type     = 0;
+-
+-	vbd->pdevice  = MKDEV(major, minor);
+-
+-	bdev = open_by_devnum(vbd->pdevice,
+-			      vbd->readonly ? FMODE_READ : FMODE_WRITE);
+-
+-	if (IS_ERR(bdev)) {
+-		DPRINTK("vbd_creat: device %08x could not be opened.\n",
+-			vbd->pdevice);
+-		return -ENOENT;
+-	}
+-
+-	vbd->bdev = bdev;
+-
+-	if (vbd->bdev->bd_disk == NULL) {
+-		DPRINTK("vbd_creat: device %08x doesn't exist.\n",
+-			vbd->pdevice);
+-		vbd_free(vbd);
+-		return -ENOENT;
+-	}
+-
+-	if (vbd->bdev->bd_disk->flags & GENHD_FL_CD || cdrom)
+-		vbd->type |= VDISK_CDROM;
+-	if (vbd->bdev->bd_disk->flags & GENHD_FL_REMOVABLE)
+-		vbd->type |= VDISK_REMOVABLE;
+-
+-	DPRINTK("Successful creation of handle=%04x (dom=%u)\n",
+-		handle, blkif->domid);
+-	return 0;
+-}
+-
+-void vbd_free(struct vbd *vbd)
+-{
+-	if (vbd->bdev) {
+-		/* BLKFLSBUF */
+-		lock_kernel();
+-		fsync_bdev(vbd->bdev);
+-		invalidate_bdev(vbd->bdev);
+-		unlock_kernel();
+-	}
+-	if (vbd->bdev)
+-		blkdev_put(vbd->bdev);
+-	vbd->bdev = NULL;
+-}
+-
+-void vbd_sync(struct vbd *vbd)
+-{
+-	if (vbd->bdev)
+-		fsync_bdev(vbd->bdev);
+-}
+-
+-int vbd_translate(struct phys_req *req, blkif_t *blkif, int operation)
+-{
+-	struct vbd *vbd = &blkif->vbd;
+-	int rc = -EACCES;
+-
+-	if ((operation != READ) && vbd->readonly)
+-		goto out;
+-
+-	if (unlikely((req->sector_number + req->nr_sects) > vbd_sz(vbd)))
+-		goto out;
+-
+-	req->dev  = vbd->pdevice;
+-	req->bdev = vbd->bdev;
+-	rc = 0;
+-
+- out:
+-	return rc;
+-}
+diff -r b5c4c432ed20 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu Jun 24 17:32:56 2010 -0700
++++ b/drivers/xen/blkback/xenbus.c	Thu Jun 24 23:16:48 2010 -0700
+@@ -36,7 +36,6 @@
+ 	struct xenbus_watch pause_watch;
+ 	unsigned major;
+ 	unsigned minor;
+-	char *mode;
+ 	int group_added;
+ 	char *nodename;
+ 	atomic_t refcnt;
+@@ -82,7 +81,7 @@
+ 	char name[TASK_COMM_LEN];
+ 
+ 	/* Not ready to connect? */
+-	if (!blkif->irq || !blkif->vbd.bdev)
++	if (!blkif->irq || !blkif->bdev)
+ 		return;
+ 
+ 	/* Already connected? */
+@@ -100,12 +99,12 @@
+ 		return;
+ 	}
+ 
+-	err = filemap_write_and_wait(blkif->vbd.bdev->bd_inode->i_mapping);
++	err = filemap_write_and_wait(blkif->bdev->bd_inode->i_mapping);
+ 	if (err) {
+ 		xenbus_dev_error(blkif->be->dev, err, "block flush");
+ 		return;
+ 	}
+-	invalidate_inode_pages2(blkif->vbd.bdev->bd_inode->i_mapping);
++	invalidate_inode_pages2(blkif->bdev->bd_inode->i_mapping);
+ 
+ 	blkif->xenblkd = kthread_run(blkif_schedule, blkif, name);
+ 	if (IS_ERR(blkif->xenblkd)) {
+@@ -198,8 +197,35 @@
+ 	.attrs = vbdstat_attrs,
+ };
+ 
+-VBD_SHOW(physical_device, "%x:%x\n", be->major, be->minor);
+-VBD_SHOW(mode, "%s\n", be->mode);
++VBD_SHOW(mode, "%s\n",
++	 be->blkif->bdev
++	 ? (be->blkif->mode & FMODE_WRITE ? "rw" : "r")
++	 : "");
++
++static ssize_t show_physical_device(struct device *dev,
++				    struct device_attribute *attr,
++				    char *buf)
++{
++	struct backend_info *be = dev->driver_data;
++	blkif_t *blkif = be->blkif;
++	struct block_device *bdev;
++	dev_t rdev = 0;
++	int rv = 0;
++
++	/* NB. this should actually be a link to /sys/block. */
++
++	down(&blkback_dev_sem);
++	bdev = blkif->bdev;
++	if (bdev)
++		rdev = bdev->bd_inode->i_rdev;
++	up(&blkback_dev_sem);
++
++	if (rdev)
++		rv = sprintf(buf, "%x:%x\n", MAJOR(rdev), MINOR(rdev));
++
++	return rv;
++}
++static DEVICE_ATTR(physical_device, S_IRUGO, show_physical_device, NULL);
+ 
+ static int xenvbd_sysfs_addif(struct xenbus_device *dev)
+ {
+@@ -289,7 +315,7 @@
+ 
+ 	if (blkif) {
+ 		blkif_disconnect(blkif);
+-		vbd_free(&blkif->vbd);
++		blkif_bdev_close(blkif);
+ 		blkif_free(blkif);
+ 		be->blkif = NULL;
+ 	}
+@@ -344,7 +370,7 @@
+ 
+ 	down(&blkback_dev_sem);
+ 
+-	vbd_free(&blkif->vbd);
++	blkif_bdev_close(blkif);
+ 	blkif->be->major = 0;
+ 	blkif->be->minor = 0;
+ 	blkif->remove_requested = 0;
+@@ -434,7 +460,7 @@
+ 
+ 	down(&blkback_dev_sem);
+ 	if (be->dev) {
+-		if (blkif->vbd.bdev &&
++		if (blkif->bdev &&
+ 		    be->dev->state == XenbusStateConnected)
+ 			connect(be);
+ 
+@@ -561,25 +587,15 @@
+ 
+ static int blkback_open_bdev(struct backend_info *be)
+ {
+-	int err;
+-	char *p;
+-	long handle;
+-	int cdrom = 0;
+-	unsigned major;
+-	unsigned minor;
+-	char *device_type;
+ 	struct xenbus_device *dev = be->dev;
+-
+-	if (be->blkif->vbd.bdev) {
+-		xenbus_dev_fatal(dev, -EINVAL, "attempting invalid vbd open");
+-		return -EINVAL;
+-	}
++	int err, mode, cdrom = 0;
++	unsigned major, minor;
++	char *s;
+ 
+ 	err = xenbus_scanf(XBT_NIL, dev->nodename, "physical-device", "%x:%x",
+ 			   &major, &minor);
+ 	if (err != 2) {
+-		err = -EINVAL;
+-
++		err = err < 0 ? err : -EINVAL;
+ 		xenbus_dev_fatal(dev, err, "reading physical-device");
+ 		return err;
+ 	}
+@@ -594,35 +610,25 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	if (!be->mode) {
+-		be->mode = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
+-		if (IS_ERR(be->mode)) {
+-			err = PTR_ERR(be->mode);
+-			be->mode = NULL;
+-			xenbus_dev_fatal(dev, err, "reading mode");
+-			return err;
+-		}
++	s = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
++	if (IS_ERR(s)) {
++		err = PTR_ERR(s);
++		xenbus_dev_fatal(dev, err, "reading mode");
++		return err;
++	}
++	mode  = FMODE_READ;
++	mode |= strchr(s, 'w') ? FMODE_WRITE : 0;
++	kfree(s);
++
++	s = xenbus_read(XBT_NIL, dev->otherend, "device-type", NULL);
++	if (!IS_ERR(s)) {
++		cdrom = !strcmp(s, "cdrom");
++		kfree(s);
+ 	}
+ 
+-	device_type = xenbus_read(XBT_NIL, dev->otherend, "device-type", NULL);
+-	if (!IS_ERR(device_type)) {
+-		cdrom = strcmp(device_type, "cdrom") == 0;
+-		kfree(device_type);
+-	}
+-
+-	/* Front end dir is a number, which is used as the handle. */
+-	p = strrchr(dev->otherend, '/') + 1;
+-	handle = simple_strtoul(p, NULL, 0);
+-
+-	err = vbd_create(be->blkif, handle, major, minor,
+-			 (NULL == strchr(be->mode, 'w')), cdrom);
+-	if (err) {
+-		xenbus_dev_fatal(dev, err, "creating vbd structure");
+-		return err;
+-	}
+-
+-	be->major = major;
+-	be->minor = minor;
++	err = blkif_bdev_open(be->blkif, MKDEV(major, minor), mode, cdrom);
++	if (err)
++		xenbus_dev_fatal(dev, err, "opening device");
+ 
+ 	return 0;
+ }
+@@ -666,19 +672,6 @@
+ 		return;
+ 	}
+ 
+-	if (be->mode) {
+-		kfree(be->mode);
+-		be->mode = NULL;
+-	}
+-
+-	be->mode = xenbus_read(XBT_NIL, dev->nodename, "mode", NULL);
+-	if (IS_ERR(be->mode)) {
+-		err = PTR_ERR(be->mode);
+-		be->mode = NULL;
+-		xenbus_dev_fatal(dev, err, "reading mode");
+-		return;
+-	}
+-
+ 	if (be->major == 0 && be->minor == 0) {
+ 		err = blkback_open_bdev(be);
+ 		if (err)
+@@ -725,7 +718,7 @@
+ 			if (err)
+ 				break;
+ 
+-			if (!be->blkif->vbd.bdev) {
++			if (!be->blkif->bdev) {
+ 				err = blkback_open_bdev(be);
+ 				if (err)
+ 					break;
+@@ -790,7 +783,7 @@
+ 		goto abort;
+ 
+ 	err = xenbus_printf(xbt, dev->nodename, "sectors", "%llu",
+-			    vbd_size(&be->blkif->vbd));
++			    blkif_size(be->blkif));
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err, "writing %s/sectors",
+ 				 dev->nodename);
+@@ -799,14 +792,14 @@
+ 
+ 	/* FIXME: use a typename instead */
+ 	err = xenbus_printf(xbt, dev->nodename, "info", "%u",
+-			    vbd_info(&be->blkif->vbd));
++			    blkif_info(be->blkif));
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err, "writing %s/info",
+ 				 dev->nodename);
+ 		goto abort;
+ 	}
+-	err = xenbus_printf(xbt, dev->nodename, "sector-size", "%lu",
+-			    vbd_secsize(&be->blkif->vbd));
++	err = xenbus_printf(xbt, dev->nodename, "sector-size", "%d",
++			    blkif_sector_size(be->blkif));
+ 	if (err) {
+ 		xenbus_dev_fatal(dev, err, "writing %s/sector-size",
+ 				 dev->nodename);

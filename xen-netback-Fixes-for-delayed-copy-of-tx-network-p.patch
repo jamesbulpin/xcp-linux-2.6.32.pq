@@ -1,0 +1,75 @@
+From 691fadc06621334504b057ae2b397d6844150ba0 Mon Sep 17 00:00:00 2001
+From: Keir Fraser <keir.fraser@citrix.com>
+Date: Fri, 11 Jun 2010 11:48:30 +0100
+Subject: [PATCH] xen: netback: Fixes for delayed copy of tx network packets.
+
+ - Should call net_tx_action_dealloc() even when dealloc ring is
+   empty, as there may in any case be work to do on the
+   pending_inuse list.
+ - Should not exit directly from the middle of the tx_action tasklet,
+   as the tx_pending_timer should always be checked and updated at the
+   end of the tasklet.
+
+Signed-off-by: Keir Fraser <keir.fraser@citrix.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+[picked from linux-2.6.18-xen.hg 959:1a97bd686258, ported across a43e2175 "xen/netback: move code around"]
+---
+ drivers/xen/netback/netback.c |   25 ++++++++++++-------------
+ 1 files changed, 12 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
+index b23fab0..9e4793f 100644
+--- a/drivers/xen/netback/netback.c
++++ b/drivers/xen/netback/netback.c
+@@ -1384,16 +1384,6 @@ static void net_tx_submit(struct xen_netbk *netbk)
+ 		netif_rx_ni(skb);
+ 		netif->dev->last_rx = jiffies;
+ 	}
+-
+-	if (netbk_copy_skb_mode == NETBK_DELAYED_COPY_SKB &&
+-	    !list_empty(&netbk->pending_inuse_head)) {
+-		struct netbk_tx_pending_inuse *oldest;
+-
+-		oldest = list_entry(netbk->pending_inuse_head.next,
+-				    struct netbk_tx_pending_inuse, list);
+-		mod_timer(&netbk->netbk_tx_pending_timer,
+-				oldest->alloc_time + HZ);
+-	}
+ }
+ 
+ /* Called after netfront has transmitted */
+@@ -1403,19 +1393,28 @@ static void net_tx_action(unsigned long data)
+ 	unsigned nr_mops;
+ 	int ret;
+ 
+-	if (netbk->dealloc_cons != netbk->dealloc_prod)
+-		net_tx_action_dealloc(netbk);
++	net_tx_action_dealloc(netbk);
+ 
+ 	nr_mops = net_tx_build_mops(netbk);
+ 
+ 	if (nr_mops == 0)
+-		return;
++		goto out;
+ 
+ 	ret = HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref,
+ 					netbk->tx_map_ops, nr_mops);
+ 	BUG_ON(ret);
+ 
+ 	net_tx_submit(netbk);
++out:
++	if (netbk_copy_skb_mode == NETBK_DELAYED_COPY_SKB &&
++	    !list_empty(&netbk->pending_inuse_head)) {
++		struct netbk_tx_pending_inuse *oldest;
++
++		oldest = list_entry(netbk->pending_inuse_head.next,
++				    struct netbk_tx_pending_inuse, list);
++		mod_timer(&netbk->netbk_tx_pending_timer,
++				oldest->alloc_time + HZ);
++	}
+ }
+ 
+ static void netif_idx_release(struct xen_netbk *netbk, u16 pending_idx)
+-- 
+1.5.6.5
+

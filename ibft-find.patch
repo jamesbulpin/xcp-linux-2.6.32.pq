@@ -1,0 +1,210 @@
+Make the routine that searches for an iSCSI Boot Firmware Table work on Xen.
+
+Also, keep scanning for iBFT till one is found with correct checksum.
+If you bail out as soon as one is found with the correct signature only then
+there is a risk that an uninitalised iBFT will be found, and an initialised
+one at a higher address will be ignored.
+
+This may be the case if there are two NICs with gPXE in their option ROMs
+and one of these is used to boot from iSCSI.
+
+diff -r d5430521ed7c drivers/firmware/iscsi_ibft.c
+--- a/drivers/firmware/iscsi_ibft.c	Thu Mar 31 11:07:38 2011 +0100
++++ b/drivers/firmware/iscsi_ibft.c	Fri Apr 08 14:36:42 2011 +0100
+@@ -536,31 +536,6 @@
+ 
+ static struct kset *ibft_kset;
+ 
+-static int __init ibft_check_device(void)
+-{
+-	int len;
+-	u8 *pos;
+-	u8 csum = 0;
+-
+-	len = ibft_addr->length;
+-
+-	/* Sanity checking of iBFT. */
+-	if (ibft_addr->revision != 1) {
+-		printk(KERN_ERR "iBFT module supports only revision 1, " \
+-				"while this is %d.\n", ibft_addr->revision);
+-		return -ENOENT;
+-	}
+-	for (pos = (u8 *)ibft_addr; pos < (u8 *)ibft_addr + len; pos++)
+-		csum += *pos;
+-
+-	if (csum) {
+-		printk(KERN_ERR "iBFT has incorrect checksum (0x%x)!\n", csum);
+-		return -ENOENT;
+-	}
+-
+-	return 0;
+-}
+-
+ /*
+  * Helper function for ibft_register_kobjects.
+  */
+@@ -938,12 +913,7 @@
+ 		return -ENOMEM;
+ 
+ 	if (ibft_addr) {
+-		printk(KERN_INFO "iBFT detected at 0x%llx.\n",
+-		       (u64)isa_virt_to_bus(ibft_addr));
+-
+-		rc = ibft_check_device();
+-		if (rc)
+-			goto out_firmware_unregister;
++		printk(KERN_INFO "iBFT detected at 0x%lx.\n", ibft_addr_phys);
+ 
+ 		/* Scan the IBFT for data and register the kobjects. */
+ 		rc = ibft_register_kobjects(ibft_addr, &ibft_kobject_list);
+@@ -962,7 +932,6 @@
+ 
+ out_free:
+ 	ibft_unregister(&ibft_attr_list, &ibft_kobject_list);
+-out_firmware_unregister:
+ 	kset_unregister(ibft_kset);
+ 	return rc;
+ }
+diff -r d5430521ed7c drivers/firmware/iscsi_ibft_find.c
+--- a/drivers/firmware/iscsi_ibft_find.c	Thu Mar 31 11:07:38 2011 +0100
++++ b/drivers/firmware/iscsi_ibft_find.c	Fri Apr 08 14:36:42 2011 +0100
+@@ -31,8 +31,10 @@
+ #include <linux/stat.h>
+ #include <linux/string.h>
+ #include <linux/types.h>
++#include <linux/iscsi_ibft.h>
+ 
+ #include <asm/mmzone.h>
++#include <asm/xen/hypervisor.h>
+ 
+ /*
+  * Physical location of iSCSI Boot Format Table.
+@@ -40,6 +42,9 @@
+ struct ibft_table_header *ibft_addr;
+ EXPORT_SYMBOL_GPL(ibft_addr);
+ 
++unsigned long ibft_addr_phys = 0;
++EXPORT_SYMBOL_GPL(ibft_addr_phys);
++
+ #define IBFT_SIGN "iBFT"
+ #define IBFT_SIGN_LEN 4
+ #define IBFT_START 0x80000 /* 512kB */
+@@ -47,6 +52,36 @@
+ #define VGA_MEM 0xA0000 /* VGA buffer */
+ #define VGA_SIZE 0x20000 /* 128kB */
+ 
++/* 
++ * ibft_check_device() - determine if iBFT checksum is valid
++ */
++static int __init ibft_check_device(void)
++{
++	int len;
++	u8 *pos;
++	u8 csum = 0;
++
++	len = ibft_addr->length;
++
++	/* Sanity checking of iBFT. */
++	if (ibft_addr->revision != 1) {
++		early_printk("iBFT module supports only revision 1, " \
++				"while table at 0x%lx is revision %d.\n", 
++			   ibft_addr_phys, ibft_addr->revision);
++		return -ENOENT;
++	}
++	for (pos = (u8 *)ibft_addr; pos < (u8 *)ibft_addr + len; pos++)
++		csum += *pos;
++
++	if (csum) {
++		early_printk("iBFT at 0x%lx has incorrect checksum (0x%x)!\n", 
++			   ibft_addr_phys, 
++			   csum);
++		return -ENOENT;
++	}
++
++	return 0;
++}
+ 
+ /*
+  * Routine used to find the iSCSI Boot Format Table. The logical
+@@ -56,10 +91,57 @@
+ {
+ 	unsigned long pos;
+ 	unsigned int len = 0;
+-	void *virt;
++	void *virt, *vbase;
++
++	/* Give up search if we find more than this many invalid iBFTs.
++	 * This ensures we don't waste too much time.
++	 */
++	int remaining_attempts = 10; 
+ 
+ 	ibft_addr = NULL;
+ 
++#ifdef CONFIG_XEN
++	/* Don't try to find iBFT on guest domains as the machine frames in 
++	 * which the iBFT may reside are only accessible to domain 0.
++	 */
++	if (!is_initial_xendomain())
++		return;
++
++	/* Map the entire region we shall be scanning */
++	vbase = ioremap(IBFT_START, IBFT_END - IBFT_START);
++
++	for (pos = IBFT_START; pos < IBFT_END; pos += 16) {
++		/* The table can't be inside the VGA BIOS reserved space,
++		 * so skip that area */
++		if (pos == VGA_MEM)
++			pos += VGA_SIZE;
++		virt = vbase + (pos - IBFT_START);
++		if (memcmp(virt, IBFT_SIGN, IBFT_SIGN_LEN) == 0) {
++			unsigned long *addr =
++			    (unsigned long *)(virt + 4);
++			len = *addr;
++			/* if the length of the table extends past 1M,
++			 * the table cannot be valid. */
++			if (pos + len <= (IBFT_END-1)) {
++				ibft_addr = (struct ibft_table_header *)ioremap(pos, len);
++				ibft_addr_phys = pos;
++				if (ibft_check_device() == 0)
++					break; 
++				/* checksum invalid */
++				iounmap(ibft_addr);
++				ibft_addr = NULL;
++				if (--remaining_attempts == 0)
++					break;
++				/* continue search for valid iBFT */
++			}
++		}
++	}
++
++	/* Unmap the region we just scanned */
++	iounmap(vbase);
++#else
++
++
+ 	for (pos = IBFT_START; pos < IBFT_END; pos += 16) {
+ 		/* The table can't be inside the VGA BIOS reserved space,
+ 		 * so skip that area */
+@@ -78,8 +160,8 @@
+ 			}
+ 		}
+ 	}
+-#ifndef CONFIG_XEN
+-	if (ibft_addr)
+-		reserve_bootmem(pos, PAGE_ALIGN(len), BOOTMEM_DEFAULT);
++
++ 	if (ibft_addr)
++ 		reserve_bootmem(pos, PAGE_ALIGN(len), BOOTMEM_DEFAULT);
+ #endif
+ }
+diff -r d5430521ed7c include/linux/iscsi_ibft.h
+--- a/include/linux/iscsi_ibft.h	Thu Mar 31 11:07:38 2011 +0100
++++ b/include/linux/iscsi_ibft.h	Fri Apr 08 14:36:42 2011 +0100
+@@ -36,6 +36,7 @@
+  * If the value is NULL there is no iBFT on the machine.
+  */
+ extern struct ibft_table_header *ibft_addr;
++extern unsigned long ibft_addr_phys;
+ 
+ /*
+  * Routine used to find and reserve the iSCSI Boot Format Table. The

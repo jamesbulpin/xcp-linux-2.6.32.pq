@@ -1,0 +1,21 @@
+--- a/drivers/xen/blkback/blkback.c	2009-06-17 09:56:54.000000000 +0100
++++ b/drivers/xen/blkback/blkback.c	2009-06-16 17:05:06.000000000 +0100
+@@ -149,7 +149,7 @@
+ 		return;
+ 	if (blkif->plug->unplug_fn)
+ 		blkif->plug->unplug_fn(blkif->plug);
+-	kobject_put(&blkif->plug->kobj);
++	blk_put_queue(blkif->plug);
+ 	blkif->plug = NULL;
+ }
+ 
+@@ -160,8 +160,7 @@
+ 	if (q == blkif->plug)
+ 		return;
+ 	unplug_queue(blkif);
+-	WARN_ON(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags));
+-	kobject_get(&q->kobj);
++	blk_get_queue(q);
+ 	blkif->plug = q;
+ }
+ 

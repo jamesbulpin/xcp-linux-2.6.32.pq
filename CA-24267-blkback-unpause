@@ -1,0 +1,34 @@
+diff -r 49be25fa8c01 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Fri Oct 31 12:56:15 2008 -0700
++++ b/drivers/xen/blkback/xenbus.c	Fri Oct 31 13:27:59 2008 -0700
+@@ -346,14 +346,16 @@ void blkback_close(blkif_t *blkif)
+ void blkback_close(blkif_t *blkif)
+ {
+ 	blkif_disconnect(blkif);
++
++	down(&blkback_dev_sem);
++
+ 	vbd_free(&blkif->vbd);
+ 	blkif->be->major = 0;
+ 	blkif->be->minor = 0;
+ 	blkif->remove_requested = 0;
+-
+-	down(&blkback_dev_sem);
+ 	if (blkif->be->dev)
+ 		xenvbd_sysfs_delif(blkif->be->dev);
++
+ 	up(&blkback_dev_sem);
+ 
+ 	backend_release(blkif->be);
+@@ -439,7 +441,10 @@ void blkback_signal_resumed(blkif_t *blk
+ 
+ 	down(&blkback_dev_sem);
+ 	if (be->dev) {
+-		connect(be);
++		if (blkif->vbd.bdev &&
++		    be->dev->state == XenbusStateConnected)
++			connect(be);
++
+ 		err = xenbus_rm(XBT_NIL, be->dev->nodename, "pause-done");
+ 		if (err)
+ 			xenbus_dev_error(be->dev, err, "removing pause-done");

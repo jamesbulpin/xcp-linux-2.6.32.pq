@@ -1,0 +1,186 @@
+diff -r c43cfa738199 include/linux/skbuff.h
+--- a/include/linux/skbuff.h	Thu Feb 17 13:02:48 2011 +0000
++++ b/include/linux/skbuff.h	Thu Feb 17 13:12:41 2011 +0000
+@@ -2127,5 +2127,8 @@
+ static inline int skb_checksum_setup(struct sk_buff *skb) { return 0; }
+ #endif
+ 
++extern void skb_dump_info(const struct sk_buff *skb);
++extern int  skb_mapping_valid(const struct sk_buff *);
++
+ #endif	/* __KERNEL__ */
+ #endif	/* _LINUX_SKBUFF_H */
+diff -r c43cfa738199 net/core/skbuff.c
+--- a/net/core/skbuff.c	Thu Feb 17 13:02:48 2011 +0000
++++ b/net/core/skbuff.c	Thu Feb 17 13:12:41 2011 +0000
+@@ -67,11 +67,112 @@
+ #include <asm/uaccess.h>
+ #include <asm/system.h>
+ #include <trace/events/skb.h>
++#include <asm/io.h>
+ 
+ #include "kmap_skb.h"
+ 
+ static struct kmem_cache *skbuff_head_cache __read_mostly;
+ static struct kmem_cache *skbuff_fclone_cache __read_mostly;
++
++void skb_dump_info(const struct sk_buff *skb)
++{
++#ifdef CONFIG_XEN
++	int i, nr = skb_shinfo(skb)->nr_frags;
++#endif
++	struct ethhdr *ethh = eth_hdr(skb);
++	struct iphdr *iph = NULL;
++	struct tcphdr *tcph = NULL;
++
++	printk(KERN_ERR "skb: skb at %p with %d users\n", skb, atomic_read(&skb->users));
++	printk(KERN_ERR "skb: prev %p next %p prev->next %p next->prev %p\n",
++	       skb->prev, skb->next,
++	       skb->prev ? skb->prev->next : NULL,
++	       skb->next ? skb->next->prev : NULL);
++	printk(KERN_ERR "skb: len is %#x (data:%#x mac:%#x) truesize %#x\n",
++	       skb->len, skb->data_len, skb->mac_len, skb->truesize);
++
++	printk(KERN_ERR "skb: linear:%s\n", skb_is_nonlinear(skb) ? "No" : "Yes");
++	printk(KERN_ERR "skb: data %p head %p tail %p end %p\n",
++	       skb->data, skb->head, skb->tail, skb->end);
++	printk(KERN_ERR "skb: flags are local_df:%d cloned:%d ip_summed:%d nohdr:%d\n",
++	       skb->local_df, skb->cloned, skb->ip_summed, skb->nohdr);
++	printk(KERN_ERR "skb:	        nfctinfo:%d pkt_type:%d fclone:%d ipvs_property:%d\n",
++	       skb->nfctinfo, skb->pkt_type, skb->nohdr, skb->ipvs_property);
++	printk(KERN_ERR "skb: shared info %p ref %#x\n", skb_shinfo(skb), atomic_read(&skb_shinfo(skb)->dataref));
++	printk(KERN_ERR "skb: frag_list %p\n", skb_shinfo(skb)->frag_list);
++
++	if (ethh) {
++		printk(KERN_ERR "skb: eth: (%p) src:%02x:%02x:%02x:%02x:%02x:%02x dest:%02x:%02x:%02x:%02x:%02x:%02x proto %u\n",
++		       ethh,
++		       ethh->h_source[0], ethh->h_source[1], ethh->h_source[2], ethh->h_source[3], ethh->h_source[4], ethh->h_source[5],
++		       ethh->h_dest[0], ethh->h_dest[1], ethh->h_dest[2], ethh->h_dest[3], ethh->h_dest[4], ethh->h_dest[5],
++		       ntohs(ethh->h_proto));
++		if (ethh->h_proto == __constant_htons(ETH_P_IP))
++			iph = ip_hdr(skb);
++	} else
++		printk(KERN_ERR "skb: eth: header not present\n");
++
++	if (iph) {
++		printk(KERN_ERR "skb: ip: (%p) saddr "NIPQUAD_FMT" daddr "NIPQUAD_FMT" protocol %d frag_off %d\n",
++		       iph, NIPQUAD(iph->saddr), NIPQUAD(iph->daddr), iph->protocol, iph->frag_off);
++
++		if (iph->protocol == IPPROTO_TCP)
++			tcph = tcp_hdr(skb);
++	} else
++		printk(KERN_ERR "skb: ip: header not present\n");
++
++	if (tcph) {
++		printk(KERN_ERR "skb: tcp: (%p) source %d dest %d seq %u ack %u\n",
++		       tcph, ntohs(tcph->source), ntohs(tcph->dest), ntohl(tcph->seq), ntohl(tcph->ack_seq));
++	} else
++		printk(KERN_ERR "skb: tcp: header not present\n");
++
++#ifdef CONFIG_XEN
++	for(i=0; i<nr; i++) {
++		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
++		unsigned long pfn = page_to_pfn(frag->page);
++		unsigned long mfn = pfn_to_mfn(pfn);
++		printk(KERN_ERR "skb: %d/%d page:%p count:%d offset:%#x size:%#x virt:%p pfn:%#lx mfn:%#lx%s flags:%lx%s%s)\n",
++		       i + 1, nr, frag->page,
++		       atomic_read(&frag->page->_count),
++		       frag->page_offset, frag->size,
++		       phys_to_virt(page_to_pseudophys(frag->page)), pfn, mfn,
++		       phys_to_machine_mapping_valid(pfn) ? "" : "(BAD)",
++		       frag->page->flags,
++		       PageForeign(frag->page) ? " FOREIGN" : "",
++		       PageBlkback(frag->page) ? " BLKBACK" : "");
++	}
++#endif
++}
++EXPORT_SYMBOL(skb_dump_info);
++
++#ifdef CONFIG_XEN
++int skb_mapping_valid(const struct sk_buff *skb)
++{
++	int i, nr;
++
++	if (skb == NULL)
++		return 1;
++
++	if (skb_shinfo(skb) == NULL || skb_shinfo(skb) == (void*)0xffffffff)
++		return 1;
++
++	nr = skb_shinfo(skb)->nr_frags;
++
++	for (i = 0; i < nr; i++) {
++		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
++		unsigned long pfn = page_to_pfn(frag->page);
++		if (pfn > max_mapnr)
++			return 0;
++		if(!phys_to_machine_mapping_valid(page_to_pfn(frag->page)))
++			return 0;
++	}
++	return 1;
++}
++#else
++int skb_mapping_valid(const struct sk_buff *skb) { return 1; }
++#endif
++EXPORT_SYMBOL(skb_mapping_valid);
+ 
+ static void sock_pipe_buf_release(struct pipe_inode_info *pipe,
+ 				  struct pipe_buffer *buf)
+@@ -1384,6 +1485,11 @@
+ 	if (offset > (int)skb->len - len)
+ 		goto fault;
+ 
++	if (!skb_mapping_valid(skb)) {
++		skb_dump_info(skb);
++		BUG();
++	}
++
+ 	/* Copy header. */
+ 	if ((copy = start - offset) > 0) {
+ 		if (copy > len)
+@@ -1832,13 +1938,25 @@
+ 	int i, copy = start - offset;
+ 	struct sk_buff *frag_iter;
+ 	int pos = 0;
++	int src_err = 0;
++
++	if (!skb_mapping_valid(skb)) {
++		skb_dump_info(skb);
++		BUG();
++	}
+ 
+ 	/* Copy header. */
+ 	if (copy > 0) {
+ 		if (copy > len)
+ 			copy = len;
+-		csum = csum_partial_copy_nocheck(skb->data + offset, to,
+-						 copy, csum);
++		csum = csum_partial_copy_generic(skb->data + offset, to,
++						 copy, csum, &src_err, NULL);
++		if (src_err) {
++			skb_dump_info(skb);
++			printk(KERN_CRIT "checksum: CA-41788 bad skb in head, error %d\n", src_err);
++			BUG();
++		}
++
+ 		if ((len -= copy) == 0)
+ 			return csum;
+ 		offset += copy;
+@@ -1860,10 +1978,15 @@
+ 			if (copy > len)
+ 				copy = len;
+ 			vaddr = kmap_skb_frag(frag);
+-			csum2 = csum_partial_copy_nocheck(vaddr +
++			csum2 = csum_partial_copy_generic(vaddr +
+ 							  frag->page_offset +
+ 							  offset - start, to,
+-							  copy, 0);
++							  copy, 0, &src_err, NULL);
++			if (src_err) {
++				skb_dump_info(skb);
++				printk(KERN_CRIT "checksum: CA-41788 bad skb in frag %d, error %d\n", i, src_err);
++				BUG();
++			}
+ 			kunmap_skb_frag(vaddr);
+ 			csum = csum_block_add(csum, csum2, pos);
+ 			if (!(len -= copy))

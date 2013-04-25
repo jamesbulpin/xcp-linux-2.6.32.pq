@@ -1,0 +1,64 @@
+From d5aa407f59f5b83d2c50ec88f5bf56d40f1f8978 Mon Sep 17 00:00:00 2001
+From: Alexey Dobriyan <adobriyan@gmail.com>
+Date: Tue, 16 Feb 2010 09:05:04 +0000
+Subject: tunnels: fix netns vs proto registration ordering
+
+From: Alexey Dobriyan <adobriyan@gmail.com>
+
+commit d5aa407f59f5b83d2c50ec88f5bf56d40f1f8978 upstream.
+
+Same stuff as in ip_gre patch: receive hook can be called before netns
+setup is done, oopsing in net_generic().
+
+Signed-off-by: Alexey Dobriyan <adobriyan@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ net/ipv4/ipip.c         |   13 ++++++-------
+ net/ipv6/ip6_tunnel.c   |   28 +++++++++++++++-------------
+ net/ipv6/sit.c          |   13 ++++++-------
+ net/ipv6/xfrm6_tunnel.c |   22 +++++++++++-----------
+ 4 files changed, 38 insertions(+), 38 deletions(-)
+
+
+--- a/net/ipv6/xfrm6_tunnel.c
++++ b/net/ipv6/xfrm6_tunnel.c
+@@ -346,26 +346,26 @@ static int __init xfrm6_tunnel_init(void
+ {
+ 	int rv;
+ 
+-	rv = xfrm_register_type(&xfrm6_tunnel_type, AF_INET6);
++	rv = xfrm6_tunnel_spi_init();
+ 	if (rv < 0)
+ 		goto err;
++	rv = xfrm_register_type(&xfrm6_tunnel_type, AF_INET6);
++	if (rv < 0)
++		goto out_type;
+ 	rv = xfrm6_tunnel_register(&xfrm6_tunnel_handler, AF_INET6);
+ 	if (rv < 0)
+-		goto unreg;
++		goto out_xfrm6;
+ 	rv = xfrm6_tunnel_register(&xfrm46_tunnel_handler, AF_INET);
+ 	if (rv < 0)
+-		goto dereg6;
+-	rv = xfrm6_tunnel_spi_init();
+-	if (rv < 0)
+-		goto dereg46;
++		goto out_xfrm46;
+ 	return 0;
+ 
+-dereg46:
+-	xfrm6_tunnel_deregister(&xfrm46_tunnel_handler, AF_INET);
+-dereg6:
++out_xfrm46:
+ 	xfrm6_tunnel_deregister(&xfrm6_tunnel_handler, AF_INET6);
+-unreg:
++out_xfrm6:
+ 	xfrm_unregister_type(&xfrm6_tunnel_type, AF_INET6);
++out_type:
++	xfrm6_tunnel_spi_fini();
+ err:
+ 	return rv;
+ }
+

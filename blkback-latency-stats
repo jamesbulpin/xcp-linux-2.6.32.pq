@@ -1,0 +1,154 @@
+diff -r 21a7f933b3c7 drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Wed Jul 15 16:15:19 2009 -0700
++++ b/drivers/xen/blkback/blkback.c	Wed Jul 15 17:17:46 2009 -0700
+@@ -77,6 +77,7 @@
+ 	atomic_t       pendcnt;
+ 	unsigned short operation;
+ 	int            status;
++	struct timeval time;
+ 	struct list_head free_list;
+ } pending_req_t;
+ 
+@@ -185,6 +186,44 @@
+ 	BUG_ON(ret);
+ }
+ 
++static inline s64 timeval_to_us(struct timeval *tv)
++{
++	return ((s64)tv->tv_sec * USEC_PER_SEC) + tv->tv_usec;
++}
++
++static inline void collect_statistics(pending_req_t *req)
++{
++	blkif_t *blkif;
++	struct timeval now;
++	s64 interval, *max, *sum, *cnt;
++
++	blkif = req->blkif;
++	do_gettimeofday(&now);
++	interval = timeval_to_us(&now) - timeval_to_us(&req->time);
++
++	switch (req->operation) {
++	case BLKIF_OP_READ:
++		cnt = &blkif->st_rd_cnt;
++		sum = &blkif->st_rd_sum_usecs;
++		max = &blkif->st_rd_max_usecs;
++		break;
++	case BLKIF_OP_WRITE:
++	case BLKIF_OP_WRITE_BARRIER:
++		cnt = &blkif->st_wr_cnt;
++		sum = &blkif->st_wr_sum_usecs;
++		max = &blkif->st_wr_max_usecs;
++		break;
++	default:
++		return;
++	}
++
++	if (interval > *max)
++		*max = interval;
++
++	*sum += interval;
++	*cnt += 1;
++}
++
+ /******************************************************************
+  * QUEUE MANAGEMENT FUNCTIONS
+  */
+@@ -324,6 +363,7 @@
+ 		blkif_t *blkif = pending_req->blkif;
+ 
+ 		fast_flush_area(pending_req);
++		collect_statistics(pending_req);
+ 		make_response(pending_req->blkif, pending_req->id,
+ 			      pending_req->operation, pending_req->status);
+ 		blkif_put(pending_req->blkif);
+@@ -489,6 +529,7 @@
+ 	pending_req->operation = req->operation;
+ 	pending_req->status    = BLKIF_RSP_OKAY;
+ 	pending_req->nr_pages  = nseg;
++	do_gettimeofday(&pending_req->time);
+ 
+ 	for (i = 0; i < nseg; i++) {
+ 		uint32_t flags;
+diff -r 21a7f933b3c7 drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Wed Jul 15 16:15:19 2009 -0700
++++ b/drivers/xen/blkback/common.h	Wed Jul 15 17:17:46 2009 -0700
+@@ -104,6 +104,12 @@
+ 	int                 st_br_req;
+ 	int                 st_rd_sect;
+ 	int                 st_wr_sect;
++	s64                 st_rd_cnt;
++	s64                 st_rd_sum_usecs;
++	s64                 st_rd_max_usecs;
++	s64                 st_wr_cnt;
++	s64                 st_wr_sum_usecs;
++	s64                 st_wr_max_usecs;
+ 
+ 	wait_queue_head_t waiting_to_free;
+ 
+diff -r 21a7f933b3c7 drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Wed Jul 15 16:15:19 2009 -0700
++++ b/drivers/xen/blkback/xenbus.c	Wed Jul 15 17:17:46 2009 -0700
+@@ -124,19 +124,50 @@
+ 				   struct device_attribute *attr,	\
+ 				   char *buf)				\
+ 	{								\
+-		struct xenbus_device *dev = to_xenbus_device(_dev);	\
+-		struct backend_info *be = dev->dev.driver_data;		\
+-									\
++		struct backend_info *be = _dev->driver_data;		\
+ 		return sprintf(buf, format, ##args);			\
+ 	}								\
+ 	static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
+ 
++#define VBD_SHOW_AVG(name, _cnt, _sum, _max)				\
++	static ssize_t show_##name(struct device *_dev,			\
++				   struct device_attribute *attr,	\
++				   char *buf)				\
++	{								\
++		int ret = -ENODEV;					\
++		s64 cnt, sum, max;					\
++		struct backend_info *be = _dev->driver_data;		\
++									\
++		cnt = _cnt;						\
++		sum = _sum;						\
++		max = _max;						\
++									\
++		if (cnt)						\
++			do_div(sum, cnt);				\
++		ret = sprintf(buf, "requests: %lld, "			\
++			      "avg usecs: %llu, "			\
++			      "max usecs: %llu\n",			\
++			      cnt, sum, max);				\
++									\
++		(_sum) = 0;						\
++		(_cnt) = 0;						\
++		(_max) = 0;						\
++									\
++		return ret;						\
++	}								\
++	static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
++
++
+ VBD_SHOW(oo_req,  "%d\n", be->blkif->st_oo_req);
+ VBD_SHOW(rd_req,  "%d\n", be->blkif->st_rd_req);
+ VBD_SHOW(wr_req,  "%d\n", be->blkif->st_wr_req);
+ VBD_SHOW(br_req,  "%d\n", be->blkif->st_br_req);
+ VBD_SHOW(rd_sect, "%d\n", be->blkif->st_rd_sect);
+ VBD_SHOW(wr_sect, "%d\n", be->blkif->st_wr_sect);
++VBD_SHOW_AVG(rd_usecs, be->blkif->st_rd_cnt,
++	     be->blkif->st_rd_sum_usecs, be->blkif->st_rd_max_usecs);
++VBD_SHOW_AVG(wr_usecs, be->blkif->st_wr_cnt,
++	     be->blkif->st_wr_sum_usecs, be->blkif->st_wr_max_usecs);
+ 
+ static struct attribute *vbdstat_attrs[] = {
+ 	&dev_attr_oo_req.attr,
+@@ -145,6 +176,8 @@
+ 	&dev_attr_br_req.attr,
+ 	&dev_attr_rd_sect.attr,
+ 	&dev_attr_wr_sect.attr,
++	&dev_attr_rd_usecs.attr,
++	&dev_attr_wr_usecs.attr,
+ 	NULL
+ };
+ 

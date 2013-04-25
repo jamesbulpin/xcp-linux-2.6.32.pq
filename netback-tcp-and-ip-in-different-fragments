@@ -1,0 +1,36 @@
+CA-5369: It turns out that Windows occasionally generates packets in which the
+IP and TCP headers are in different fragments.  Make sure that the
+backends can handle this.
+
+--- 
+netback-increase-pullup causes netback to always include 72 bytes in
+the linear area which should be sufficient to stop TCP and IP headers
+ending up in different fragments which is all that is required
+here. The Linux network stack assumes that the headers are all in the
+linear section which makes it netback's responsibility to ensure this
+so fixing in netback is the correct solution in any case.
+
+Will leave the feature flag itself in place for now until removal can
+be coordinated with windows drivers via CA-37521.
+
+diff -r 8d781ed89645 drivers/xen/netback/xenbus.c
+--- a/drivers/xen/netback/xenbus.c	Tue Jan 05 11:40:42 2010 +0000
++++ b/drivers/xen/netback/xenbus.c	Thu Jan 07 11:35:45 2010 +0000
+@@ -101,6 +101,17 @@
+ 				    "feature-rx-copy", "%d", 1);
+ 		if (err) {
+ 			message = "writing feature-rx-copy";
++			goto abort_transaction;
++		}
++
++		/* We can cope with transmit checksum offload packets
++		   in which the TCP and IP headers are in separate
++		   fragments. */
++		/* CA-37521: Retain for compatibility with Windows drivers. */
++		err = xenbus_printf(xbt, dev->nodename,
++				    "feature-tx-csum-split-header", "%d", 1);
++		if (err) {
++			message = "writing feature-tx-csum-split-header";
+ 			goto abort_transaction;
+ 		}
+ 

@@ -1,0 +1,90 @@
+blkback: Spinlock the xenblkd pointer.
+
+Needed since kthread_pid and xenblkd went private, respectively. Also
+needed because we decide whether to blkif_disconnect only after
+leaving the queue loop.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 7bb97387771e drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Tue Jun 29 01:56:47 2010 -0700
++++ b/drivers/xen/blkback/blkback.c	Tue Jun 29 02:00:05 2010 -0700
+@@ -470,8 +470,12 @@
+ 	if (debug_lvl)
+ 		printk(KERN_DEBUG "%s: exiting\n", current->comm);
+ 
++	spin_lock_irq(&blkif->xenblkd_lock);
++	blkif->xenblkd = NULL;
++	spin_unlock_irq(&blkif->xenblkd_lock);
++
+ 	blkif->remove_requested = 0;
+-	blkif->xenblkd = NULL;
++
+ 	blkback_close(blkif->be);
+ 
+ 	return 0;
+@@ -505,12 +509,16 @@
+ {
+ 	int err = 0;
+ 
++	spin_lock_irq(&blkif->xenblkd_lock);
++
+ 	if (blkif->xenblkd) {
+ 		blkif->remove_requested = 1;
+ 		wake_up_process(blkif->xenblkd);
+ 		err = -EBUSY;
+ 	}
+ 
++	spin_unlock_irq(&blkif->xenblkd_lock);
++
+ 	return err;
+ }
+ 
+@@ -561,13 +569,24 @@
+ void blkif_notify_work(blkif_t *blkif)
+ {
+ 	blkif->waiting_reqs = 1;
++
++	spin_lock_irq(&blkif->xenblkd_lock);
++
+ 	if (blkif->xenblkd)
+ 		wake_up_process(blkif->xenblkd);
++
++	spin_unlock_irq(&blkif->xenblkd_lock);
+ }
+ 
+ irqreturn_t blkif_be_int(int irq, void *dev_id)
+ {
+-	blkif_notify_work(dev_id);
++	blkif_t *blkif = dev_id;
++
++	blkif->waiting_reqs = 1;
++
++	if (blkif->xenblkd)
++		wake_up_process(blkif->xenblkd);
++
+ 	return IRQ_HANDLED;
+ }
+ 
+diff -r 7bb97387771e drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Tue Jun 29 01:56:47 2010 -0700
++++ b/drivers/xen/blkback/common.h	Tue Jun 29 02:00:05 2010 -0700
+@@ -88,6 +88,7 @@
+ 	int remove_requested;
+ 	spinlock_t       blk_ring_lock;
+ 
++	spinlock_t           xenblkd_lock;
+ 	struct task_struct  *xenblkd;
+ 	unsigned int        waiting_reqs;
+ 	struct request_queue *plug;
+diff -r 7bb97387771e drivers/xen/blkback/interface.c
+--- a/drivers/xen/blkback/interface.c	Tue Jun 29 01:56:47 2010 -0700
++++ b/drivers/xen/blkback/interface.c	Tue Jun 29 02:00:05 2010 -0700
+@@ -48,6 +48,7 @@
+ 	blkif->queue_state = QUEUE_RUNNING;
+ 	mutex_init(&blkif->queue_mutex);
+ 	atomic_set(&blkif->requests_pending, 0);
++	spin_lock_init(&blkif->xenblkd_lock);
+ 
+ 	return blkif;
+ }

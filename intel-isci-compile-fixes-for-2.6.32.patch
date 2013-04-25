@@ -1,0 +1,135 @@
+# HG changeset patch
+# Parent bd69ecf2cc283f8d2a5c81bd140de3a02b1afa8e
+Complile fixes for the backported intel-isci driver to build on 2.6.32.
+
+These include
+Commenting out libsas GPIO code which isn't supported in 2.6.32
+Commenting out PHY control code which isn't supported in 2.6.32
+Bringing sata_to_ata_dev inline function from upsteam to the one file it's used in isci driver.
+
+diff -r bd69ecf2cc28 drivers/scsi/isci/host.c
+--- a/drivers/scsi/isci/host.c
++++ b/drivers/scsi/isci/host.c
+@@ -2974,17 +2974,17 @@ enum sci_task_status sci_controller_star
+ 	return status;
+ }
+ 
+-static int sci_write_gpio_tx_gp(struct isci_host *ihost, u8 reg_index, u8 reg_count, u8 *write_data)
++/*static int sci_write_gpio_tx_gp(struct isci_host *ihost, u8 reg_index, u8 reg_count, u8 *write_data)
+ {
+ 	int d;
+ 
+-	/* no support for TX_GP_CFG */
+-	if (reg_index == 0)
++*/	/* no support for TX_GP_CFG */
++/*	if (reg_index == 0)
+ 		return -EINVAL;
+ 
+ 	for (d = 0; d < isci_gpio_count(ihost); d++) {
+-		u32 val = 0x444; /* all ODx.n clear */
+-		int i;
++		u32 val = 0x444; *//* all ODx.n clear */
++/*		int i;
+ 
+ 		for (i = 0; i < 3; i++) {
+ 			int bit = (i << 2) + 2;
+@@ -2995,8 +2995,8 @@ static int sci_write_gpio_tx_gp(struct i
+ 			if (bit < 0)
+ 				break;
+ 
+-			/* if od is set, clear the 'invert' bit */
+-			val &= ~(bit << ((i << 2) + 2));
++*/			/* if od is set, clear the 'invert' bit */
++/*			val &= ~(bit << ((i << 2) + 2));
+ 		}
+ 
+ 		if (i < 3)
+@@ -3004,10 +3004,10 @@ static int sci_write_gpio_tx_gp(struct i
+ 		writel(val, &ihost->scu_registers->peg0.sgpio.output_data_select[d]);
+ 	}
+ 
+-	/* unless reg_index is > 1, we should always be able to write at
++*/	/* unless reg_index is > 1, we should always be able to write at
+ 	 * least one register
+ 	 */
+-	return d > 0;
++/*	return d > 0;
+ }
+ 
+ int isci_gpio_write(struct sas_ha_struct *sas_ha, u8 reg_type, u8 reg_index,
+@@ -3025,4 +3025,4 @@ int isci_gpio_write(struct sas_ha_struct
+ 	}
+ 
+ 	return written;
+-}
++}*/
+diff -r bd69ecf2cc28 drivers/scsi/isci/init.c
+--- a/drivers/scsi/isci/init.c
++++ b/drivers/scsi/isci/init.c
+@@ -202,7 +202,7 @@ static struct sas_domain_function_templa
+ 	.lldd_control_phy	= isci_phy_control,
+ 
+ 	/* GPIO support */
+-	.lldd_write_gpio	= isci_gpio_write,
++	/*.lldd_write_gpio	= isci_gpio_write, */
+ };
+ 
+ 
+diff -r bd69ecf2cc28 drivers/scsi/isci/isci.h
+--- a/drivers/scsi/isci/isci.h
++++ b/drivers/scsi/isci/isci.h
+@@ -105,13 +105,13 @@
+ 
+ static inline void check_sizes(void)
+ {
+-	BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_EVENTS);
++	/*BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_EVENTS); */
+ 	BUILD_BUG_ON(SCU_MAX_UNSOLICITED_FRAMES <= 8);
+-	BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_UNSOLICITED_FRAMES);
+-	BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_COMPLETION_QUEUE_ENTRIES);
++	/* BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_UNSOLICITED_FRAMES);
++	BUILD_BUG_ON_NOT_POWER_OF_2(SCU_MAX_COMPLETION_QUEUE_ENTRIES); */
+ 	BUILD_BUG_ON(SCU_MAX_UNSOLICITED_FRAMES > SCU_ABSOLUTE_MAX_UNSOLICITED_FRAMES);
+-	BUILD_BUG_ON_NOT_POWER_OF_2(SCI_MAX_IO_REQUESTS);
+-	BUILD_BUG_ON_NOT_POWER_OF_2(SCI_MAX_SEQ);
++	/*BUILD_BUG_ON_NOT_POWER_OF_2(SCI_MAX_IO_REQUESTS);
++	BUILD_BUG_ON_NOT_POWER_OF_2(SCI_MAX_SEQ);*/
+ }
+ 
+ /**
+diff -r bd69ecf2cc28 drivers/scsi/isci/phy.c
+--- a/drivers/scsi/isci/phy.c
++++ b/drivers/scsi/isci/phy.c
+@@ -1363,7 +1363,7 @@ int isci_phy_control(struct asd_sas_phy 
+ 		ret = isci_port_perform_hard_reset(ihost, iport, iphy);
+ 
+ 		break;
+-	case PHY_FUNC_GET_EVENTS: {
++	/*case PHY_FUNC_GET_EVENTS: {
+ 		struct scu_link_layer_registers __iomem *r;
+ 		struct sas_phy *phy = sas_phy->phy;
+ 
+@@ -1373,7 +1373,7 @@ int isci_phy_control(struct asd_sas_phy 
+ 		phy->phy_reset_problem_count = readl(&r->phy_reset_problem_count);
+ 		phy->invalid_dword_count = readl(&r->invalid_dword_counter);
+ 		break;
+-	}
++	}*/
+ 
+ 	default:
+ 		dev_dbg(&ihost->pdev->dev,
+diff -r bd69ecf2cc28 drivers/scsi/isci/request.c
+--- a/drivers/scsi/isci/request.c
++++ b/drivers/scsi/isci/request.c
+@@ -60,6 +60,11 @@
+ #include "scu_event_codes.h"
+ #include "sas.h"
+ 
++static inline struct ata_device *sas_to_ata_dev(struct domain_device *dev)
++{
++	return &dev->sata_dev.ap->link.device[0];
++}
++
+ static struct scu_sgl_element_pair *to_sgl_element_pair(struct isci_request *ireq,
+ 							int idx)
+ {

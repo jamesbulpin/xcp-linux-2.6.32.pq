@@ -1,0 +1,116 @@
+From f262cfb5e3b0732ff27bb9084a814d40e80e4683 Mon Sep 17 00:00:00 2001
+From: Daniel Stodden <daniel.stodden@citrix.com>
+Date: Tue, 3 Aug 2010 00:30:32 -0700
+Subject: [PATCH 03/18] xen/blktap: Register minors >= 256.
+
+The original register_chrdev call defaults to 256 minor numbers,
+hardcoded. Registering larger ranges takes detailed calls to register
+regions, and the cdev backing them.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+---
+ drivers/xen/blktap2/blktap.h  |    4 ++--
+ drivers/xen/blktap2/control.c |    2 +-
+ drivers/xen/blktap2/ring.c    |   34 ++++++++++++++++++++++++++--------
+ 3 files changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/xen/blktap2/blktap.h b/drivers/xen/blktap2/blktap.h
+index 12a7821..618e387 100644
+--- a/drivers/xen/blktap2/blktap.h
++++ b/drivers/xen/blktap2/blktap.h
+@@ -23,7 +23,7 @@ extern int blktap_debug_level;
+ #define BTWARN(_f, _a...)            BTPRINTK(0, KERN_WARNING, 0, _f, ##_a)
+ #define BTERR(_f, _a...)             BTPRINTK(0, KERN_ERR, 0, _f, ##_a)
+ 
+-#define MAX_BLKTAP_DEVICE            256
++#define MAX_BLKTAP_DEVICE            512
+ 
+ #define BLKTAP_CONTROL               1
+ #define BLKTAP_RING_FD               2
+@@ -177,7 +177,7 @@ blktap_active(struct blktap *tap)
+ int blktap_control_destroy_device(struct blktap *);
+ 
+ int blktap_ring_init(int *);
+-int blktap_ring_free(void);
++void blktap_ring_exit(void);
+ int blktap_ring_create(struct blktap *);
+ int blktap_ring_destroy(struct blktap *);
+ void blktap_ring_kick_user(struct blktap *);
+diff --git a/drivers/xen/blktap2/control.c b/drivers/xen/blktap2/control.c
+index 4b81a11..7eecc0c 100644
+--- a/drivers/xen/blktap2/control.c
++++ b/drivers/xen/blktap2/control.c
+@@ -221,7 +221,7 @@ static void
+ blktap_exit(void)
+ {
+ 	blktap_control_free();
+-	blktap_ring_free();
++	blktap_ring_exit();
+ 	blktap_sysfs_free();
+ 	blktap_device_free();
+ 	blktap_request_pool_free();
+diff --git a/drivers/xen/blktap2/ring.c b/drivers/xen/blktap2/ring.c
+index 807477d..74641fe 100644
+--- a/drivers/xen/blktap2/ring.c
++++ b/drivers/xen/blktap2/ring.c
+@@ -15,6 +15,7 @@
+ #endif
+ 
+ static int blktap_ring_major;
++static struct cdev blktap_ring_cdev;
+ 
+ static inline struct blktap *
+ vma_to_blktap(struct vm_area_struct *vma)
+@@ -450,24 +451,41 @@ blktap_ring_create(struct blktap *tap)
+ int __init
+ blktap_ring_init(int *major)
+ {
++	dev_t dev = 0;
+ 	int err;
+ 
+-	err = register_chrdev(0, "blktap2", &blktap_ring_file_operations);
++	cdev_init(&blktap_ring_cdev, &blktap_ring_file_operations);
++	blktap_ring_cdev.owner = THIS_MODULE;
++
++	err = alloc_chrdev_region(&dev, 0, MAX_BLKTAP_DEVICE, "blktap2");
+ 	if (err < 0) {
+-		BTERR("error registering blktap ring device: %d\n", err);
++		BTERR("error registering ring devices: %d\n", err);
++		return err;
++	}
++
++	err = cdev_add(&blktap_ring_cdev, dev, MAX_BLKTAP_DEVICE);
++	if (err) {
++		BTERR("error adding ring device: %d\n", err);
++		unregister_chrdev_region(dev, MAX_BLKTAP_DEVICE);
+ 		return err;
+ 	}
+ 
+-	blktap_ring_major = *major = err;
++	blktap_ring_major = MAJOR(dev);
+ 	BTINFO("blktap ring major: %d\n", blktap_ring_major);
++	*major = blktap_ring_major;
++
+ 	return 0;
+ }
+ 
+-int
+-blktap_ring_free(void)
++void
++blktap_ring_exit(void)
+ {
+-	if (blktap_ring_major)
+-		unregister_chrdev(blktap_ring_major, "blktap2");
++	if (!blktap_ring_major)
++		return;
+ 
+-	return 0;
++	cdev_del(&blktap_ring_cdev);
++	unregister_chrdev_region(MKDEV(blktap_ring_major, 0),
++				 MAX_BLKTAP_DEVICE);
++
++	blktap_ring_major = 0;
+ }
+-- 
+1.7.0.4
+

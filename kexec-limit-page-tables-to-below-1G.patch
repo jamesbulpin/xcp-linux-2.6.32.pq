@@ -1,0 +1,34 @@
+CA-47744: Limit kexec page tables to below 1GB.
+
+Page tables were being limited to below 4GB (see 2^32).
+
+Now limit them to below 1GB (2^30).
+Dont know why this helps, but without it the kexec purgatory code
+never gets executed (on some machines).
+
+---
+ arch/x86/kernel/machine_kexec_32.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+Index: linux-2.6.32.hg/arch/x86/kernel/machine_kexec_32.c
+===================================================================
+--- linux-2.6.32.hg.orig/arch/x86/kernel/machine_kexec_32.c	2010-11-10 15:21:46.730893394 +0000
++++ linux-2.6.32.hg/arch/x86/kernel/machine_kexec_32.c	2010-11-10 15:23:10.174911462 +0000
+@@ -45,7 +45,7 @@ static unsigned long get_kexec_pt_page(g
+ {
+ 	unsigned long page = get_zeroed_page(gfp);
+ #ifdef CONFIG_XEN
+-	if (xen_limit_pages_to_max_mfn(virt_to_page(page), 0, 32) < 0)
++	if (xen_limit_pages_to_max_mfn(virt_to_page(page), 0, 30) < 0)
+ 		return 0UL;
+ #endif
+ 	return page;
+@@ -53,7 +53,7 @@ static unsigned long get_kexec_pt_page(g
+ static int machine_kexec_alloc_page_tables(struct kimage *image)
+ {
+ #ifdef CONFIG_XEN
+-	if (xen_limit_pages_to_max_mfn(image->control_code_page, 0, 32) < 0)
++	if (xen_limit_pages_to_max_mfn(image->control_code_page, 0, 30) < 0)
+ 		return -ENOMEM;
+ #endif
+ 

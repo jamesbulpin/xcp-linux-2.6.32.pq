@@ -1,0 +1,122 @@
+blkback: Update higher order ring support.
+
+ - Make max_ring_page_order visible,
+   at /sys/module/blkbk/params/max_ring_page_order
+
+ - Make max_ring_page_order writable,
+   Including some consistency checks against BLKIF_MAX_RING_PAGE_ORDER
+   and blkbk.reqs.
+
+ - Bump up BLKIF_MAX_RING_PAGE_ORDER from 2 to 3.
+
+ - Drop some printks.
+
+Signed-off-by: Daniel Stodden <daniel.stodden@citrix.com>
+
+diff -r 1126a673fbad drivers/xen/blkback/blkback.c
+--- a/drivers/xen/blkback/blkback.c	Thu May 26 13:28:53 2011 -0700
++++ b/drivers/xen/blkback/blkback.c	Fri May 27 15:25:18 2011 -0700
+@@ -56,7 +56,7 @@
+  */
+ #define BLKIF_REQS_MIN 32
+ #define BLKIF_REQS_MAX 256
+-static int blkif_reqs = 64;
++int blkif_reqs = 64;
+ module_param_named(reqs, blkif_reqs, int, 0444);
+ MODULE_PARM_DESC(reqs, "Number of blkback requests to allocate");
+ 
+diff -r 1126a673fbad drivers/xen/blkback/common.h
+--- a/drivers/xen/blkback/common.h	Thu May 26 13:28:53 2011 -0700
++++ b/drivers/xen/blkback/common.h	Fri May 27 15:25:18 2011 -0700
+@@ -64,8 +64,12 @@
+ 
+ struct backend_info;
+ 
+-#define	BLKIF_MAX_RING_PAGE_ORDER 2
+-#define	BLKIF_MAX_RING_PAGES (1 << BLKIF_MAX_RING_PAGE_ORDER)
++#define BLKIF_MAX_RING_PAGE_ORDER 3
++#define BLKIF_MAX_RING_PAGES      (1 << BLKIF_MAX_RING_PAGE_ORDER)
++#define BLK_RING_SIZE(_order)     __CONST_RING_SIZE(blkif, PAGE_SIZE << (_order))
++
++extern int blkif_reqs;
++extern int blkif_max_ring_page_order;
+ 
+ typedef struct blkif_st {
+ 	/* Unique identifier for this interface. */
+diff -r 1126a673fbad drivers/xen/blkback/xenbus.c
+--- a/drivers/xen/blkback/xenbus.c	Thu May 26 13:28:53 2011 -0700
++++ b/drivers/xen/blkback/xenbus.c	Fri May 27 15:25:18 2011 -0700
+@@ -21,6 +21,7 @@
+ #include <linux/module.h>
+ #include <linux/kthread.h>
+ #include <linux/bitops.h>
++#include <linux/string.h>
+ #include "common.h"
+ 
+ #undef DPRINTK
+@@ -54,9 +55,35 @@
+ static void blkback_open_bdev(struct backend_info *);
+ 
+ /* Order of maximum shared ring size advertised to the front end. */
+-static int blkif_max_ring_page_order = 0;
+-module_param_named(max_ring_page_order, blkif_max_ring_page_order, int, 0);
+-MODULE_PARM_DESC(max_ring_page_order, "Order of maximum VM shared ring size");
++int blkif_max_ring_page_order = 0;
++
++static int blkback_set_max_ring_order(const char *buf, struct kernel_param *kp)
++{
++	int err;
++	unsigned long order;
++
++	err = strict_strtol(buf, 0, &order);
++	if (err ||
++	    order < 0 ||
++	    order > BLKIF_MAX_RING_PAGE_ORDER)
++		return -EINVAL;
++
++	if (blkif_reqs < BLK_RING_SIZE(order))
++		printk(KERN_WARNING "WARNING: "
++		       "I/O request space (%d reqs) < ring order %ld, "
++		       "consider increasing %s.reqs to >= %ld.",
++		       blkif_reqs, order, KBUILD_MODNAME,
++		       roundup_pow_of_two(BLK_RING_SIZE(order)));
++
++	blkif_max_ring_page_order = order;
++
++	return 0;
++}
++
++module_param_call(max_ring_page_order,
++		  blkback_set_max_ring_order, param_get_int,
++		  &blkif_max_ring_page_order, 0644);
++MODULE_PARM_DESC(max_ring_order, "log2 of maximum ring size, in pages.");
+ 
+ /*
+  * Signal queue start/stop back to userspace. Either by ack'ing ops
+@@ -943,14 +970,12 @@
+ 			return err;
+ 		}
+ 
+-		DPRINTK("%s: using %u page(s)", dev->otherend,
+-			(1 << ring_order));
+-
+ 		for (i = 0; i < (1u << ring_order); i++) {
+ 			char ring_ref_name[10];
+ 
+ 			snprintf(ring_ref_name, sizeof (ring_ref_name),
+-				 "ring-ref%1u", i);
++				 "ring-ref%u", i);
++
+ 			err = xenbus_scanf(XBT_NIL, dev->otherend,
+ 					   ring_ref_name, "%lu",
+ 					   &ring_ref[i]);
+@@ -1029,9 +1054,6 @@
+ 
+ void blkif_xenbus_init(void)
+ {
+-	if (blkif_max_ring_page_order > BLKIF_MAX_RING_PAGE_ORDER)
+-		blkif_max_ring_page_order = BLKIF_MAX_RING_PAGE_ORDER;
+-
+ 	if (xenbus_register_backend(&blkback))
+ 		BUG();
+ }

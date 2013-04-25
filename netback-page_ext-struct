@@ -1,0 +1,204 @@
+Re-jig the page_ext union and create a page_ext structure.
+
+Combine the group/idx pair into the new struct wherever they crop up. Also
+use a reserved bit in the struct to ensure pg->mapping never evaluates to
+NULL, rather then incrementing the group index.
+
+diff -r d920d9d3ce38 drivers/xen/netback/common.h
+--- a/drivers/xen/netback/common.h	Fri Mar 11 10:55:58 2011 +0000
++++ b/drivers/xen/netback/common.h	Fri Mar 11 11:37:29 2011 +0000
+@@ -255,9 +255,25 @@ int netif_xenbus_init(void);
+ #define netif_schedulable(netif)				\
+ 	(netif_running((netif)->dev) && netback_carrier_ok(netif))
+ 
++/* extra field used in struct page */
++struct page_ext {
++#if BITS_PER_LONG < 64
++#define IDX_WIDTH   8
++#define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH - 1)
++	unsigned int reserved:1;
++	unsigned int group:GROUP_WIDTH;
++	unsigned int idx:IDX_WIDTH;
++#else
++#define GROUP_WIDTH (BITS_PER_LONG - 1)
++	unsigned int reserved:1;
++	unsigned int group:GROUP_WIDTH;
++	unsigned int idx;
++#endif
++};
++
+ void netif_schedule_work(struct xen_netif *netif);
+ void netif_deschedule_work(struct xen_netif *netif);
+-int netif_get_page_ext(struct page *pg, unsigned int *_group, unsigned int *_idx);
++int netif_get_page_ext(struct page *pg, struct page_ext *ext);
+ 
+ int netbk_p0_queue_full(struct xen_netif *netif);
+ void netbk_p0_start_xmit(struct xen_netif *netif, struct sk_buff *skb);
+@@ -307,18 +323,8 @@ struct netbk_tx_pending_inuse {
+ 
+ #define MAX_BUFFER_OFFSET PAGE_SIZE
+ 
+-/* extra field used in struct page */
+-union page_ext {
+-	struct {
+-#if BITS_PER_LONG < 64
+-#define IDX_WIDTH   8
+-#define GROUP_WIDTH (BITS_PER_LONG - IDX_WIDTH)
+-		unsigned int group:GROUP_WIDTH;
+-		unsigned int idx:IDX_WIDTH;
+-#else
+-		unsigned int group, idx;
+-#endif
+-	} e;
++union page_mapping_overlay {
++	struct page_ext	ext;
+ 	void *mapping;
+ };
+ 
+diff -r d920d9d3ce38 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Fri Mar 11 10:55:58 2011 +0000
++++ b/drivers/xen/netback/netback.c	Fri Mar 11 11:37:29 2011 +0000
+@@ -73,44 +73,43 @@ static inline unsigned long idx_to_kaddr
+ }
+ 
+ /* extra field used in struct page */
+-static inline void netif_set_page_ext(struct page *pg, unsigned int group,
+-		unsigned int idx)
++static inline void netif_set_page_ext(struct page *pg, struct page_ext *ext)
+ {
+-	union page_ext ext = { .e = { .group = group + 1, .idx = idx } };
++	union page_mapping_overlay ovl;
+ 
+-	BUILD_BUG_ON(sizeof(ext) > sizeof(ext.mapping));
+-	pg->mapping = ext.mapping;
++	ovl.ext = *ext;
++
++	/* Make syre pg->mapping never evaluates to NULL */
++	ovl.ext.reserved = 1;
++
++	BUILD_BUG_ON(sizeof(ovl.ext) > sizeof(ovl.mapping));
++	pg->mapping = ovl.mapping;
+ }
+ 
+-int netif_get_page_ext(struct page *pg, unsigned int *_group, unsigned int *_idx)
++int netif_get_page_ext(struct page *pg, struct page_ext *ext)
+ {
+-	union page_ext ext = { .mapping = pg->mapping };
++	union page_mapping_overlay ovl;
+ 	struct xen_netbk *netbk;
+-	unsigned int group, idx;
+ 
+ 	if (!PageForeign(pg))
+ 		return 0;
+ 
+-	group = ext.e.group - 1;
++	ovl.mapping = pg->mapping;
++	*ext = ovl.ext;
+ 
+-	if (group < 0 || group >= xen_netbk_group_nr)
++	if (ext->group < 0 || ext->group >= xen_netbk_group_nr)
+ 		return 0;
+ 
+-	netbk = &xen_netbk[group];
++	netbk = &xen_netbk[ext->group];
+ 
+ 	if (netbk->mmap_pages == NULL)
+ 		return 0;
+ 
+-	idx = ext.e.idx;
+-
+-	if ((idx < 0) || (idx >= MAX_PENDING_REQS))
++	if ((ext->idx < 0) || (ext->idx >= MAX_PENDING_REQS))
+ 		return 0;
+ 
+-	if (netbk->mmap_pages[idx] != pg)
++	if (netbk->mmap_pages[ext->idx] != pg)
+ 		return 0;
+-
+-	*_group = group;
+-	*_idx = idx;
+ 
+ 	return 1;
+ }
+@@ -195,12 +194,8 @@ static void netbk_gop_frag_copy(struct x
+ 	struct netbk_protocol0 *p0 = &netif->rx.p0;
+ 	struct gnttab_copy *copy_gop;
+ 	struct netbk_rx_meta *meta;
+-	/*
+-	 * These variables a used iff netif_get_page_ext returns true,
+-	 * in which case they are guaranteed to be initialized.
+-         */
+-	unsigned int uninitialized_var(group), uninitialized_var(idx);
+-	int foreign = netif_get_page_ext(page, &group, &idx);
++	struct page_ext ext;
++	int foreign = netif_get_page_ext(page, &ext);
+ 	unsigned long bytes;
+ 
+ 	/* Data must not cross a page boundary. */
+@@ -259,10 +254,10 @@ static void netbk_gop_frag_copy(struct x
+ 		copy_gop = npo->copy + npo->copy_prod++;
+ 		copy_gop->flags = GNTCOPY_dest_gref;
+ 		if (foreign) {
+-			struct xen_netbk *netbk = &xen_netbk[group];
++			struct xen_netbk *netbk = &xen_netbk[ext.group];
+ 			struct pending_tx_info *src_pend;
+ 
+-			src_pend = &netbk->pending_tx_info[idx];
++			src_pend = &netbk->pending_tx_info[ext.idx];
+ 
+ 			copy_gop->source.domid = src_pend->netif->domid;
+ 			copy_gop->source.u.ref = src_pend->req.gref;
+@@ -1416,13 +1411,13 @@ static void netif_idx_release(struct xen
+ 
+ static void netif_page_release(struct page *page, unsigned int order)
+ {
+-	unsigned int group, idx;
+-	int foreign = netif_get_page_ext(page, &group, &idx);
++	struct page_ext ext;
++	int foreign = netif_get_page_ext(page, &ext);
+ 
+ 	BUG_ON(!foreign);
+ 	BUG_ON(order);
+ 
+-	netif_idx_release(&xen_netbk[group], idx);
++	netif_idx_release(&xen_netbk[ext.group], ext.idx);
+ }
+ 
+ static void make_tx_response(struct xen_netif *netif,
+@@ -1623,9 +1618,10 @@ static int __init netback_init(void)
+ 		}
+ 
+ 		for (i = 0; i < MAX_PENDING_REQS; i++) {
++			struct page_ext ext = { .group = group, .idx = i };
+ 			page = netbk->mmap_pages[i];
+ 			SetPageForeign(page, netif_page_release);
+-			netif_set_page_ext(page, group, i);
++			netif_set_page_ext(page, &ext);
+ 			INIT_LIST_HEAD(&netbk->pending_inuse[i].list);
+ 		}
+ 
+diff -r d920d9d3ce38 drivers/xen/netback/tx.c
+--- a/drivers/xen/netback/tx.c	Fri Mar 11 10:55:58 2011 +0000
++++ b/drivers/xen/netback/tx.c	Fri Mar 11 11:37:29 2011 +0000
+@@ -308,8 +308,8 @@ static void grant_tag(struct xen_netif *
+ static void grant_tag(struct xen_netif *netif, struct netbk_tag *tag, struct page *page,
+ 		      int offset, int len)
+ {
+-	unsigned int group, idx;
+-	int foreign = netif_get_page_ext(page, &group, &idx);
++	struct page_ext ext;
++	int foreign = netif_get_page_ext(page, &ext);
+ 
+ 	BUG_ON(offset > PAGE_SIZE);
+ 	BUG_ON(offset + len > PAGE_SIZE);
+@@ -318,8 +318,8 @@ static void grant_tag(struct xen_netif *
+ 		struct xen_netbk *netbk;
+ 		struct pending_tx_info *info;
+ 
+-		netbk = &xen_netbk[group];
+-		info = &netbk->pending_tx_info[idx];
++		netbk = &xen_netbk[ext.group];
++		info = &netbk->pending_tx_info[ext.idx];
+ 
+ 		gnttab_grant_foreign_access_ref_trans(tag->gref, netif->domid,
+ 						      GTF_readonly, info->netif->domid,
